@@ -1,0 +1,91 @@
+{
+  "guild_id": "1460856535927488661",
+  "guild_name": "Licka Store",
+  "category": "monthly_chat",
+  "title": "Monthly Chatter",
+  "subtitle": "March 2026 • 2026-03-01 to 2026-03-14 (UTC)",
+  "generated_at": "2026-03-14T19:29:58Z",
+  "limit": 10,
+  "entries": [
+    {
+      "rank": 1,
+      "user_id": "617011888680861708",
+      "username": "eugene",
+      "avatar_url": "https://cdn.discordapp.com/guilds/1460856535927488661/users/617011888680861708/avatars/c07a7ecb7af460c94748f13b19e16431.png?size=1024",
+      "primary_value": 5463,
+      "display_value": "5,463 msgs"
+    },
+    {
+      "rank": 2,
+      "user_id": "1203074504642011170",
+      "username": "Barry",
+      "avatar_url": "https://cdn.discordapp.com/guilds/1460856535927488661/users/1203074504642011170/avatars/f86633e1ec5cf8161db5a66b9766730f.png?size=1024",
+      "primary_value": 3884,
+      "display_value": "3,884 msgs"
+    },
+    {
+      "rank": 3,
+      "user_id": "433796957920821248",
+      "username": "gurt",
+      "avatar_url": "https://cdn.discordapp.com/guilds/1460856535927488661/users/433796957920821248/avatars/deb7cc339951402c058e694286ab83a3.png?size=1024",
+      "primary_value": 2516,
+      "display_value": "2,516 msgs"
+    },
+    {
+      "rank": 4,
+      "user_id": "757325971312607233",
+      "username": "Trugglr",
+      "avatar_url": "https://cdn.discordapp.com/avatars/757325971312607233/412649f578211925d94d966c98c8ca53.png?size=1024",
+      "primary_value": 2013,
+      "display_value": "2,013 msgs"
+    },
+    {
+      "rank": 5,
+      "user_id": "164938076806840321",
+      "username": "Gravity Peelz",
+      "avatar_url": "https://cdn.discordapp.com/avatars/164938076806840321/24b92bee0c59dde559328f0a8645965c.png?size=1024",
+      "primary_value": 1714,
+      "display_value": "1,714 msgs"
+    },
+    {
+      "rank": 6,
+      "user_id": "1198362731082956902",
+      "username": "brithoven",
+      "avatar_url": "https://cdn.discordapp.com/avatars/1198362731082956902/a_b2531be152fd54a0f04863355b7d281d.gif?size=1024",
+      "primary_value": 1550,
+      "display_value": "1,550 msgs"
+    },
+    {
+      "rank": 7,
+      "user_id": "232280657370415106",
+      "username": "27",
+      "avatar_url": "https://cdn.discordapp.com/avatars/232280657370415106/a46dd817fc03ffbe777eb9f4d85ac0b5.png?size=1024",
+      "primary_value": 1220,
+      "display_value": "1,220 msgs"
+    },
+    {
+      "rank": 8,
+      "user_id": "782110482780651530",
+      "username": "grace",
+      "avatar_url": "https://cdn.discordapp.com/guilds/1460856535927488661/users/782110482780651530/avatars/d689752992987bd6f0518b1cf955b5bb.png?size=1024",
+      "primary_value": 1061,
+      "display_value": "1,061 msgs"
+    },
+    {
+      "rank": 9,
+      "user_id": "190881044893925376",
+      "username": "eevee",
+      "avatar_url": "https://cdn.discordapp.com/avatars/190881044893925376/8e4211b7c39f12a81c83c6d099c17eb3.png?size=1024",
+      "primary_value": 994,
+      "display_value": "994 msgs"
+    },
+    {
+      "rank": 10,
+      "user_id": "607745059386818560",
+      "username": "beep",
+      "avatar_url": "https://cdn.discordapp.com/guilds/1460856535927488661/users/607745059386818560/avatars/5af1d7d2d0e577db5fc1a22a94ce99e9.png?size=1024",
+      "primary_value": 701,
+      "display_value": "701 msgs"
+    }
+  ]
+}

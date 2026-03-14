@@ -1,0 +1,91 @@
+{
+  "guild_id": "1460856535927488661",
+  "guild_name": "Licka Store",
+  "category": "vctime",
+  "title": "Most VC Time",
+  "subtitle": "Tracked since 2026-01-25 (UTC)",
+  "generated_at": "2026-03-14T19:30:00Z",
+  "limit": 10,
+  "entries": [
+    {
+      "rank": 1,
+      "user_id": "326498486335963137",
+      "username": "zoloft ˙𐃷˙",
+      "avatar_url": "https://cdn.discordapp.com/avatars/326498486335963137/51826ec7d8a70782a87450dec9187530.png?size=1024",
+      "primary_value": 352800,
+      "display_value": "98h 00m"
+    },
+    {
+      "rank": 2,
+      "user_id": "537375301915901975",
+      "username": "Kai",
+      "avatar_url": "https://cdn.discordapp.com/avatars/537375301915901975/ff57c1e091f8643f156689770b845fbc.png?size=1024",
+      "primary_value": 256920,
+      "display_value": "71h 22m"
+    },
+    {
+      "rank": 3,
+      "user_id": "1203074504642011170",
+      "username": "Barry",
+      "avatar_url": "https://cdn.discordapp.com/guilds/1460856535927488661/users/1203074504642011170/avatars/f86633e1ec5cf8161db5a66b9766730f.png?size=1024",
+      "primary_value": 170160,
+      "display_value": "47h 16m"
+    },
+    {
+      "rank": 4,
+      "user_id": "617011888680861708",
+      "username": "eugene",
+      "avatar_url": "https://cdn.discordapp.com/guilds/1460856535927488661/users/617011888680861708/avatars/c07a7ecb7af460c94748f13b19e16431.png?size=1024",
+      "primary_value": 153540,
+      "display_value": "42h 39m"
+    },
+    {
+      "rank": 5,
+      "user_id": "220333594697007105",
+      "username": "Nick",
+      "avatar_url": "https://cdn.discordapp.com/guilds/1460856535927488661/users/220333594697007105/avatars/2d4eb8e27702c002ff6f973ff275715f.png?size=1024",
+      "primary_value": 111420,
+      "display_value": "30h 57m"
+    },
+    {
+      "rank": 6,
+      "user_id": "782110482780651530",
+      "username": "grace",
+      "avatar_url": "https://cdn.discordapp.com/guilds/1460856535927488661/users/782110482780651530/avatars/d689752992987bd6f0518b1cf955b5bb.png?size=1024",
+      "primary_value": 67680,
+      "display_value": "18h 48m"
+    },
+    {
+      "rank": 7,
+      "user_id": "433796957920821248",
+      "username": "gurt",
+      "avatar_url": "https://cdn.discordapp.com/guilds/1460856535927488661/users/433796957920821248/avatars/deb7cc339951402c058e694286ab83a3.png?size=1024",
+      "primary_value": 64080,
+      "display_value": "17h 48m"
+    },
+    {
+      "rank": 8,
+      "user_id": "757325971312607233",
+      "username": "Trugglr",
+      "avatar_url": "https://cdn.discordapp.com/avatars/757325971312607233/412649f578211925d94d966c98c8ca53.png?size=1024",
+      "primary_value": 60000,
+      "display_value": "16h 40m"
+    },
+    {
+      "rank": 9,
+      "user_id": "231194997586788352",
+      "username": "intellectualgreed",
+      "avatar_url": "https://cdn.discordapp.com/avatars/231194997586788352/e311a2e9a39d70cfac02354182d10d71.png?size=1024",
+      "primary_value": 50880,
+      "display_value": "14h 08m"
+    },
+    {
+      "rank": 10,
+      "user_id": "530472188768157696",
+      "username": "Kai Cenat 🖤",
+      "avatar_url": "https://cdn.discordapp.com/avatars/530472188768157696/8c8ee2eb3e9cfc1bda33ece2f0f42bdc.png?size=1024",
+      "primary_value": 47220,
+      "display_value": "13h 07m"
+    }
+  ]
+}

@@ -1,0 +1,884 @@
+{
+  "1460856535927488661": {
+    "104275887280631808": {
+      "last_rewarded_level": 63,
+      "updated_at": 1772474231.8170786
+    },
+    "190881044893925376": {
+      "last_rewarded_level": 75,
+      "updated_at": 1773073023.3576372
+    },
+    "220333594697007105": {
+      "last_rewarded_level": 89,
+      "updated_at": 1773073023.642899
+    },
+    "231194997586788352": {
+      "last_rewarded_level": 67,
+      "updated_at": 1773516129.0531502
+    },
+    "312685078134128640": {
+      "last_rewarded_level": 2,
+      "updated_at": 1769392229.0178921
+    },
+    "326498486335963137": {
+      "last_rewarded_level": 105,
+      "updated_at": 1773516129.2730145
+    },
+    "362287358026055690": {
+      "last_rewarded_level": 3,
+      "updated_at": 1769392229.2205112
+    },
+    "408386215717502976": {
+      "last_rewarded_level": 74,
+      "updated_at": 1772940220.6693726
+    },
+    "433796957920821248": {
+      "last_rewarded_level": 92,
+      "updated_at": 1773516129.485583
+    },
+    "440644182839656451": {
+      "last_rewarded_level": 20,
+      "updated_at": 1769392229.7794075
+    },
+    "483913571160293397": {
+      "last_rewarded_level": 3,
+      "updated_at": 1769392229.779729
+    },
+    "530472188768157696": {
+      "last_rewarded_level": 70,
+      "updated_at": 1773516129.7104042
+    },
+    "537375301915901975": {
+      "last_rewarded_level": 105,
+      "updated_at": 1773516129.9209151
+    },
+    "601692838102827009": {
+      "last_rewarded_level": 16,
+      "updated_at": 1773516129.9288166
+    },
+    "607745059386818560": {
+      "last_rewarded_level": 45,
+      "updated_at": 1773516130.1470816
+    },
+    "617011888680861708": {
+      "last_rewarded_level": 105,
+      "updated_at": 1773073024.5050817
+    },
+    "683523584232390689": {
+      "last_rewarded_level": 3,
+      "updated_at": 1769392231.09492
+    },
+    "689523677481402458": {
+      "last_rewarded_level": 13,
+      "updated_at": 1769929855.5961895
+    },
+    "693320693915451442": {
+      "last_rewarded_level": 3,
+      "updated_at": 1769392231.0954418
+    },
+    "698047115427053580": {
+      "last_rewarded_level": 20,
+      "updated_at": 1772940221.3029335
+    },
+    "709990249119612948": {
+      "last_rewarded_level": 15,
+      "updated_at": 1773362143.6051657
+    },
+    "724111634955501628": {
+      "last_rewarded_level": 1,
+      "updated_at": 1769392231.096191
+    },
+    "726538610622332989": {
+      "last_rewarded_level": 21,
+      "updated_at": 1772262433.0304036
+    },
+    "743089369589481543": {
+      "last_rewarded_level": 15,
+      "updated_at": 1771263642.3226378
+    },
+    "757325971312607233": {
+      "last_rewarded_level": 89,
+      "updated_at": 1773362143.8992896
+    },
+    "768318133320286250": {
+      "last_rewarded_level": 2,
+      "updated_at": 1769392231.655953
+    },
+    "782110482780651530": {
+      "last_rewarded_level": 78,
+      "updated_at": 1773516130.6439004
+    },
+    "788387818393042954": {
+      "last_rewarded_level": 4,
+      "updated_at": 1769392231.6565387
+    },
+    "788980559489138689": {
+      "last_rewarded_level": 24,
+      "updated_at": 1773073025.6969469
+    },
+    "812794447115976724": {
+      "last_rewarded_level": 1,
+      "updated_at": 1769392231.657092
+    },
+    "816901853433823263": {
+      "last_rewarded_level": 6,
+      "updated_at": 1772262433.0315704
+    },
+    "845363200521928725": {
+      "last_rewarded_level": 13,
+      "updated_at": 1772262433.0339856
+    },
+    "864553348476698624": {
+      "last_rewarded_level": 1,
+      "updated_at": 1769392231.979777
+    },
+    "877582082132553821": {
+      "last_rewarded_level": 31,
+      "updated_at": 1772114659.5143294
+    },
+    "920205509620019241": {
+      "last_rewarded_level": 38,
+      "updated_at": 1772474234.498447
+    },
+    "928968748520587305": {
+      "last_rewarded_level": 28,
+      "updated_at": 1772114659.5189707
+    },
+    "941791860916125697": {
+      "last_rewarded_level": 49,
+      "updated_at": 1772940221.9373705
+    },
+    "966782241319559188": {
+      "last_rewarded_level": 30,
+      "updated_at": 1773362144.186655
+    },
+    "1004746306952101958": {
+      "last_rewarded_level": 71,
+      "updated_at": 1772838599.67324
+    },
+    "1075837249939308606": {
+      "last_rewarded_level": 45,
+      "updated_at": 1773516131.1044905
+    },
+    "1078372337151381585": {
+      "last_rewarded_level": 23,
+      "updated_at": 1769392233.9981296
+    },
+    "1111768183427317862": {
+      "last_rewarded_level": 4,
+      "updated_at": 1772940222.1591513
+    },
+    "1124180200687665233": {
+      "last_rewarded_level": 14,
+      "updated_at": 1771447153.6345382
+    },
+    "1190102031294283829": {
+      "last_rewarded_level": 4,
+      "updated_at": 1769392233.99968
+    },
+    "1198362731082956902": {
+      "last_rewarded_level": 70,
+      "updated_at": 1772838600.5561016
+    },
+    "1203074504642011170": {
+      "last_rewarded_level": 102,
+      "updated_at": 1773073026.5538182
+    },
+    "1235339031303290941": {
+      "last_rewarded_level": 9,
+      "updated_at": 1772940222.4126148
+    },
+    "1265490259328634984": {
+      "last_rewarded_level": 7,
+      "updated_at": 1773362144.755199
+    },
+    "1283324120641048680": {
+      "last_rewarded_level": 102,
+      "updated_at": 1772713483.6739154
+    },
+    "1288879954238373892": {
+      "last_rewarded_level": 70,
+      "updated_at": 1772713483.877772
+    },
+    "1344900446417981490": {
+      "last_rewarded_level": 53,
+      "updated_at": 1773073026.8481555
+    },
+    "1358887839948865711": {
+      "last_rewarded_level": 12,
+      "updated_at": 1769392235.6534069
+    },
+    "1376555668026167449": {
+      "last_rewarded_level": 11,
+      "updated_at": 1769392235.8869436
+    },
+    "1388068708550705172": {
+      "last_rewarded_level": 20,
+      "updated_at": 1772114660.8724098
+    },
+    "1407738923869802619": {
+      "last_rewarded_level": 25,
+      "updated_at": 1771795608.5140405
+    },
+    "1418458268195487826": {
+      "last_rewarded_level": 2,
+      "updated_at": 1772114660.875691
+    },
+    "1431314367726489701": {
+      "last_rewarded_level": 65,
+      "updated_at": 1771263643.9678912
+    },
+    "1443412675999698964": {
+      "last_rewarded_level": 30,
+      "updated_at": 1769463541.0951009
+    },
+    "1445087459821093007": {
+      "last_rewarded_level": 2,
+      "updated_at": 1769392236.742192
+    },
+    "1445271615767056498": {
+      "last_rewarded_level": 2,
+      "updated_at": 1769392236.7425983
+    },
+    "1460135572369702997": {
+      "last_rewarded_level": 27,
+      "updated_at": 1773073026.8524861
+    },
+    "971623784421425183": {
+      "last_rewarded_level": 35,
+      "updated_at": 1773516130.8800073
+    },
+    "179965485889093632": {
+      "last_rewarded_level": 15,
+      "updated_at": 1772474232.4045947
+    },
+    "276580863272288256": {
+      "last_rewarded_level": 42,
+      "updated_at": 1773362143.0439298
+    },
+    "1099197331045359687": {
+      "last_rewarded_level": 17,
+      "updated_at": 1773362144.733157
+    },
+    "1450375394975944795": {
+      "last_rewarded_level": 5,
+      "updated_at": 1769463541.095662
+    },
+    "1405751737305923596": {
+      "last_rewarded_level": 1,
+      "updated_at": 1769466442.5954864
+    },
+    "446102159445196815": {
+      "last_rewarded_level": 10,
+      "updated_at": 1771795603.398981
+    },
+    "1281322659648507927": {
+      "last_rewarded_level": 6,
+      "updated_at": 1769620588.4775221
+    },
+    "1404964588130271415": {
+      "last_rewarded_level": 2,
+      "updated_at": 1769530691.9226964
+    },
+    "664607903914655746": {
+      "last_rewarded_level": 2,
+      "updated_at": 1769620588.0007231
+    },
+    "753631046100189184": {
+      "last_rewarded_level": 1,
+      "updated_at": 1769620588.2003167
+    },
+    "802339943883210752": {
+      "last_rewarded_level": 1,
+      "updated_at": 1769620588.200827
+    },
+    "376521187448193026": {
+      "last_rewarded_level": 1,
+      "updated_at": 1769902311.6548848
+    },
+    "474334697820782592": {
+      "last_rewarded_level": 1,
+      "updated_at": 1769902311.830976
+    },
+    "723696195125510276": {
+      "last_rewarded_level": 32,
+      "updated_at": 1770757469.2724094
+    },
+    "991436068991799418": {
+      "last_rewarded_level": 1,
+      "updated_at": 1769902314.1131804
+    },
+    "1230853867663523880": {
+      "last_rewarded_level": 7,
+      "updated_at": 1769902314.3929138
+    },
+    "744258350283227227": {
+      "last_rewarded_level": 4,
+      "updated_at": 1769929855.5967433
+    },
+    "375823461337268244": {
+      "last_rewarded_level": 2,
+      "updated_at": 1770757466.7245703
+    },
+    "423635374032814080": {
+      "last_rewarded_level": 15,
+      "updated_at": 1770757467.1914773
+    },
+    "470074015126388771": {
+      "last_rewarded_level": 2,
+      "updated_at": 1771795603.4021006
+    },
+    "471494307459891220": {
+      "last_rewarded_level": 2,
+      "updated_at": 1770757467.4793096
+    },
+    "706615357640540170": {
+      "last_rewarded_level": 20,
+      "updated_at": 1770757468.5384777
+    },
+    "719358939438776363": {
+      "last_rewarded_level": 13,
+      "updated_at": 1771812131.283719
+    },
+    "839878366207279177": {
+      "last_rewarded_level": 3,
+      "updated_at": 1771263642.5257318
+    },
+    "869272971150241874": {
+      "last_rewarded_level": 18,
+      "updated_at": 1771795605.8950183
+    },
+    "907507186861740082": {
+      "last_rewarded_level": 2,
+      "updated_at": 1770757470.0723727
+    },
+    "955860283446947911": {
+      "last_rewarded_level": 1,
+      "updated_at": 1770757470.3988993
+    },
+    "974705817284653158": {
+      "last_rewarded_level": 3,
+      "updated_at": 1772713482.6235023
+    },
+    "975797320069300244": {
+      "last_rewarded_level": 2,
+      "updated_at": 1770757470.6981335
+    },
+    "1175742386962448415": {
+      "last_rewarded_level": 3,
+      "updated_at": 1770757471.3991225
+    },
+    "1193828400574509188": {
+      "last_rewarded_level": 11,
+      "updated_at": 1771549069.451817
+    },
+    "1305060542121246791": {
+      "last_rewarded_level": 11,
+      "updated_at": 1770757472.6047647
+    },
+    "1317566482103795734": {
+      "last_rewarded_level": 1,
+      "updated_at": 1770757472.6072922
+    },
+    "1445321402516242503": {
+      "last_rewarded_level": 1,
+      "updated_at": 1770757473.0962515
+    },
+    "1454172695485878344": {
+      "last_rewarded_level": 1,
+      "updated_at": 1770757473.0970066
+    },
+    "109284615486738432": {
+      "last_rewarded_level": 20,
+      "updated_at": 1771263640.1614423
+    },
+    "208469504886308874": {
+      "last_rewarded_level": 6,
+      "updated_at": 1771263640.3797827
+    },
+    "230782758753009664": {
+      "last_rewarded_level": 24,
+      "updated_at": 1771263640.8170173
+    },
+    "232280657370415106": {
+      "last_rewarded_level": 50,
+      "updated_at": 1773362142.8306699
+    },
+    "395555550328389634": {
+      "last_rewarded_level": 3,
+      "updated_at": 1771447152.5658307
+    },
+    "478665278985601030": {
+      "last_rewarded_level": 4,
+      "updated_at": 1772114658.4663916
+    },
+    "544452031465914370": {
+      "last_rewarded_level": 1,
+      "updated_at": 1771263641.6775074
+    },
+    "657064347679588363": {
+      "last_rewarded_level": 12,
+      "updated_at": 1771263642.1109087
+    },
+    "717270011437252628": {
+      "last_rewarded_level": 6,
+      "updated_at": 1771263642.1133761
+    },
+    "856589565485121538": {
+      "last_rewarded_level": 10,
+      "updated_at": 1772114659.5107841
+    },
+    "982700708086313011": {
+      "last_rewarded_level": 1,
+      "updated_at": 1771263642.5432463
+    },
+    "1423584196013592686": {
+      "last_rewarded_level": 2,
+      "updated_at": 1771263643.7659335
+    },
+    "1439557844100710475": {
+      "last_rewarded_level": 8,
+      "updated_at": 1771447154.4157956
+    },
+    "1442707565707530300": {
+      "last_rewarded_level": 11,
+      "updated_at": 1772114661.0894828
+    },
+    "1465866142022111335": {
+      "last_rewarded_level": 15,
+      "updated_at": 1771263644.4093862
+    },
+    "1469872989750431876": {
+      "last_rewarded_level": 4,
+      "updated_at": 1771263644.4105062
+    },
+    "822684319066751039": {
+      "last_rewarded_level": 6,
+      "updated_at": 1771447153.4205291
+    },
+    "957342762129317889": {
+      "last_rewarded_level": 4,
+      "updated_at": 1771549069.2109337
+    },
+    "1442919150665338910": {
+      "last_rewarded_level": 4,
+      "updated_at": 1772474235.9282813
+    },
+    "159837545029566465": {
+      "last_rewarded_level": 2,
+      "updated_at": 1771795600.7026315
+    },
+    "164938076806840321": {
+      "last_rewarded_level": 90,
+      "updated_at": 1773516128.8382175
+    },
+    "183047949385859072": {
+      "last_rewarded_level": 13,
+      "updated_at": 1772474232.406674
+    },
+    "290665809666113538": {
+      "last_rewarded_level": 5,
+      "updated_at": 1771795602.1863387
+    },
+    "292917182457970689": {
+      "last_rewarded_level": 3,
+      "updated_at": 1772114657.607886
+    },
+    "334232675219144714": {
+      "last_rewarded_level": 5,
+      "updated_at": 1771795602.4730093
+    },
+    "383083882708336643": {
+      "last_rewarded_level": 2,
+      "updated_at": 1771795602.4753287
+    },
+    "404831771096776704": {
+      "last_rewarded_level": 10,
+      "updated_at": 1772945083.502636
+    },
+    "484863477983477790": {
+      "last_rewarded_level": 58,
+      "updated_at": 1773073024.2182858
+    },
+    "525110729167339540": {
+      "last_rewarded_level": 2,
+      "updated_at": 1771795603.4101768
+    },
+    "681086008242077699": {
+      "last_rewarded_level": 23,
+      "updated_at": 1772713482.3665383
+    },
+    "791643471475638292": {
+      "last_rewarded_level": 2,
+      "updated_at": 1771795605.8937614
+    },
+    "871834435237068831": {
+      "last_rewarded_level": 3,
+      "updated_at": 1771795605.896011
+    },
+    "914430438397857803": {
+      "last_rewarded_level": 4,
+      "updated_at": 1771795605.898825
+    },
+    "961244029390061608": {
+      "last_rewarded_level": 9,
+      "updated_at": 1771795605.9012628
+    },
+    "1133297984793214976": {
+      "last_rewarded_level": 2,
+      "updated_at": 1771795606.1961718
+    },
+    "1176225623224635515": {
+      "last_rewarded_level": 3,
+      "updated_at": 1771795606.1984406
+    },
+    "1263228858086326294": {
+      "last_rewarded_level": 1,
+      "updated_at": 1771795606.7884197
+    },
+    "1337885297710731397": {
+      "last_rewarded_level": 2,
+      "updated_at": 1771815624.1576746
+    },
+    "1361723453593489428": {
+      "last_rewarded_level": 16,
+      "updated_at": 1771795608.2223794
+    },
+    "1413403125951365150": {
+      "last_rewarded_level": 3,
+      "updated_at": 1771795608.5168521
+    },
+    "1474851345365471313": {
+      "last_rewarded_level": 5,
+      "updated_at": 1771795608.5233397
+    },
+    "266657293091864586": {
+      "last_rewarded_level": 44,
+      "updated_at": 1772474233.1474764
+    },
+    "334109364765851649": {
+      "last_rewarded_level": 11,
+      "updated_at": 1772942133.8900795
+    },
+    "419949743016378410": {
+      "last_rewarded_level": 1,
+      "updated_at": 1772114658.1725008
+    },
+    "868989794364031036": {
+      "last_rewarded_level": 2,
+      "updated_at": 1772114659.5126188
+    },
+    "885933943067672576": {
+      "last_rewarded_level": 3,
+      "updated_at": 1772114659.517268
+    },
+    "938574214825390110": {
+      "last_rewarded_level": 4,
+      "updated_at": 1772114659.5205503
+    },
+    "968631913248071750": {
+      "last_rewarded_level": 4,
+      "updated_at": 1772114659.5220892
+    },
+    "1059276743007027210": {
+      "last_rewarded_level": 1,
+      "updated_at": 1772114659.8121943
+    },
+    "1078649028646015037": {
+      "last_rewarded_level": 1,
+      "updated_at": 1772114659.8134468
+    },
+    "1114732607809257482": {
+      "last_rewarded_level": 2,
+      "updated_at": 1772114659.8146973
+    },
+    "1120368207803469854": {
+      "last_rewarded_level": 59,
+      "updated_at": 1773073026.2688913
+    },
+    "1416042726285115452": {
+      "last_rewarded_level": 5,
+      "updated_at": 1772114660.8742507
+    },
+    "1473460873212203240": {
+      "last_rewarded_level": 53,
+      "updated_at": 1773362145.3338237
+    },
+    "1475927519109578803": {
+      "last_rewarded_level": 1,
+      "updated_at": 1772114661.4226801
+    },
+    "117508033545895941": {
+      "last_rewarded_level": 36,
+      "updated_at": 1772713480.2916985
+    },
+    "209356909608828938": {
+      "last_rewarded_level": 3,
+      "updated_at": 1772838597.257679
+    },
+    "432663763112427543": {
+      "last_rewarded_level": 5,
+      "updated_at": 1772262432.4265103
+    },
+    "1245483999430705225": {
+      "last_rewarded_level": 40,
+      "updated_at": 1772474235.711596
+    },
+    "162360204149653505": {
+      "last_rewarded_level": 1,
+      "updated_at": 1772474232.1103015
+    },
+    "256191402247979009": {
+      "last_rewarded_level": 1,
+      "updated_at": 1772474232.9378667
+    },
+    "1048865474299052043": {
+      "last_rewarded_level": 2,
+      "updated_at": 1772474234.7879543
+    },
+    "1206253836503613461": {
+      "last_rewarded_level": 9,
+      "updated_at": 1772476306.514825
+    },
+    "1213607853697405002": {
+      "last_rewarded_level": 1,
+      "updated_at": 1772474235.501704
+    },
+    "266702206885953547": {
+      "last_rewarded_level": 2,
+      "updated_at": 1772713481.1197689
+    },
+    "480611326478123008": {
+      "last_rewarded_level": 5,
+      "updated_at": 1772713481.7458825
+    },
+    "888127541443956767": {
+      "last_rewarded_level": 26,
+      "updated_at": 1772713482.6194348
+    },
+    "899274906578087946": {
+      "last_rewarded_level": 4,
+      "updated_at": 1772713482.6217864
+    },
+    "1186010973690155114": {
+      "last_rewarded_level": 13,
+      "updated_at": 1773362144.7483313
+    },
+    "575854111686131733": {
+      "last_rewarded_level": 5,
+      "updated_at": 1773073024.2199526
+    },
+    "703126470343524393": {
+      "last_rewarded_level": 6,
+      "updated_at": 1772838598.75064
+    },
+    "764781256147468308": {
+      "last_rewarded_level": 11,
+      "updated_at": 1772838599.377218
+    },
+    "851296440582930442": {
+      "last_rewarded_level": 4,
+      "updated_at": 1772838599.381806
+    },
+    "247631965388275713": {
+      "last_rewarded_level": 1,
+      "updated_at": 1772940220.461184
+    },
+    "832855825570988063": {
+      "last_rewarded_level": 1,
+      "updated_at": 1772940221.7255437
+    },
+    "965428438058033164": {
+      "last_rewarded_level": 6,
+      "updated_at": 1772940221.9409218
+    },
+    "973966078600421388": {
+      "last_rewarded_level": 3,
+      "updated_at": 1772940222.1549637
+    },
+    "396528294062850059": {
+      "last_rewarded_level": 13,
+      "updated_at": 1773362143.3857467
+    },
+    "658773173390671912": {
+      "last_rewarded_level": 5,
+      "updated_at": 1773073024.5067606
+    },
+    "670696696430329866": {
+      "last_rewarded_level": 3,
+      "updated_at": 1773073024.5080082
+    },
+    "692749438812422316": {
+      "last_rewarded_level": 15,
+      "updated_at": 1773516130.35553
+    },
+    "834868944413523968": {
+      "last_rewarded_level": 5,
+      "updated_at": 1773516130.6559067
+    },
+    "1231318363758661683": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773073026.5561314
+    },
+    "1254618896892428400": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773073026.557381
+    },
+    "1265302262876606588": {
+      "last_rewarded_level": 3,
+      "updated_at": 1773073026.5586905
+    },
+    "1286178685233397781": {
+      "last_rewarded_level": 14,
+      "updated_at": 1773362145.1019933
+    },
+    "1439496837407969350": {
+      "last_rewarded_level": 5,
+      "updated_at": 1773073026.8508124
+    },
+    "1479927643104346243": {
+      "last_rewarded_level": 5,
+      "updated_at": 1773073026.854252
+    },
+    "220440013895237632": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773362142.5464497
+    },
+    "236575395124740096": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773362142.8326938
+    },
+    "305515773219307535": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773362143.0473497
+    },
+    "564314704772726786": {
+      "last_rewarded_level": 2,
+      "updated_at": 1773362143.3895202
+    },
+    "575723127850401792": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773362143.392458
+    },
+    "828370927082668082": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773362143.9020572
+    },
+    "1041224631773831189": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773362144.1889277
+    },
+    "1067970183207067770": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773362144.1906555
+    },
+    "1110816506104787005": {
+      "last_rewarded_level": 3,
+      "updated_at": 1773362144.7375057
+    },
+    "1132494411230609489": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773362144.7407372
+    },
+    "1136094150589157447": {
+      "last_rewarded_level": 5,
+      "updated_at": 1773362144.7447505
+    },
+    "1233866006309372025": {
+      "last_rewarded_level": 5,
+      "updated_at": 1773362144.751462
+    },
+    "1270665285325557792": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773362144.75824
+    },
+    "1309817527559258113": {
+      "last_rewarded_level": 7,
+      "updated_at": 1773362145.1072512
+    },
+    "1325613727587762219": {
+      "last_rewarded_level": 3,
+      "updated_at": 1773362145.1099834
+    },
+    "1469927259942162640": {
+      "last_rewarded_level": 2,
+      "updated_at": 1773362145.1122549
+    },
+    "1471887302220320919": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773362145.1146495
+    },
+    "1474015319818240032": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773362145.3391678
+    },
+    "1477271307065233533": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773362145.340887
+    },
+    "1480933575997264014": {
+      "last_rewarded_level": 2,
+      "updated_at": 1773362145.342363
+    },
+    "434798537125920768": {
+      "last_rewarded_level": 6,
+      "updated_at": 1773516129.4893742
+    },
+    "483714093232947211": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773516129.4925947
+    },
+    "539667646220861473": {
+      "last_rewarded_level": 6,
+      "updated_at": 1773516129.9251106
+    },
+    "701240865372504135": {
+      "last_rewarded_level": 3,
+      "updated_at": 1773516130.357546
+    },
+    "760904838204358707": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773516130.3591108
+    },
+    "794258970683899935": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773516130.6491344
+    },
+    "827594495100846122": {
+      "last_rewarded_level": 2,
+      "updated_at": 1773516130.652675
+    },
+    "990989410004783164": {
+      "last_rewarded_level": 4,
+      "updated_at": 1773516130.8832867
+    },
+    "1156639151362420818": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773516131.1087234
+    },
+    "1217957166967816335": {
+      "last_rewarded_level": 2,
+      "updated_at": 1773516131.1121166
+    },
+    "1295592812091543644": {
+      "last_rewarded_level": 2,
+      "updated_at": 1773516131.1163554
+    },
+    "1425995044988649562": {
+      "last_rewarded_level": 2,
+      "updated_at": 1773516131.120186
+    },
+    "1454120738775892131": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773516131.1241465
+    },
+    "1476762058824355938": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773516131.1267369
+    },
+    "1482053859357626398": {
+      "last_rewarded_level": 1,
+      "updated_at": 1773516131.1303728
+    }
+  }
+}
