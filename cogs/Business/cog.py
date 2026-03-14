@@ -1428,13 +1428,17 @@ class BusinessDetailView(BusinessBaseView):
         owner_id: int,
         guild_id: int,
         business_key: str,
-        owned: bool = False,
+        owned: Optional[bool] = None,
+        upgrade_enabled: Optional[bool] = None,
     ):
         super().__init__(cog=cog, owner_id=owner_id, guild_id=guild_id)
         self.business_key = business_key
-        self.upgrade_button.disabled = not owned
-        self.workers_button.disabled = not owned
-        self.managers_button.disabled = not owned
+
+        # Keep compatibility with both call styles that may exist across branches.
+        is_enabled = bool(upgrade_enabled) if upgrade_enabled is not None else bool(owned)
+        self.upgrade_button.disabled = not is_enabled
+        self.workers_button.disabled = not is_enabled
+        self.managers_button.disabled = not is_enabled
 
     @discord.ui.button(label="Run", style=discord.ButtonStyle.success, emoji="▶️", row=0)
     async def run_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
