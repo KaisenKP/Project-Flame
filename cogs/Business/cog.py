@@ -49,6 +49,7 @@ Must provide:
 """
 
 from dataclasses import dataclass
+import logging
 from typing import List, Optional, Sequence
 
 import discord
@@ -57,6 +58,9 @@ from discord.ext import commands
 
 from services.db import sessions
 from services.users import ensure_user_rows
+from .runtime import BusinessRuntimeEngine
+
+log = logging.getLogger(__name__)
 
 # =========================================================
 # CORE CONTRACT IMPORTS
@@ -82,6 +86,7 @@ try:
         remove_manager,
         remove_worker,
         start_business_run,
+        upgrade_business,
     )
 except Exception:
     @dataclass(slots=True)
@@ -377,6 +382,19 @@ except Exception:
         return BusinessActionResult(
             ok=False,
             message="Business services are not wired yet. Build start_business_run(...) in cogs/Business/core.py.",
+        )
+
+    async def upgrade_business(
+        session,
+        *,
+        guild_id: int,
+        user_id: int,
+        business_key: str,
+    ) -> BusinessActionResult:
+        _ = session, guild_id, user_id, business_key
+        return BusinessActionResult(
+            ok=False,
+            message="Business services are not wired yet. Build upgrade_business(...) in cogs/Business/core.py.",
         )
 
 
@@ -1058,6 +1076,7 @@ class ManageBusinessSelect(discord.ui.Select):
             guild_id=self.guild_id,
             business_key=picked,
             owned=detail.owned,
+            upgrade_enabled=detail.owned,
         )
         await interaction.followup.edit_message(
             message_id=interaction.message.id,
@@ -1430,9 +1449,11 @@ class BusinessDetailView(BusinessBaseView):
         business_key: str,
         owned: Optional[bool] = None,
         upgrade_enabled: Optional[bool] = None,
+        upgrade_enabled: bool,
     ):
         super().__init__(cog=cog, owner_id=owner_id, guild_id=guild_id)
         self.business_key = business_key
+        self.upgrade_button.disabled = not bool(upgrade_enabled)
 
         # Keep compatibility with both call styles that may exist across branches.
         is_enabled = bool(upgrade_enabled) if upgrade_enabled is not None else bool(owned)
@@ -1477,7 +1498,7 @@ class BusinessDetailView(BusinessBaseView):
             owner_id=self.owner_id,
             guild_id=self.guild_id,
             business_key=self.business_key,
-            owned=detail.owned,
+            upgrade_enabled=detail.owned,
         )
         await interaction.followup.edit_message(
             message_id=interaction.message.id,
@@ -1509,7 +1530,7 @@ class BusinessDetailView(BusinessBaseView):
             owner_id=self.owner_id,
             guild_id=self.guild_id,
             business_key=self.business_key,
-            owned=detail.owned,
+            upgrade_enabled=detail.owned,
         )
         await interaction.followup.edit_message(
             message_id=interaction.message.id,
@@ -1543,12 +1564,52 @@ class BusinessDetailView(BusinessBaseView):
             view=view,
         )
 
-    @discord.ui.button(label="Upgrade", style=discord.ButtonStyle.primary, emoji="⬆️", row=1, disabled=True)
+    @discord.ui.button(label="Upgrade", style=discord.ButtonStyle.primary, emoji="⬆️", row=1)
     async def upgrade_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
-        await interaction.response.send_message(
-            "Upgrade flow is not wired yet. That belongs in core.py next.",
-            ephemeral=True,
+        await interaction.response.defer()
+
+        async with self.cog.sessionmaker() as session:
+            async with session.begin():
+                await ensure_user_rows(session, guild_id=self.guild_id, user_id=self.owner_id)
+                result = await upgrade_business(
+                    session,
+                    guild_id=self.guild_id,
+                    user_id=self.owner_id,
+                    business_key=self.business_key,
+                )
+                detail = result.manage_snapshot
+                if detail is None:
+                    detail = await get_business_manage_snapshot(
+                        session,
+                        guild_id=self.guild_id,
+                        user_id=self.owner_id,
+                        business_key=self.business_key,
+                    )
+
+        if detail is None:
+            await interaction.followup.send("That business could not be found.", ephemeral=True)
+            return
+
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        if result.message:
+            embed.add_field(
+                name="Action Result",
+                value=("✅ " if result.ok else "❌ ") + result.message,
+                inline=False,
+            )
+
+        view = BusinessDetailView(
+            cog=self.cog,
+            owner_id=self.owner_id,
+            guild_id=self.guild_id,
+            business_key=self.business_key,
+            upgrade_enabled=detail.owned,
+        )
+        await interaction.followup.edit_message(
+            message_id=interaction.message.id,
+            embed=embed,
+            view=view,
         )
 
     @discord.ui.button(label="Employees", style=discord.ButtonStyle.secondary, emoji="👷", row=1, disabled=True)
@@ -1832,6 +1893,33 @@ class BusinessCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.sessionmaker = sessions()
+        self.runtime_engine = BusinessRuntimeEngine()
+
+    async def cog_load(self) -> None:
+        log.info(
+            "Business runtime start requested | cog=%s running=%s",
+            self.__class__.__name__,
+            self.runtime_engine.running,
+        )
+        await self.runtime_engine.start_loop()
+        log.info(
+            "Business runtime started | cog=%s running=%s",
+            self.__class__.__name__,
+            self.runtime_engine.running,
+        )
+
+    async def cog_unload(self) -> None:
+        log.info(
+            "Business runtime stop requested | cog=%s running=%s",
+            self.__class__.__name__,
+            self.runtime_engine.running,
+        )
+        await self.runtime_engine.stop_loop()
+        log.info(
+            "Business runtime stopped | cog=%s running=%s",
+            self.__class__.__name__,
+            self.runtime_engine.running,
+        )
 
     async def _build_hub_for_user(
         self,
