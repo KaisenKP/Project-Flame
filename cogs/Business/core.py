@@ -1128,6 +1128,107 @@ async def start_business_run(
     )
 
 
+async def upgrade_business(
+    session,
+    *,
+    guild_id: int,
+    user_id: int,
+    business_key: str,
+) -> BusinessActionResult:
+    defn = _def_for_key(business_key)
+    if defn is None:
+        return BusinessActionResult(
+            ok=False,
+            message="That business does not exist.",
+        )
+
+    ownership = await _get_ownership_row(
+        session,
+        guild_id=guild_id,
+        user_id=user_id,
+        business_key=business_key,
+    )
+    if ownership is None:
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        return BusinessActionResult(
+            ok=False,
+            message=f"You do not own **{defn.name}** yet.",
+            snapshot=hub,
+        )
+
+    old_level = int(ownership.level or 0)
+    old_hourly = await _calc_display_hourly_profit_for_owned_business(
+        session,
+        ownership=ownership,
+        defn=defn,
+    )
+    old_runtime_hours = await _calc_total_runtime_hours_for_owned_business(
+        session,
+        ownership=ownership,
+        defn=defn,
+    )
+
+    cost = int(_upgrade_cost(defn, old_level))
+    wallet = await _get_wallet(session, guild_id=guild_id, user_id=user_id)
+    balance = int(wallet.silver or 0)
+    if balance < cost:
+        short = cost - balance
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        manage = await get_business_manage_snapshot(
+            session,
+            guild_id=guild_id,
+            user_id=user_id,
+            business_key=business_key,
+        )
+        return BusinessActionResult(
+            ok=False,
+            message=(
+                f"You need **{cost:,} Silver** to upgrade **{defn.name}**.\n"
+                f"You are short by **{short:,} Silver**."
+            ),
+            snapshot=hub,
+            manage_snapshot=manage,
+        )
+
+    wallet.silver -= cost
+    if hasattr(wallet, "silver_spent"):
+        wallet.silver_spent += cost
+
+    ownership.level = old_level + 1
+    if hasattr(ownership, "total_spent"):
+        ownership.total_spent = int(ownership.total_spent or 0) + cost
+
+    await session.flush()
+
+    hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+    manage = await get_business_manage_snapshot(
+        session,
+        guild_id=guild_id,
+        user_id=user_id,
+        business_key=business_key,
+    )
+
+    new_level = int(ownership.level or 0)
+    new_hourly = old_hourly
+    new_runtime_hours = old_runtime_hours
+    if manage is not None:
+        new_hourly = int(manage.hourly_profit)
+        new_runtime_hours = int(manage.total_runtime_hours)
+
+    return BusinessActionResult(
+        ok=True,
+        message=(
+            f"Upgraded **{defn.emoji} {defn.name}** from **Level {old_level}** to **Level {new_level}** "
+            f"for **{cost:,} Silver**.\n"
+            f"Hourly profit: **{old_hourly:,}/hr** → **{new_hourly:,}/hr**\n"
+            f"Run projection: **{old_runtime_hours:,}h / {old_hourly * old_runtime_hours:,} Silver**"
+            f" → **{new_runtime_hours:,}h / {new_hourly * new_runtime_hours:,} Silver**"
+        ),
+        snapshot=hub,
+        manage_snapshot=manage,
+    )
+
+
 # =========================================================
 # OPTIONAL FUTURE HELPERS FOR runtime.py
 # =========================================================
