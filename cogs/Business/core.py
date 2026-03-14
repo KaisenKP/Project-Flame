@@ -140,6 +140,30 @@ class BusinessActionResult:
     manage_snapshot: Optional[BusinessManageSnapshot] = None
 
 
+@dataclass(slots=True)
+class WorkerAssignmentSlotSnapshot:
+    slot_index: int
+    assignment_id: Optional[int]
+    worker_name: Optional[str]
+    worker_type: Optional[str]
+    rarity: Optional[str]
+    flat_profit_bonus: int
+    percent_profit_bonus_bp: int
+    is_active: bool
+
+
+@dataclass(slots=True)
+class ManagerAssignmentSlotSnapshot:
+    slot_index: int
+    assignment_id: Optional[int]
+    manager_name: Optional[str]
+    rarity: Optional[str]
+    runtime_bonus_hours: int
+    profit_bonus_bp: int
+    auto_restart_charges: int
+    is_active: bool
+
+
 # =========================================================
 # STATIC BUSINESS CATALOG
 # =========================================================
@@ -1126,6 +1150,294 @@ async def start_business_run(
         snapshot=hub,
         manage_snapshot=manage,
     )
+
+
+async def _worker_rows_for_ownership(session, *, ownership_id: int) -> list[BusinessWorkerAssignmentRow]:
+    rows = await session.scalars(
+        select(BusinessWorkerAssignmentRow)
+        .where(BusinessWorkerAssignmentRow.ownership_id == int(ownership_id))
+        .order_by(BusinessWorkerAssignmentRow.slot_index.asc(), BusinessWorkerAssignmentRow.id.asc())
+    )
+    return list(rows)
+
+
+async def _manager_rows_for_ownership(session, *, ownership_id: int) -> list[BusinessManagerAssignmentRow]:
+    rows = await session.scalars(
+        select(BusinessManagerAssignmentRow)
+        .where(BusinessManagerAssignmentRow.ownership_id == int(ownership_id))
+        .order_by(BusinessManagerAssignmentRow.slot_index.asc(), BusinessManagerAssignmentRow.id.asc())
+    )
+    return list(rows)
+
+
+async def get_worker_assignment_slots(
+    session,
+    *,
+    guild_id: int,
+    user_id: int,
+    business_key: str,
+) -> list[WorkerAssignmentSlotSnapshot]:
+    ownership = await _get_ownership_row(
+        session,
+        guild_id=guild_id,
+        user_id=user_id,
+        business_key=business_key,
+    )
+    defn = _def_for_key(business_key)
+    if ownership is None or defn is None:
+        return []
+
+    total_slots = _worker_slots_for_business_key_and_level(defn.key, int(ownership.level or 0))
+    row_map = {int(r.slot_index): r for r in await _worker_rows_for_ownership(session, ownership_id=int(ownership.id))}
+
+    slots: list[WorkerAssignmentSlotSnapshot] = []
+    for slot_index in range(1, int(total_slots) + 1):
+        row = row_map.get(slot_index)
+        slots.append(
+            WorkerAssignmentSlotSnapshot(
+                slot_index=slot_index,
+                assignment_id=(int(row.id) if row else None),
+                worker_name=(str(row.worker_name) if row else None),
+                worker_type=(str(row.worker_type) if row else None),
+                rarity=(str(row.rarity) if row else None),
+                flat_profit_bonus=(int(row.flat_profit_bonus or 0) if row else 0),
+                percent_profit_bonus_bp=(int(row.percent_profit_bonus_bp or 0) if row else 0),
+                is_active=(bool(row.is_active) if row else False),
+            )
+        )
+    return slots
+
+
+async def get_manager_assignment_slots(
+    session,
+    *,
+    guild_id: int,
+    user_id: int,
+    business_key: str,
+) -> list[ManagerAssignmentSlotSnapshot]:
+    ownership = await _get_ownership_row(
+        session,
+        guild_id=guild_id,
+        user_id=user_id,
+        business_key=business_key,
+    )
+    defn = _def_for_key(business_key)
+    if ownership is None or defn is None:
+        return []
+
+    total_slots = _manager_slots_for_level(int(ownership.level or 0))
+    row_map = {int(r.slot_index): r for r in await _manager_rows_for_ownership(session, ownership_id=int(ownership.id))}
+
+    slots: list[ManagerAssignmentSlotSnapshot] = []
+    for slot_index in range(1, int(total_slots) + 1):
+        row = row_map.get(slot_index)
+        slots.append(
+            ManagerAssignmentSlotSnapshot(
+                slot_index=slot_index,
+                assignment_id=(int(row.id) if row else None),
+                manager_name=(str(row.manager_name) if row else None),
+                rarity=(str(row.rarity) if row else None),
+                runtime_bonus_hours=(int(row.runtime_bonus_hours or 0) if row else 0),
+                profit_bonus_bp=(int(row.profit_bonus_bp or 0) if row else 0),
+                auto_restart_charges=(int(row.auto_restart_charges or 0) if row else 0),
+                is_active=(bool(row.is_active) if row else False),
+            )
+        )
+    return slots
+
+
+async def hire_worker(
+    session,
+    *,
+    guild_id: int,
+    user_id: int,
+    business_key: str,
+    worker_name: str,
+    worker_type: str,
+    rarity: str,
+    flat_profit_bonus: int = 0,
+    percent_profit_bonus_bp: int = 0,
+) -> BusinessActionResult:
+    defn = _def_for_key(business_key)
+    if defn is None:
+        return BusinessActionResult(ok=False, message='That business does not exist.')
+
+    ownership = await _get_ownership_row(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    if ownership is None:
+        return BusinessActionResult(ok=False, message=f'You do not own **{defn.name}** yet.')
+
+    total_slots = _worker_slots_for_business_key_and_level(defn.key, int(ownership.level or 0))
+    rows = await _worker_rows_for_ownership(session, ownership_id=int(ownership.id))
+    active_slots = {int(r.slot_index) for r in rows if bool(r.is_active)}
+    free_slot = next((idx for idx in range(1, int(total_slots) + 1) if idx not in active_slots), None)
+    if free_slot is None:
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        return BusinessActionResult(ok=False, message='No free worker slots available.', manage_snapshot=manage)
+
+    slot_row = next((r for r in rows if int(r.slot_index) == int(free_slot)), None)
+    if slot_row is None:
+        slot_row = BusinessWorkerAssignmentRow(
+            ownership_id=int(ownership.id),
+            guild_id=int(guild_id),
+            user_id=int(user_id),
+            business_key=str(defn.key),
+            slot_index=int(free_slot),
+            worker_name=str(worker_name).strip()[:64] or 'Worker',
+            worker_type=str(worker_type).strip().lower()[:16] or 'efficient',
+            rarity=str(rarity).strip().lower()[:16] or 'common',
+            flat_profit_bonus=int(flat_profit_bonus),
+            percent_profit_bonus_bp=int(percent_profit_bonus_bp),
+            special_json={},
+            is_active=True,
+        )
+        session.add(slot_row)
+    else:
+        slot_row.worker_name = str(worker_name).strip()[:64] or 'Worker'
+        slot_row.worker_type = str(worker_type).strip().lower()[:16] or 'efficient'
+        slot_row.rarity = str(rarity).strip().lower()[:16] or 'common'
+        slot_row.flat_profit_bonus = int(flat_profit_bonus)
+        slot_row.percent_profit_bonus_bp = int(percent_profit_bonus_bp)
+        slot_row.is_active = True
+
+    await session.flush()
+    hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+    manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    return BusinessActionResult(ok=True, message=f'Hired worker **{slot_row.worker_name}** into slot **#{free_slot}**.', snapshot=hub, manage_snapshot=manage)
+
+
+async def remove_worker(
+    session,
+    *,
+    guild_id: int,
+    user_id: int,
+    business_key: str,
+    slot_index: int,
+) -> BusinessActionResult:
+    defn = _def_for_key(business_key)
+    if defn is None:
+        return BusinessActionResult(ok=False, message='That business does not exist.')
+    ownership = await _get_ownership_row(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    if ownership is None:
+        return BusinessActionResult(ok=False, message=f'You do not own **{defn.name}** yet.')
+
+    max_slots = _worker_slots_for_business_key_and_level(defn.key, int(ownership.level or 0))
+    idx = int(slot_index)
+    if idx < 1 or idx > int(max_slots):
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        return BusinessActionResult(ok=False, message=f'Worker slot must be between 1 and {max_slots}.', manage_snapshot=manage)
+
+    row = await session.scalar(
+        select(BusinessWorkerAssignmentRow).where(
+            BusinessWorkerAssignmentRow.ownership_id == int(ownership.id),
+            BusinessWorkerAssignmentRow.slot_index == idx,
+        )
+    )
+    if row is None or not bool(row.is_active):
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        return BusinessActionResult(ok=False, message=f'Worker slot #{idx} is already empty.', manage_snapshot=manage)
+
+    row.is_active = False
+    await session.flush()
+    hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+    manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    return BusinessActionResult(ok=True, message=f'Removed worker from slot **#{idx}**.', snapshot=hub, manage_snapshot=manage)
+
+
+async def hire_manager(
+    session,
+    *,
+    guild_id: int,
+    user_id: int,
+    business_key: str,
+    manager_name: str,
+    rarity: str,
+    runtime_bonus_hours: int = 0,
+    profit_bonus_bp: int = 0,
+    auto_restart_charges: int = 0,
+) -> BusinessActionResult:
+    defn = _def_for_key(business_key)
+    if defn is None:
+        return BusinessActionResult(ok=False, message='That business does not exist.')
+
+    ownership = await _get_ownership_row(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    if ownership is None:
+        return BusinessActionResult(ok=False, message=f'You do not own **{defn.name}** yet.')
+
+    total_slots = _manager_slots_for_level(int(ownership.level or 0))
+    rows = await _manager_rows_for_ownership(session, ownership_id=int(ownership.id))
+    active_slots = {int(r.slot_index) for r in rows if bool(r.is_active)}
+    free_slot = next((idx for idx in range(1, int(total_slots) + 1) if idx not in active_slots), None)
+    if free_slot is None:
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        return BusinessActionResult(ok=False, message='No free manager slots available.', manage_snapshot=manage)
+
+    slot_row = next((r for r in rows if int(r.slot_index) == int(free_slot)), None)
+    if slot_row is None:
+        slot_row = BusinessManagerAssignmentRow(
+            ownership_id=int(ownership.id),
+            guild_id=int(guild_id),
+            user_id=int(user_id),
+            business_key=str(defn.key),
+            slot_index=int(free_slot),
+            manager_name=str(manager_name).strip()[:64] or 'Manager',
+            rarity=str(rarity).strip().lower()[:16] or 'common',
+            runtime_bonus_hours=int(runtime_bonus_hours),
+            auto_restart_charges=int(auto_restart_charges),
+            profit_bonus_bp=int(profit_bonus_bp),
+            special_json={},
+            is_active=True,
+        )
+        session.add(slot_row)
+    else:
+        slot_row.manager_name = str(manager_name).strip()[:64] or 'Manager'
+        slot_row.rarity = str(rarity).strip().lower()[:16] or 'common'
+        slot_row.runtime_bonus_hours = int(runtime_bonus_hours)
+        slot_row.auto_restart_charges = int(auto_restart_charges)
+        slot_row.profit_bonus_bp = int(profit_bonus_bp)
+        slot_row.is_active = True
+
+    await session.flush()
+    hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+    manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    return BusinessActionResult(ok=True, message=f'Hired manager **{slot_row.manager_name}** into slot **#{free_slot}**.', snapshot=hub, manage_snapshot=manage)
+
+
+async def remove_manager(
+    session,
+    *,
+    guild_id: int,
+    user_id: int,
+    business_key: str,
+    slot_index: int,
+) -> BusinessActionResult:
+    defn = _def_for_key(business_key)
+    if defn is None:
+        return BusinessActionResult(ok=False, message='That business does not exist.')
+    ownership = await _get_ownership_row(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    if ownership is None:
+        return BusinessActionResult(ok=False, message=f'You do not own **{defn.name}** yet.')
+
+    max_slots = _manager_slots_for_level(int(ownership.level or 0))
+    idx = int(slot_index)
+    if idx < 1 or idx > int(max_slots):
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        return BusinessActionResult(ok=False, message=f'Manager slot must be between 1 and {max_slots}.', manage_snapshot=manage)
+
+    row = await session.scalar(
+        select(BusinessManagerAssignmentRow).where(
+            BusinessManagerAssignmentRow.ownership_id == int(ownership.id),
+            BusinessManagerAssignmentRow.slot_index == idx,
+        )
+    )
+    if row is None or not bool(row.is_active):
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        return BusinessActionResult(ok=False, message=f'Manager slot #{idx} is already empty.', manage_snapshot=manage)
+
+    row.is_active = False
+    await session.flush()
+    hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+    manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    return BusinessActionResult(ok=True, message=f'Removed manager from slot **#{idx}**.', snapshot=hub, manage_snapshot=manage)
 
 
 # =========================================================
