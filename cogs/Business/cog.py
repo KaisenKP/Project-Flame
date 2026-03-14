@@ -1575,6 +1575,7 @@ class BusinessDetailView(BusinessBaseView):
             owner_id=self.owner_id,
             guild_id=self.guild_id,
             business_key=self.business_key,
+            panel_message_id=int(interaction.message.id),
         )
         await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
 
@@ -1606,6 +1607,7 @@ class BusinessDetailView(BusinessBaseView):
             owner_id=self.owner_id,
             guild_id=self.guild_id,
             business_key=self.business_key,
+            panel_message_id=int(interaction.message.id),
         )
         await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
 
@@ -1644,7 +1646,7 @@ class HireWorkerModal(discord.ui.Modal, title="Hire Worker"):
             return
         embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots)
         embed.add_field(name="Action", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=self.view)
+        await interaction.followup.edit_message(message_id=self.view.panel_message_id, embed=embed, view=self.view)
 
 
 class RemoveWorkerModal(discord.ui.Modal, title="Remove Worker"):
@@ -1672,7 +1674,7 @@ class RemoveWorkerModal(discord.ui.Modal, title="Remove Worker"):
             return
         embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots)
         embed.add_field(name="Action", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=self.view)
+        await interaction.followup.edit_message(message_id=self.view.panel_message_id, embed=embed, view=self.view)
 
 
 class HireManagerModal(discord.ui.Modal, title="Hire Manager"):
@@ -1709,7 +1711,7 @@ class HireManagerModal(discord.ui.Modal, title="Hire Manager"):
             return
         embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots)
         embed.add_field(name="Action", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=self.view)
+        await interaction.followup.edit_message(message_id=self.view.panel_message_id, embed=embed, view=self.view)
 
 
 class RemoveManagerModal(discord.ui.Modal, title="Remove Manager"):
@@ -1737,13 +1739,22 @@ class RemoveManagerModal(discord.ui.Modal, title="Remove Manager"):
             return
         embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots)
         embed.add_field(name="Action", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=self.view)
+        await interaction.followup.edit_message(message_id=self.view.panel_message_id, embed=embed, view=self.view)
 
 
 class WorkerAssignmentsView(BusinessBaseView):
-    def __init__(self, *, cog: "BusinessCog", owner_id: int, guild_id: int, business_key: str):
+    def __init__(
+        self,
+        *,
+        cog: "BusinessCog",
+        owner_id: int,
+        guild_id: int,
+        business_key: str,
+        panel_message_id: int,
+    ):
         super().__init__(cog=cog, owner_id=owner_id, guild_id=guild_id)
         self.business_key = business_key
+        self.panel_message_id = int(panel_message_id)
 
     @discord.ui.button(label="Hire Worker", style=discord.ButtonStyle.success, emoji="➕", row=0)
     async def hire_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -1767,13 +1778,22 @@ class WorkerAssignmentsView(BusinessBaseView):
             return
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
         view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned)
-        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
+        await interaction.followup.edit_message(message_id=self.panel_message_id, embed=embed, view=view)
 
 
 class ManagerAssignmentsView(BusinessBaseView):
-    def __init__(self, *, cog: "BusinessCog", owner_id: int, guild_id: int, business_key: str):
+    def __init__(
+        self,
+        *,
+        cog: "BusinessCog",
+        owner_id: int,
+        guild_id: int,
+        business_key: str,
+        panel_message_id: int,
+    ):
         super().__init__(cog=cog, owner_id=owner_id, guild_id=guild_id)
         self.business_key = business_key
+        self.panel_message_id = int(panel_message_id)
 
     @discord.ui.button(label="Hire Manager", style=discord.ButtonStyle.success, emoji="➕", row=0)
     async def hire_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -1797,7 +1817,7 @@ class ManagerAssignmentsView(BusinessBaseView):
             return
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
         view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned)
-        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
+        await interaction.followup.edit_message(message_id=self.panel_message_id, embed=embed, view=view)
 
 
 # =========================================================
