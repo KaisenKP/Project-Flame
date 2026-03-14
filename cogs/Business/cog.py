@@ -1449,11 +1449,9 @@ class BusinessDetailView(BusinessBaseView):
         business_key: str,
         owned: Optional[bool] = None,
         upgrade_enabled: Optional[bool] = None,
-        upgrade_enabled: bool,
     ):
         super().__init__(cog=cog, owner_id=owner_id, guild_id=guild_id)
         self.business_key = business_key
-        self.upgrade_button.disabled = not bool(upgrade_enabled)
 
         # Keep compatibility with both call styles that may exist across branches.
         is_enabled = bool(upgrade_enabled) if upgrade_enabled is not None else bool(owned)
