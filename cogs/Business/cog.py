@@ -49,6 +49,7 @@ Must provide:
 """
 
 from dataclasses import dataclass
+import logging
 from typing import List, Optional, Sequence
 
 import discord
@@ -57,6 +58,9 @@ from discord.ext import commands
 
 from services.db import sessions
 from services.users import ensure_user_rows
+from .runtime import BusinessRuntimeEngine
+
+log = logging.getLogger(__name__)
 
 # =========================================================
 # CORE CONTRACT IMPORTS
@@ -1473,6 +1477,33 @@ class BusinessCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.sessionmaker = sessions()
+        self.runtime_engine = BusinessRuntimeEngine()
+
+    async def cog_load(self) -> None:
+        log.info(
+            "Business runtime start requested | cog=%s running=%s",
+            self.__class__.__name__,
+            self.runtime_engine.running,
+        )
+        await self.runtime_engine.start_loop()
+        log.info(
+            "Business runtime started | cog=%s running=%s",
+            self.__class__.__name__,
+            self.runtime_engine.running,
+        )
+
+    async def cog_unload(self) -> None:
+        log.info(
+            "Business runtime stop requested | cog=%s running=%s",
+            self.__class__.__name__,
+            self.runtime_engine.running,
+        )
+        await self.runtime_engine.stop_loop()
+        log.info(
+            "Business runtime stopped | cog=%s running=%s",
+            self.__class__.__name__,
+            self.runtime_engine.running,
+        )
 
     async def _build_hub_for_user(
         self,
