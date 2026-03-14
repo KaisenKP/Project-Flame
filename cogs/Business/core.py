@@ -140,6 +140,30 @@ class BusinessActionResult:
     manage_snapshot: Optional[BusinessManageSnapshot] = None
 
 
+@dataclass(slots=True)
+class WorkerAssignmentSlotSnapshot:
+    slot_index: int
+    assignment_id: Optional[int]
+    worker_name: Optional[str]
+    worker_type: Optional[str]
+    rarity: Optional[str]
+    flat_profit_bonus: int
+    percent_profit_bonus_bp: int
+    is_active: bool
+
+
+@dataclass(slots=True)
+class ManagerAssignmentSlotSnapshot:
+    slot_index: int
+    assignment_id: Optional[int]
+    manager_name: Optional[str]
+    rarity: Optional[str]
+    runtime_bonus_hours: int
+    profit_bonus_bp: int
+    auto_restart_charges: int
+    is_active: bool
+
+
 # =========================================================
 # STATIC BUSINESS CATALOG
 # =========================================================
