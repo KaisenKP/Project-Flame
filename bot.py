@@ -37,8 +37,16 @@ def _iter_extension_modules(cogs_dir: Path, cogs_package: str) -> list[str]:
 
     exts: list[str] = []
 
+    package_extension_dirs: set[Path] = set()
+    for init_py in cogs_dir.rglob("__init__.py"):
+        if _looks_like_extension(init_py):
+            package_extension_dirs.add(init_py.parent.resolve())
+
     for py in cogs_dir.rglob("*.py"):
         if py.name.startswith("_") and py.name != "__init__.py":
+            continue
+        py_resolved = py.resolve()
+        if py.name != "__init__.py" and any(parent in package_extension_dirs for parent in py_resolved.parents):
             continue
         if not _looks_like_extension(py):
             continue
