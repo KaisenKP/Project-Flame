@@ -123,8 +123,16 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _as_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _min_dt(a: datetime, b: datetime) -> datetime:
-    return a if a <= b else b
+    utc_a = _as_utc(a)
+    utc_b = _as_utc(b)
+    return utc_a if utc_a <= utc_b else utc_b
 
 
 def _safe_run_anchor(run: BusinessRunRow) -> datetime:
@@ -142,7 +150,7 @@ def _whole_hours_between(start: datetime, end: datetime) -> int:
     """
     Returns whole elapsed hours only.
     """
-    seconds = int((end - start).total_seconds())
+    seconds = int((_as_utc(end) - _as_utc(start)).total_seconds())
     if seconds <= 0:
         return 0
     return seconds // SECONDS_PER_HOUR
@@ -151,7 +159,7 @@ def _whole_hours_between(start: datetime, end: datetime) -> int:
 def _run_has_ended(run: BusinessRunRow, *, now: Optional[datetime] = None) -> bool:
     if now is None:
         now = _utc_now()
-    return now >= run.ends_at
+    return _as_utc(now) >= _as_utc(run.ends_at)
 
 
 # =========================================================
