@@ -80,9 +80,21 @@ class AdventureEngine:
         rewards = AdventureRewards()
         await channel.send("The trail bends into the unknown...")
         await asyncio.sleep(0.8)
+        seen_stage_keys: set[str] = set()
+        recent_tags = []
         for stage_number in range(1, stage_total + 1):
             lead_level = max(p.adventure_level for p in players)
-            stage = pick_stage(stages=self.stage_pool, mode=mode, party_size=len(players), adventure_level=lead_level)
+            stage = pick_stage(
+                stages=self.stage_pool,
+                mode=mode,
+                party_size=len(players),
+                adventure_level=lead_level,
+                excluded_keys=seen_stage_keys,
+                recent_tags=recent_tags,
+            )
+            seen_stage_keys.add(stage.key)
+            recent_tags.append(stage.tag)
+            recent_tags = recent_tags[-3:]
             await channel.send(f"## Stage {stage_number}: {stage.title}")
             for beat in stage.beats:
                 await channel.send(beat)
@@ -103,7 +115,11 @@ class AdventureEngine:
                 await channel.send(line)
                 await asyncio.sleep(0.8)
             if roll_bp(self.reward_engine.rare_event_chance_bp(players=players, stage_tag=stage.tag)):
-                rare_rewards, rare_lines = self.reward_engine.resolve_rare_event()
+                rare_rewards, rare_lines = self.reward_engine.resolve_rare_event(
+                    stage_tag=stage.tag,
+                    party_size=len(players),
+                    class_keys=[p.class_key for p in players],
+                )
                 rewards.merge(rare_rewards)
                 for line in rare_lines:
                     await channel.send(line)
