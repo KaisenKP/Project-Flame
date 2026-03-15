@@ -9,6 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from services.db import sessions
+from services.achievements import check_and_grant_achievements, queue_achievement_announcements
 from services.users import ensure_user_rows
 
 from .catalog import ASSET_CATALOG
@@ -124,12 +125,18 @@ class LuxuryAssetsCog(commands.Cog):
 
         async with self.sessionmaker() as session:
             async with session.begin():
+                unlocked_achievements = []
                 try:
                     row = await purchase_asset(
                         session,
                         guild_id=interaction.guild.id,
                         user_id=interaction.user.id,
                         asset_key=asset_key,
+                    )
+                    unlocked_achievements = await check_and_grant_achievements(
+                        session,
+                        guild_id=interaction.guild.id,
+                        user_id=interaction.user.id,
                     )
                 except ValueError:
                     await interaction.followup.send("Not enough silver for that purchase.", ephemeral=True)
@@ -143,6 +150,13 @@ class LuxuryAssetsCog(commands.Cog):
         )
         done.add_field(name="Price", value=f"{fmt_int(asset.price)} Silver")
         await interaction.followup.send(embed=done, ephemeral=True)
+        if unlocked_achievements:
+            queue_achievement_announcements(
+                bot=self.bot,
+                guild_id=interaction.guild.id,
+                user_id=interaction.user.id,
+                unlocks=unlocked_achievements,
+            )
 
     @luxury.command(name="showcase", description="View your 3 luxury showcase slots.")
     async def luxury_showcase(self, interaction: discord.Interaction):

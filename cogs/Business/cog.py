@@ -57,6 +57,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from services.db import sessions
+from services.achievements import check_and_grant_achievements, queue_achievement_announcements
 from services.users import ensure_user_rows
 from .runtime import BusinessRuntimeEngine
 
@@ -1083,6 +1084,7 @@ class BuyBusinessSelect(discord.ui.Select):
             return
 
         await _safe_defer(interaction)
+        unlocked_achievements = []
 
         async with self.cog.sessionmaker() as session:
             async with session.begin():
@@ -1101,6 +1103,12 @@ class BuyBusinessSelect(discord.ui.Select):
                     guild_id=self.guild_id,
                     user_id=self.owner_id,
                 )
+                if result.ok:
+                    unlocked_achievements = await check_and_grant_achievements(
+                        session,
+                        guild_id=self.guild_id,
+                        user_id=self.owner_id,
+                    )
 
         embed = _build_result_embed(
             title="Business Purchase",
@@ -1115,6 +1123,13 @@ class BuyBusinessSelect(discord.ui.Select):
             hub_snapshot=hub,
         )
         await _safe_edit_panel(interaction, embed=embed, view=view)
+        if unlocked_achievements:
+            queue_achievement_announcements(
+                bot=self.cog.bot,
+                guild_id=self.guild_id,
+                user_id=self.owner_id,
+                unlocks=unlocked_achievements,
+            )
 
 
 class RunBusinessSelect(discord.ui.Select):
