@@ -1,0 +1,225 @@
+from adventure.models.adventure_state import StageTag, StageTemplate
+
+COMBAT_EVENTS = [
+    StageTemplate(
+        key="bandit_ambush",
+        title="Bandit Ambush",
+        beats=[
+            "Whistles cut through the trees.",
+            "Bandits emerge wearing dramatic capes that probably cost more than your boots.",
+        ],
+        choices=["Charge them", "Bribe them", "Retreat through brush"],
+        tag=StageTag.COMBAT,
+        min_adv_level=5,
+    ),
+    StageTemplate(
+        key="monster_horde",
+        title="Monster Horde",
+        beats=[
+            "A roar rolls across the forest like thunder.",
+            "A horde rushes downhill, eyes glowing and very motivated.",
+        ],
+        choices=["Hold formation", "Split and flank", "Full retreat"],
+        tag=StageTag.BOSS,
+        party_only=True,
+        min_adv_level=11,
+    ),
+    StageTemplate(
+        key="combat_skirmish_1",
+        title="Howling Front 1",
+        beats=[
+            "The party spots howling front marker 1 carved into old stone.",
+            "A strange hush falls over the trail before everything gets louder.",
+        ],
+        choices=["Take the front line", "Use ranged cover", "Force a withdrawal"],
+        tag=StageTag.COMBAT,
+        min_adv_level=3,
+    ),
+    StageTemplate(
+        key="combat_skirmish_2",
+        title="Howling Front 2",
+        beats=[
+            "The party spots howling front marker 2 carved into old stone.",
+            "A strange hush falls over the trail before everything gets louder.",
+        ],
+        choices=["Take the front line", "Use ranged cover", "Force a withdrawal"],
+        tag=StageTag.COMBAT,
+        min_adv_level=3,
+    ),
+    StageTemplate(
+        key="combat_skirmish_3",
+        title="Howling Front 3",
+        beats=[
+            "The party spots howling front marker 3 carved into old stone.",
+            "A strange hush falls over the trail before everything gets louder.",
+        ],
+        choices=["Take the front line", "Use ranged cover", "Force a withdrawal"],
+        tag=StageTag.COMBAT,
+        min_adv_level=3,
+    ),
+    StageTemplate(
+        key="combat_skirmish_4",
+        title="Howling Front 4",
+        beats=[
+            "The party spots howling front marker 4 carved into old stone.",
+            "A strange hush falls over the trail before everything gets louder.",
+        ],
+        choices=["Take the front line", "Use ranged cover", "Force a withdrawal"],
+        tag=StageTag.COMBAT,
+        min_adv_level=3,
+    ),
+    StageTemplate(
+        key="combat_skirmish_5",
+        title="Howling Front 5",
+        beats=[
+            "The party spots howling front marker 5 carved into old stone.",
+            "A strange hush falls over the trail before everything gets louder.",
+        ],
+        choices=["Take the front line", "Use ranged cover", "Force a withdrawal"],
+        tag=StageTag.COMBAT,
+        min_adv_level=3,
+    ),
+    StageTemplate(
+        key="combat_skirmish_6",
+        title="Howling Front 6",
+        beats=[
+            "The party spots howling front marker 6 carved into old stone.",
+            "A strange hush falls over the trail before everything gets louder.",
+        ],
+        choices=["Take the front line", "Use ranged cover", "Force a withdrawal"],
+        tag=StageTag.COMBAT,
+        min_adv_level=4,
+    ),
+    StageTemplate(
+        key="combat_skirmish_7",
+        title="Howling Front 7",
+        beats=[
+            "The party spots howling front marker 7 carved into old stone.",
+            "A strange hush falls over the trail before everything gets louder.",
+        ],
+        choices=["Take the front line", "Use ranged cover", "Force a withdrawal"],
+        tag=StageTag.COMBAT,
+        min_adv_level=4,
+    ),
+    StageTemplate(
+        key="combat_skirmish_8",
+        title="Howling Front 8",
+        beats=[
+            "The party spots howling front marker 8 carved into old stone.",
+            "A strange hush falls over the trail before everything gets louder.",
+        ],
+        choices=["Take the front line", "Use ranged cover", "Force a withdrawal"],
+        tag=StageTag.COMBAT,
+        min_adv_level=4,
+    ),
+    StageTemplate(
+        key="combat_skirmish_9",
+        title="Howling Front 9",
+        beats=[
+            "The party spots howling front marker 9 carved into old stone.",
+            "A strange hush falls over the trail before everything gets louder.",
+        ],
+        choices=["Take the front line", "Use ranged cover", "Force a withdrawal"],
+        tag=StageTag.COMBAT,
+        min_adv_level=4,
+    ),
+    StageTemplate(
+        key="combat_skirmish_10",
+        title="Howling Front 10",
+        beats=[
+            "The party spots howling front marker 10 carved into old stone.",
+            "A strange hush falls over the trail before everything gets louder.",
+        ],
+        choices=["Take the front line", "Use ranged cover", "Force a withdrawal"],
+        tag=StageTag.COMBAT,
+        min_adv_level=4,
+    ),
+    StageTemplate(
+        key="combat_skirmish_11",
+        title="Howling Front 11",
+        beats=[
+            "The party spots howling front marker 11 carved into old stone.",
+            "A strange hush falls over the trail before everything gets louder.",
+        ],
+        choices=["Take the front line", "Use ranged cover", "Force a withdrawal"],
+        tag=StageTag.COMBAT,
+        min_adv_level=4,
+    ),
+    StageTemplate(
+        key="combat_skirmish_12",
+        title="Howling Front 12",
+        beats=[
+            "The party spots howling front marker 12 carved into old stone.",
+            "A strange hush falls over the trail before everything gets louder.",
+        ],
+        choices=["Take the front line", "Use ranged cover", "Force a withdrawal"],
+        tag=StageTag.COMBAT,
+        min_adv_level=5,
+    ),
+    StageTemplate(
+        key="combat_skirmish_13",
+        title="Howling Front 13",
+        beats=[
+            "The party spots howling front marker 13 carved into old stone.",
+            "A strange hush falls over the trail before everything gets louder.",
+        ],
+        choices=["Take the front line", "Use ranged cover", "Force a withdrawal"],
+        tag=StageTag.COMBAT,
+        min_adv_level=5,
+    ),
+    StageTemplate(
+        key="combat_skirmish_14",
+        title="Howling Front 14",
+        beats=[
+            "The party spots howling front marker 14 carved into old stone.",
+            "A strange hush falls over the trail before everything gets louder.",
+        ],
+        choices=["Take the front line", "Use ranged cover", "Force a withdrawal"],
+        tag=StageTag.COMBAT,
+        min_adv_level=5,
+    ),
+    StageTemplate(
+        key="combat_skirmish_15",
+        title="Howling Front 15",
+        beats=[
+            "The party spots howling front marker 15 carved into old stone.",
+            "A strange hush falls over the trail before everything gets louder.",
+        ],
+        choices=["Take the front line", "Use ranged cover", "Force a withdrawal"],
+        tag=StageTag.COMBAT,
+        min_adv_level=5,
+    ),
+    StageTemplate(
+        key="combat_skirmish_16",
+        title="Howling Front 16",
+        beats=[
+            "The party spots howling front marker 16 carved into old stone.",
+            "A strange hush falls over the trail before everything gets louder.",
+        ],
+        choices=["Take the front line", "Use ranged cover", "Force a withdrawal"],
+        tag=StageTag.COMBAT,
+        min_adv_level=5,
+    ),
+    StageTemplate(
+        key="combat_skirmish_17",
+        title="Howling Front 17",
+        beats=[
+            "The party spots howling front marker 17 carved into old stone.",
+            "A strange hush falls over the trail before everything gets louder.",
+        ],
+        choices=["Take the front line", "Use ranged cover", "Force a withdrawal"],
+        tag=StageTag.COMBAT,
+        min_adv_level=5,
+    ),
+    StageTemplate(
+        key="combat_skirmish_18",
+        title="Howling Front 18",
+        beats=[
+            "The party spots howling front marker 18 carved into old stone.",
+            "A strange hush falls over the trail before everything gets louder.",
+        ],
+        choices=["Take the front line", "Use ranged cover", "Force a withdrawal"],
+        tag=StageTag.COMBAT,
+        min_adv_level=6,
+    ),
+]
