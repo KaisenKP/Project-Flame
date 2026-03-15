@@ -38,13 +38,14 @@ def _iter_extension_modules(cogs_dir: Path, cogs_package: str) -> list[str]:
     exts: list[str] = []
 
     for py in cogs_dir.rglob("*.py"):
-        if py.name.startswith("_"):
+        if py.name.startswith("_") and py.name != "__init__.py":
             continue
         if not _looks_like_extension(py):
             continue
 
         rel = py.relative_to(cogs_dir).with_suffix("")
-        exts.append(".".join((cogs_package, *rel.parts)))
+        rel_parts = rel.parts[:-1] if rel.name == "__init__" else rel.parts
+        exts.append(".".join((cogs_package, *rel_parts)))
 
     exts.sort()
     return exts
