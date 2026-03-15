@@ -1,4 +1,3 @@
-# cogs/jobs.py
 from __future__ import annotations
 
 from typing import Optional
@@ -9,22 +8,22 @@ from discord.app_commands import checks
 from discord.ext import commands
 
 from services.db import sessions
-from services.users import ensure_user_rows
-from services.vip import is_vip_member
-
 from services.jobs_core import (
-    JOB_DEFS,
     JOB_SWITCH_COST,
     JOB_UNLOCK_LEVEL,
     ensure_job_row,
+    fmt_int,
     get_equipped_key,
     get_level,
     get_or_create_job_row,
     job_row_image_set,
-    fmt_int,
 )
 from services.jobs_embeds import make_panel_embed
 from services.jobs_views import EquipConfirmView, JobsPanelView
+from services.users import ensure_user_rows
+from services.vip import is_vip_member
+
+from .jobs import JOB_MODULES, get_job_def
 
 
 class JobsCog(commands.Cog):
@@ -41,7 +40,7 @@ class JobsCog(commands.Cog):
             return
 
         key = (job or "").strip().lower()
-        d = JOB_DEFS.get(key)
+        d = get_job_def(key)
         if d is None:
             await interaction.response.send_message(f"Unknown job key `{key}`.", ephemeral=True)
             return
@@ -83,7 +82,7 @@ class JobsCog(commands.Cog):
 
         if job is not None and str(job).strip():
             key = str(job).strip().lower()
-            d = JOB_DEFS.get(key)
+            d = get_job_def(key)
             if d is None:
                 await interaction.response.send_message(
                     f"Unknown job key `{key}`. Use `/job` to open the panel.",
@@ -150,7 +149,7 @@ class JobsCog(commands.Cog):
             return
 
         key = job.strip().lower()
-        d = JOB_DEFS.get(key)
+        d = get_job_def(key)
         if d is None:
             await interaction.response.send_message(f"Unknown job key `{key}`.", ephemeral=True)
             return
@@ -175,11 +174,7 @@ class JobsCog(commands.Cog):
         cur = (current or "").lower()
         choices = [
             app_commands.Choice(name=f"{d.name} ({d.key})", value=d.key)
-            for d in JOB_DEFS.values()
+            for d in (mod.definition() for mod in JOB_MODULES.values())
             if cur in d.key or cur in d.name.lower()
         ]
         return choices[:25]
-
-
-async def setup(bot: commands.Bot):
-    await bot.add_cog(JobsCog(bot))
