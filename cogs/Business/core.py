@@ -47,6 +47,7 @@ How this file is intended to be used:
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import random
 from typing import Dict, List, Optional, Sequence
 
 from sqlalchemy import Select, func, select
@@ -139,6 +140,30 @@ class BusinessActionResult:
     message: str
     snapshot: Optional[BusinessHubSnapshot] = None
     manage_snapshot: Optional[BusinessManageSnapshot] = None
+    hired_worker: Optional["HiredWorkerSnapshot"] = None
+    hired_manager: Optional["HiredManagerSnapshot"] = None
+
+
+@dataclass(slots=True)
+class HiredWorkerSnapshot:
+    slot_index: int
+    worker_name: str
+    worker_type: str
+    rarity: str
+    flat_profit_bonus: int
+    percent_profit_bonus_bp: int
+    hire_cost: int
+
+
+@dataclass(slots=True)
+class HiredManagerSnapshot:
+    slot_index: int
+    manager_name: str
+    rarity: str
+    runtime_bonus_hours: int
+    profit_bonus_bp: int
+    auto_restart_charges: int
+    hire_cost: int
 
 
 @dataclass(slots=True)
@@ -454,6 +479,125 @@ def _normalize_worker_type(worker_type: str) -> str:
     key = str(worker_type).strip().lower()
     allowed = {"fast", "efficient", "kind"}
     return key if key in allowed else "efficient"
+
+
+def _roll_weighted_rarity() -> str:
+    roll = random.random()
+    if roll < 0.60:
+        return "common"
+    if roll < 0.85:
+        return "rare"
+    if roll < 0.95:
+        return "epic"
+    if roll < 0.99:
+        return "legendary"
+    return "mythical"
+
+
+def _generate_worker_name(*, worker_type: str, rarity: str) -> str:
+    prefix_pool = {
+        "common": ["Rookie", "Steady", "Local", "Budget"],
+        "rare": ["Skilled", "Trusted", "Prime", "Swift"],
+        "epic": ["Elite", "Veteran", "Master", "Ace"],
+        "legendary": ["Iconic", "Mythic", "Royal", "Titan"],
+        "mythical": ["Celestial", "Eternal", "Godspeed", "Arcane"],
+    }
+    role_pool = {
+        "fast": ["Runner", "Courier", "Sprinter", "Dash"],
+        "efficient": ["Planner", "Optimizer", "Operator", "Engineer"],
+        "kind": ["Host", "Caretaker", "Concierge", "Greeter"],
+    }
+    rarity_key = _normalize_rarity(rarity)
+    type_key = _normalize_worker_type(worker_type)
+    prefix = random.choice(prefix_pool[rarity_key])
+    role = random.choice(role_pool[type_key])
+    badge = random.randint(10, 99)
+    return f"{prefix} {role} {badge}"
+
+
+def _generate_worker_roll() -> dict[str, int | str]:
+    worker_type = random.choice(("fast", "efficient", "kind"))
+    rarity = _roll_weighted_rarity()
+    rarity_flat = {
+        "common": (50, 120),
+        "rare": (120, 260),
+        "epic": (260, 420),
+        "legendary": (420, 750),
+        "mythical": (750, 1200),
+    }
+    rarity_bp = {
+        "common": (10, 60),
+        "rare": (60, 140),
+        "epic": (140, 260),
+        "legendary": (260, 420),
+        "mythical": (420, 650),
+    }
+    flat_low, flat_high = rarity_flat[rarity]
+    bp_low, bp_high = rarity_bp[rarity]
+    flat_bonus = random.randint(flat_low, flat_high)
+    bp_bonus = random.randint(bp_low, bp_high)
+    if worker_type == "fast":
+        bp_bonus = int(round(bp_bonus * 1.2))
+    elif worker_type == "efficient":
+        flat_bonus = int(round(flat_bonus * 1.15))
+    elif worker_type == "kind":
+        flat_bonus = int(round(flat_bonus * 1.05))
+        bp_bonus = int(round(bp_bonus * 1.05))
+    return {
+        "worker_name": _generate_worker_name(worker_type=worker_type, rarity=rarity),
+        "worker_type": worker_type,
+        "rarity": rarity,
+        "flat_profit_bonus": _clamp_int(flat_bonus, 0, 1_000_000),
+        "percent_profit_bonus_bp": _clamp_int(bp_bonus, 0, 250_000),
+    }
+
+
+def _generate_manager_name(*, rarity: str) -> str:
+    prefix_pool = {
+        "common": ["Lead", "Floor", "Shift"],
+        "rare": ["Senior", "Strategic", "Prime"],
+        "epic": ["Executive", "Tactical", "Director"],
+        "legendary": ["Legend", "Oracle", "Chief"],
+        "mythical": ["Sovereign", "Ascendant", "Epoch"],
+    }
+    rarity_key = _normalize_rarity(rarity)
+    prefix = random.choice(prefix_pool[rarity_key])
+    return f"{prefix} Manager {random.randint(10, 99)}"
+
+
+def _generate_manager_roll() -> dict[str, int | str]:
+    rarity = _roll_weighted_rarity()
+    runtime_range = {
+        "common": (0, 2),
+        "rare": (2, 6),
+        "epic": (6, 10),
+        "legendary": (10, 16),
+        "mythical": (16, 24),
+    }
+    bp_range = {
+        "common": (0, 50),
+        "rare": (50, 130),
+        "epic": (130, 260),
+        "legendary": (260, 500),
+        "mythical": (500, 800),
+    }
+    auto_range = {
+        "common": (0, 0),
+        "rare": (0, 1),
+        "epic": (1, 2),
+        "legendary": (2, 3),
+        "mythical": (3, 5),
+    }
+    runtime_low, runtime_high = runtime_range[rarity]
+    bp_low, bp_high = bp_range[rarity]
+    auto_low, auto_high = auto_range[rarity]
+    return {
+        "manager_name": _generate_manager_name(rarity=rarity),
+        "rarity": rarity,
+        "runtime_bonus_hours": random.randint(runtime_low, runtime_high),
+        "profit_bonus_bp": random.randint(bp_low, bp_high),
+        "auto_restart_charges": random.randint(auto_low, auto_high),
+    }
 
 
 def _worker_hire_cost(*, rarity: str, flat_profit_bonus: int, percent_profit_bonus_bp: int) -> int:
@@ -1536,11 +1680,6 @@ async def hire_worker(
     guild_id: int,
     user_id: int,
     business_key: str,
-    worker_name: str,
-    worker_type: str,
-    rarity: str,
-    flat_profit_bonus: int,
-    percent_profit_bonus_bp: int,
 ) -> BusinessActionResult:
     defn = _def_for_key(business_key)
     if defn is None:
@@ -1573,10 +1712,12 @@ async def hire_worker(
             manage_snapshot=manage,
         )
 
-    norm_type = _normalize_worker_type(worker_type)
-    norm_rarity = _normalize_rarity(rarity)
-    flat_bonus = _clamp_int(int(flat_profit_bonus), 0, 1_000_000)
-    bp_bonus = _clamp_int(int(percent_profit_bonus_bp), 0, 250_000)
+    roll = _generate_worker_roll()
+    worker_name = str(roll["worker_name"])
+    norm_type = str(roll["worker_type"])
+    norm_rarity = str(roll["rarity"])
+    flat_bonus = int(roll["flat_profit_bonus"])
+    bp_bonus = int(roll["percent_profit_bonus_bp"])
     hire_cost = _worker_hire_cost(rarity=norm_rarity, flat_profit_bonus=flat_bonus, percent_profit_bonus_bp=bp_bonus)
 
     wallet = await _get_wallet(session, guild_id=guild_id, user_id=user_id)
@@ -1634,6 +1775,89 @@ async def hire_worker(
         message=f"Hired **{row.worker_name}** ({norm_rarity}) into slot **#{free_slot}** for **{hire_cost:,} Silver**.",
         snapshot=hub,
         manage_snapshot=manage,
+        hired_worker=HiredWorkerSnapshot(
+            slot_index=int(free_slot),
+            worker_name=str(row.worker_name),
+            worker_type=str(row.worker_type),
+            rarity=str(row.rarity),
+            flat_profit_bonus=int(row.flat_profit_bonus or 0),
+            percent_profit_bonus_bp=int(row.percent_profit_bonus_bp or 0),
+            hire_cost=int(hire_cost),
+        ),
+    )
+
+
+
+async def hire_worker_manual(
+    session,
+    *,
+    guild_id: int,
+    user_id: int,
+    business_key: str,
+    worker_name: str,
+    worker_type: str,
+    rarity: str,
+    flat_profit_bonus: int,
+    percent_profit_bonus_bp: int,
+) -> BusinessActionResult:
+    defn = _def_for_key(business_key)
+    if defn is None:
+        return BusinessActionResult(ok=False, message="That business does not exist.")
+
+    ownership = await _get_ownership_row(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    if ownership is None:
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        return BusinessActionResult(ok=False, message=f"You do not own **{defn.name}** yet.", snapshot=hub)
+
+    slots = await get_worker_assignment_slots(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    free_slot = next((s.slot_index for s in slots if not s.is_active), None)
+    if free_slot is None:
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        return BusinessActionResult(ok=False, message="All worker slots are full. Upgrade the business to unlock more slots.", snapshot=hub, manage_snapshot=manage)
+
+    norm_type = _normalize_worker_type(worker_type)
+    norm_rarity = _normalize_rarity(rarity)
+    flat_bonus = _clamp_int(int(flat_profit_bonus), 0, 1_000_000)
+    bp_bonus = _clamp_int(int(percent_profit_bonus_bp), 0, 250_000)
+    hire_cost = _worker_hire_cost(rarity=norm_rarity, flat_profit_bonus=flat_bonus, percent_profit_bonus_bp=bp_bonus)
+
+    wallet = await _get_wallet(session, guild_id=guild_id, user_id=user_id)
+    if int(wallet.silver or 0) < hire_cost:
+        short = hire_cost - int(wallet.silver or 0)
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        return BusinessActionResult(ok=False, message=f"You need **{hire_cost:,} Silver** to hire this worker. Short by **{short:,} Silver**.", snapshot=hub, manage_snapshot=manage)
+
+    row = BusinessWorkerAssignmentRow(
+        ownership_id=int(ownership.id), guild_id=int(guild_id), user_id=int(user_id), business_key=str(business_key),
+        slot_index=int(free_slot), worker_name=(str(worker_name).strip() or "Worker")[:64], worker_type=norm_type,
+        rarity=norm_rarity, flat_profit_bonus=flat_bonus, percent_profit_bonus_bp=bp_bonus, special_json={}, is_active=True,
+    )
+    try:
+        async with session.begin_nested():
+            session.add(row)
+            await session.flush()
+    except IntegrityError:
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        return BusinessActionResult(ok=False, message="That worker slot was taken by another action. Please try again.", snapshot=hub, manage_snapshot=manage)
+
+    wallet.silver -= hire_cost
+    if hasattr(wallet, "silver_spent"):
+        wallet.silver_spent += hire_cost
+
+    hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+    manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    return BusinessActionResult(
+        ok=True,
+        message=f"[Admin] Hired **{row.worker_name}** ({norm_rarity}) into slot **#{free_slot}** for **{hire_cost:,} Silver**.",
+        snapshot=hub,
+        manage_snapshot=manage,
+        hired_worker=HiredWorkerSnapshot(
+            slot_index=int(free_slot), worker_name=str(row.worker_name), worker_type=str(row.worker_type), rarity=str(row.rarity),
+            flat_profit_bonus=int(row.flat_profit_bonus or 0), percent_profit_bonus_bp=int(row.percent_profit_bonus_bp or 0), hire_cost=int(hire_cost),
+        ),
     )
 
 
@@ -1707,11 +1931,6 @@ async def hire_manager(
     guild_id: int,
     user_id: int,
     business_key: str,
-    manager_name: str,
-    rarity: str,
-    runtime_bonus_hours: int,
-    profit_bonus_bp: int,
-    auto_restart_charges: int,
 ) -> BusinessActionResult:
     defn = _def_for_key(business_key)
     if defn is None:
@@ -1744,10 +1963,12 @@ async def hire_manager(
             manage_snapshot=manage,
         )
 
-    norm_rarity = _normalize_rarity(rarity)
-    runtime_bonus = _clamp_int(int(runtime_bonus_hours), 0, 48)
-    profit_bp = _clamp_int(int(profit_bonus_bp), 0, 250_000)
-    auto_restart = _clamp_int(int(auto_restart_charges), 0, 100)
+    roll = _generate_manager_roll()
+    manager_name = str(roll["manager_name"])
+    norm_rarity = str(roll["rarity"])
+    runtime_bonus = _clamp_int(int(roll["runtime_bonus_hours"]), 0, 48)
+    profit_bp = _clamp_int(int(roll["profit_bonus_bp"]), 0, 250_000)
+    auto_restart = _clamp_int(int(roll["auto_restart_charges"]), 0, 100)
     hire_cost = _manager_hire_cost(
         rarity=norm_rarity,
         runtime_bonus_hours=runtime_bonus,
@@ -1810,6 +2031,89 @@ async def hire_manager(
         message=f"Hired manager **{row.manager_name}** ({norm_rarity}) into slot **#{free_slot}** for **{hire_cost:,} Silver**.",
         snapshot=hub,
         manage_snapshot=manage,
+        hired_manager=HiredManagerSnapshot(
+            slot_index=int(free_slot),
+            manager_name=str(row.manager_name),
+            rarity=str(row.rarity),
+            runtime_bonus_hours=int(row.runtime_bonus_hours or 0),
+            profit_bonus_bp=int(row.profit_bonus_bp or 0),
+            auto_restart_charges=int(row.auto_restart_charges or 0),
+            hire_cost=int(hire_cost),
+        ),
+    )
+
+
+
+async def hire_manager_manual(
+    session,
+    *,
+    guild_id: int,
+    user_id: int,
+    business_key: str,
+    manager_name: str,
+    rarity: str,
+    runtime_bonus_hours: int,
+    profit_bonus_bp: int,
+    auto_restart_charges: int,
+) -> BusinessActionResult:
+    defn = _def_for_key(business_key)
+    if defn is None:
+        return BusinessActionResult(ok=False, message="That business does not exist.")
+
+    ownership = await _get_ownership_row(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    if ownership is None:
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        return BusinessActionResult(ok=False, message=f"You do not own **{defn.name}** yet.", snapshot=hub)
+
+    slots = await get_manager_assignment_slots(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    free_slot = next((s.slot_index for s in slots if not s.is_active), None)
+    if free_slot is None:
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        return BusinessActionResult(ok=False, message="All manager slots are full. Upgrade the business to unlock more slots.", snapshot=hub, manage_snapshot=manage)
+
+    norm_rarity = _normalize_rarity(rarity)
+    runtime_bonus = _clamp_int(int(runtime_bonus_hours), 0, 48)
+    profit_bp = _clamp_int(int(profit_bonus_bp), 0, 250_000)
+    auto_restart = _clamp_int(int(auto_restart_charges), 0, 100)
+    hire_cost = _manager_hire_cost(rarity=norm_rarity, runtime_bonus_hours=runtime_bonus, profit_bonus_bp=profit_bp, auto_restart_charges=auto_restart)
+
+    wallet = await _get_wallet(session, guild_id=guild_id, user_id=user_id)
+    if int(wallet.silver or 0) < hire_cost:
+        short = hire_cost - int(wallet.silver or 0)
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        return BusinessActionResult(ok=False, message=f"You need **{hire_cost:,} Silver** to hire this manager. Short by **{short:,} Silver**.", snapshot=hub, manage_snapshot=manage)
+
+    row = BusinessManagerAssignmentRow(
+        ownership_id=int(ownership.id), guild_id=int(guild_id), user_id=int(user_id), business_key=str(business_key), slot_index=int(free_slot),
+        manager_name=(str(manager_name).strip() or "Manager")[:64], rarity=norm_rarity, runtime_bonus_hours=runtime_bonus,
+        auto_restart_charges=auto_restart, profit_bonus_bp=profit_bp, special_json={}, is_active=True,
+    )
+    try:
+        async with session.begin_nested():
+            session.add(row)
+            await session.flush()
+    except IntegrityError:
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        return BusinessActionResult(ok=False, message="That manager slot was taken by another action. Please try again.", snapshot=hub, manage_snapshot=manage)
+
+    wallet.silver -= hire_cost
+    if hasattr(wallet, "silver_spent"):
+        wallet.silver_spent += hire_cost
+
+    hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+    manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    return BusinessActionResult(
+        ok=True,
+        message=f"[Admin] Hired manager **{row.manager_name}** ({norm_rarity}) into slot **#{free_slot}** for **{hire_cost:,} Silver**.",
+        snapshot=hub,
+        manage_snapshot=manage,
+        hired_manager=HiredManagerSnapshot(
+            slot_index=int(free_slot), manager_name=str(row.manager_name), rarity=str(row.rarity), runtime_bonus_hours=int(row.runtime_bonus_hours or 0),
+            profit_bonus_bp=int(row.profit_bonus_bp or 0), auto_restart_charges=int(row.auto_restart_charges or 0), hire_cost=int(hire_cost),
+        ),
     )
 
 

@@ -73,6 +73,8 @@ try:
         BusinessDef,
         BusinessHubSnapshot,
         BusinessManageSnapshot,
+        HiredManagerSnapshot,
+        HiredWorkerSnapshot,
         ManagerAssignmentSlotSnapshot,
         WorkerAssignmentSlotSnapshot,
         buy_business,
@@ -82,7 +84,9 @@ try:
         get_manager_assignment_slots,
         get_worker_assignment_slots,
         hire_manager,
+        hire_manager_manual,
         hire_worker,
+        hire_worker_manual,
         remove_manager,
         remove_worker,
         start_business_run,
@@ -181,6 +185,26 @@ except Exception:
         profit_bonus_bp: int
         auto_restart_charges: int
         is_active: bool
+
+    @dataclass(slots=True)
+    class HiredWorkerSnapshot:
+        slot_index: int
+        worker_name: str
+        worker_type: str
+        rarity: str
+        flat_profit_bonus: int
+        percent_profit_bonus_bp: int
+        hire_cost: int
+
+    @dataclass(slots=True)
+    class HiredManagerSnapshot:
+        slot_index: int
+        manager_name: str
+        rarity: str
+        runtime_bonus_hours: int
+        profit_bonus_bp: int
+        auto_restart_charges: int
+        hire_cost: int
 
 
     async def fetch_business_defs(session) -> Sequence[BusinessDef]:
@@ -847,6 +871,72 @@ def _build_result_embed(*, title: str, message: str, ok: bool) -> discord.Embed:
         description=message,
         color=SUCCESS_COLOR if ok else ERROR_COLOR,
     )
+
+
+def _build_worker_hire_result_embed(
+    *,
+    user: discord.abc.User,
+    detail: BusinessManageSnapshot,
+    hired: HiredWorkerSnapshot,
+) -> discord.Embed:
+    e = _base_embed(
+        title=f"✅ Worker Hired • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}",
+        description="Your new worker has been assigned automatically.",
+        color=SUCCESS_COLOR,
+    )
+    e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
+    e.add_field(
+        name="Worker",
+        value=(
+            f"**{_safe_str(hired.worker_name, 'Worker')}**\n"
+            f"Type `{_safe_str(hired.worker_type, 'efficient')}` • Rarity `{_safe_str(hired.rarity, 'common')}`"
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="Bonuses",
+        value=f"+{_fmt_int(hired.flat_profit_bonus)} flat • +{_fmt_int(hired.percent_profit_bonus_bp)} bp",
+        inline=False,
+    )
+    e.add_field(
+        name="Assignment",
+        value=f"Slot `#{_fmt_int(hired.slot_index)}` • Cost `{_fmt_int(hired.hire_cost)} Silver`",
+        inline=False,
+    )
+    return e
+
+
+def _build_manager_hire_result_embed(
+    *,
+    user: discord.abc.User,
+    detail: BusinessManageSnapshot,
+    hired: HiredManagerSnapshot,
+) -> discord.Embed:
+    e = _base_embed(
+        title=f"✅ Manager Hired • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}",
+        description="Your new manager has been assigned automatically.",
+        color=SUCCESS_COLOR,
+    )
+    e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
+    e.add_field(
+        name="Manager",
+        value=f"**{_safe_str(hired.manager_name, 'Manager')}**\nRarity `{_safe_str(hired.rarity, 'common')}`",
+        inline=False,
+    )
+    e.add_field(
+        name="Bonuses",
+        value=(
+            f"+{_fmt_int(hired.runtime_bonus_hours)}h runtime • +{_fmt_int(hired.profit_bonus_bp)} bp • "
+            f"auto `{_fmt_int(hired.auto_restart_charges)}`"
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="Assignment",
+        value=f"Slot `#{_fmt_int(hired.slot_index)}` • Cost `{_fmt_int(hired.hire_cost)} Silver`",
+        inline=False,
+    )
+    return e
 
 
 # =========================================================
@@ -1705,42 +1795,6 @@ class BusinessDetailView(BusinessBaseView):
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
 
-class HireWorkerModal(discord.ui.Modal, title="Hire Worker"):
-    def __init__(self, view: "WorkerAssignmentsView"):
-        super().__init__()
-        self.view = view
-        self.worker_name = discord.ui.TextInput(label="Worker Name", max_length=64)
-        self.worker_type = discord.ui.TextInput(label="Worker Type (fast/efficient/kind)", default="efficient", max_length=16)
-        self.rarity = discord.ui.TextInput(label="Rarity", default="common", max_length=16)
-        self.flat_bonus = discord.ui.TextInput(label="Flat Profit Bonus", default="0", max_length=10)
-        self.bp_bonus = discord.ui.TextInput(label="Percent Bonus (bp)", default="0", max_length=10)
-        for item in (self.worker_name, self.worker_type, self.rarity, self.flat_bonus, self.bp_bonus):
-            self.add_item(item)
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        await _safe_defer(interaction)
-        async with self.view.cog.sessionmaker() as session:
-            async with session.begin():
-                result = await hire_worker(
-                    session,
-                    guild_id=self.view.guild_id,
-                    user_id=self.view.owner_id,
-                    business_key=self.view.business_key,
-                    worker_name=str(self.worker_name.value),
-                    worker_type=str(self.worker_type.value),
-                    rarity=str(self.rarity.value),
-                    flat_profit_bonus=_parse_int(str(self.flat_bonus.value), 0),
-                    percent_profit_bonus_bp=_parse_int(str(self.bp_bonus.value), 0),
-                )
-                detail = await get_business_manage_snapshot(session, guild_id=self.view.guild_id, user_id=self.view.owner_id, business_key=self.view.business_key)
-                slots = await get_worker_assignment_slots(session, guild_id=self.view.guild_id, user_id=self.view.owner_id, business_key=self.view.business_key)
-        if detail is None:
-            await interaction.followup.send("That business could not be found.", ephemeral=True)
-            return
-        embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots)
-        embed.add_field(name="Action", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        await _safe_edit_panel(interaction, embed=embed, view=self.view, message_id=self.view.panel_message_id)
-
 
 class RemoveWorkerModal(discord.ui.Modal, title="Remove Worker"):
     def __init__(self, view: "WorkerAssignmentsView"):
@@ -1766,43 +1820,6 @@ class RemoveWorkerModal(discord.ui.Modal, title="Remove Worker"):
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
         embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots)
-        embed.add_field(name="Action", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        await _safe_edit_panel(interaction, embed=embed, view=self.view, message_id=self.view.panel_message_id)
-
-
-class HireManagerModal(discord.ui.Modal, title="Hire Manager"):
-    def __init__(self, view: "ManagerAssignmentsView"):
-        super().__init__()
-        self.view = view
-        self.manager_name = discord.ui.TextInput(label="Manager Name", max_length=64)
-        self.rarity = discord.ui.TextInput(label="Rarity", default="common", max_length=16)
-        self.runtime_bonus = discord.ui.TextInput(label="Runtime Bonus Hours", default="0", max_length=8)
-        self.bp_bonus = discord.ui.TextInput(label="Profit Bonus (bp)", default="0", max_length=10)
-        self.auto_restart = discord.ui.TextInput(label="Auto Restart Charges", default="0", max_length=8)
-        for item in (self.manager_name, self.rarity, self.runtime_bonus, self.bp_bonus, self.auto_restart):
-            self.add_item(item)
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        await _safe_defer(interaction)
-        async with self.view.cog.sessionmaker() as session:
-            async with session.begin():
-                result = await hire_manager(
-                    session,
-                    guild_id=self.view.guild_id,
-                    user_id=self.view.owner_id,
-                    business_key=self.view.business_key,
-                    manager_name=str(self.manager_name.value),
-                    rarity=str(self.rarity.value),
-                    runtime_bonus_hours=_parse_int(str(self.runtime_bonus.value), 0),
-                    profit_bonus_bp=_parse_int(str(self.bp_bonus.value), 0),
-                    auto_restart_charges=_parse_int(str(self.auto_restart.value), 0),
-                )
-                detail = await get_business_manage_snapshot(session, guild_id=self.view.guild_id, user_id=self.view.owner_id, business_key=self.view.business_key)
-                slots = await get_manager_assignment_slots(session, guild_id=self.view.guild_id, user_id=self.view.owner_id, business_key=self.view.business_key)
-        if detail is None:
-            await interaction.followup.send("That business could not be found.", ephemeral=True)
-            return
-        embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots)
         embed.add_field(name="Action", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
         await _safe_edit_panel(interaction, embed=embed, view=self.view, message_id=self.view.panel_message_id)
 
@@ -1852,7 +1869,27 @@ class WorkerAssignmentsView(BusinessBaseView):
     @discord.ui.button(label="Hire Worker", style=discord.ButtonStyle.success, emoji="➕", row=0)
     async def hire_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
-        await interaction.response.send_modal(HireWorkerModal(self))
+        await _safe_defer(interaction)
+        async with self.cog.sessionmaker() as session:
+            async with session.begin():
+                result = await hire_worker(
+                    session,
+                    guild_id=self.guild_id,
+                    user_id=self.owner_id,
+                    business_key=self.business_key,
+                )
+                detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+                slots = await get_worker_assignment_slots(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+        if detail is None:
+            await interaction.followup.send("That business could not be found.", ephemeral=True)
+            return
+        assignments_embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots)
+        if result.ok and result.hired_worker is not None:
+            result_embed = _build_worker_hire_result_embed(user=interaction.user, detail=detail, hired=result.hired_worker)
+            await _safe_edit_panel(interaction, embeds=[result_embed, assignments_embed], view=self, message_id=self.panel_message_id)
+            return
+        assignments_embed.add_field(name="Action", value="❌ " + result.message, inline=False)
+        await _safe_edit_panel(interaction, embed=assignments_embed, view=self, message_id=self.panel_message_id)
 
     @discord.ui.button(label="Remove Worker", style=discord.ButtonStyle.danger, emoji="➖", row=0)
     async def remove_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -1891,7 +1928,27 @@ class ManagerAssignmentsView(BusinessBaseView):
     @discord.ui.button(label="Hire Manager", style=discord.ButtonStyle.success, emoji="➕", row=0)
     async def hire_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
-        await interaction.response.send_modal(HireManagerModal(self))
+        await _safe_defer(interaction)
+        async with self.cog.sessionmaker() as session:
+            async with session.begin():
+                result = await hire_manager(
+                    session,
+                    guild_id=self.guild_id,
+                    user_id=self.owner_id,
+                    business_key=self.business_key,
+                )
+                detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+                slots = await get_manager_assignment_slots(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+        if detail is None:
+            await interaction.followup.send("That business could not be found.", ephemeral=True)
+            return
+        assignments_embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots)
+        if result.ok and result.hired_manager is not None:
+            result_embed = _build_manager_hire_result_embed(user=interaction.user, detail=detail, hired=result.hired_manager)
+            await _safe_edit_panel(interaction, embeds=[result_embed, assignments_embed], view=self, message_id=self.panel_message_id)
+            return
+        assignments_embed.add_field(name="Action", value="❌ " + result.message, inline=False)
+        await _safe_edit_panel(interaction, embed=assignments_embed, view=self, message_id=self.panel_message_id)
 
     @discord.ui.button(label="Remove Manager", style=discord.ButtonStyle.danger, emoji="➖", row=0)
     async def remove_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -1999,6 +2056,105 @@ class BusinessCog(commands.Cog):
         )
         await interaction.followup.send(embed=embed, view=view)
 
+
+
+    @app_commands.command(name="business_admin_hire_worker", description="[Admin/Debug] Manually hire a worker with explicit stats.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def business_admin_hire_worker_cmd(
+        self,
+        interaction: discord.Interaction,
+        business_key: str,
+        worker_name: str,
+        worker_type: str,
+        rarity: str,
+        flat_profit_bonus: int,
+        percent_profit_bonus_bp: int,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("This only works in a server.", ephemeral=True)
+            return
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                result = await hire_worker_manual(
+                    session,
+                    guild_id=int(interaction.guild.id),
+                    user_id=int(interaction.user.id),
+                    business_key=business_key,
+                    worker_name=worker_name,
+                    worker_type=worker_type,
+                    rarity=rarity,
+                    flat_profit_bonus=flat_profit_bonus,
+                    percent_profit_bonus_bp=percent_profit_bonus_bp,
+                )
+                detail = await get_business_manage_snapshot(
+                    session,
+                    guild_id=int(interaction.guild.id),
+                    user_id=int(interaction.user.id),
+                    business_key=business_key,
+                )
+        if detail is None:
+            await interaction.followup.send("That business could not be found.", ephemeral=True)
+            return
+        if result.ok and result.hired_worker is not None:
+            embed = _build_worker_hire_result_embed(user=interaction.user, detail=detail, hired=result.hired_worker)
+            embed.add_field(name="Mode", value="Admin/Debug Manual Hire", inline=False)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+        await interaction.followup.send(
+            embed=_build_result_embed(title="Admin Worker Hire", message=result.message, ok=False),
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="business_admin_hire_manager", description="[Admin/Debug] Manually hire a manager with explicit stats.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def business_admin_hire_manager_cmd(
+        self,
+        interaction: discord.Interaction,
+        business_key: str,
+        manager_name: str,
+        rarity: str,
+        runtime_bonus_hours: int,
+        profit_bonus_bp: int,
+        auto_restart_charges: int,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("This only works in a server.", ephemeral=True)
+            return
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                result = await hire_manager_manual(
+                    session,
+                    guild_id=int(interaction.guild.id),
+                    user_id=int(interaction.user.id),
+                    business_key=business_key,
+                    manager_name=manager_name,
+                    rarity=rarity,
+                    runtime_bonus_hours=runtime_bonus_hours,
+                    profit_bonus_bp=profit_bonus_bp,
+                    auto_restart_charges=auto_restart_charges,
+                )
+                detail = await get_business_manage_snapshot(
+                    session,
+                    guild_id=int(interaction.guild.id),
+                    user_id=int(interaction.user.id),
+                    business_key=business_key,
+                )
+        if detail is None:
+            await interaction.followup.send("That business could not be found.", ephemeral=True)
+            return
+        if result.ok and result.hired_manager is not None:
+            embed = _build_manager_hire_result_embed(user=interaction.user, detail=detail, hired=result.hired_manager)
+            embed.add_field(name="Mode", value="Admin/Debug Manual Hire", inline=False)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+        await interaction.followup.send(
+            embed=_build_result_embed(title="Admin Manager Hire", message=result.message, ok=False),
+            ephemeral=True,
+        )
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(BusinessCog(bot))
