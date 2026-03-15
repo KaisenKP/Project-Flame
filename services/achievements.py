@@ -19,6 +19,7 @@ from services.achievement_catalog import ACHIEVEMENT_CATALOG, AchievementDefinit
 ANNOUNCEMENT_CHANNEL_ID = 1482554988759875758
 CHATROOM_CHANNEL_ID = 1460856536795578443
 SELFIE_CHANNEL_ID = 1460859587275001866
+JEVARIUS_BOT_ID = 974297735559806986
 _POST_DELAY_SECONDS = 0.5
 _DELETE_AFTER_SECONDS = 10.0
 
@@ -50,6 +51,10 @@ class AchievementContext:
     messages_sent: int = 0
     chatroom_messages: int = 0
     selfies_posted: int = 0
+    images_posted: int = 0
+    reactions_added: int = 0
+    jevarius_interactions: int = 0
+    vc_minutes: int = 0
 
 
 class AchievementAnnouncementService:
@@ -229,6 +234,33 @@ async def _build_context(session: AsyncSession, *, guild_id: int, user_id: int) 
     )
     selfies_posted = int(selfie_counter or 0)
 
+    images_counter = await session.scalar(
+        select(UserAchievementCounterRow.counter_value).where(
+            UserAchievementCounterRow.guild_id == guild_id,
+            UserAchievementCounterRow.user_id == user_id,
+            UserAchievementCounterRow.counter_key == "images_posted",
+        )
+    )
+    images_posted = int(images_counter or 0)
+
+    reactions_counter = await session.scalar(
+        select(UserAchievementCounterRow.counter_value).where(
+            UserAchievementCounterRow.guild_id == guild_id,
+            UserAchievementCounterRow.user_id == user_id,
+            UserAchievementCounterRow.counter_key == "reactions_added",
+        )
+    )
+    reactions_added = int(reactions_counter or 0)
+
+    jevarius_counter = await session.scalar(
+        select(UserAchievementCounterRow.counter_value).where(
+            UserAchievementCounterRow.guild_id == guild_id,
+            UserAchievementCounterRow.user_id == user_id,
+            UserAchievementCounterRow.counter_key == "jevarius_interactions",
+        )
+    )
+    jevarius_interactions = int(jevarius_counter or 0)
+
     messages_sent = int(
         await session.scalar(
             select(func.coalesce(func.sum(ActivityDailyRow.message_count), 0)).where(
@@ -238,6 +270,17 @@ async def _build_context(session: AsyncSession, *, guild_id: int, user_id: int) 
         )
         or 0
     )
+
+    vc_seconds_total = int(
+        await session.scalar(
+            select(func.coalesce(func.sum(ActivityDailyRow.vc_seconds), 0)).where(
+                ActivityDailyRow.guild_id == guild_id,
+                ActivityDailyRow.user_id == user_id,
+            )
+        )
+        or 0
+    )
+    vc_minutes = vc_seconds_total // 60
 
     businesses_owned = int(
         await session.scalar(
@@ -288,6 +331,10 @@ async def _build_context(session: AsyncSession, *, guild_id: int, user_id: int) 
         messages_sent=messages_sent,
         chatroom_messages=chatroom_messages,
         selfies_posted=selfies_posted,
+        images_posted=images_posted,
+        reactions_added=reactions_added,
+        jevarius_interactions=jevarius_interactions,
+        vc_minutes=vc_minutes,
     )
 
 

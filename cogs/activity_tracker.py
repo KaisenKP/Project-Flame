@@ -18,6 +18,7 @@ from services.users import ensure_user_rows
 from services.xp_award import award_xp, get_or_create_activity_daily
 from services.achievements import (
     CHATROOM_CHANNEL_ID,
+    JEVARIUS_BOT_ID,
     SELFIE_CHANNEL_ID,
     check_and_grant_achievements,
     increment_counter,
@@ -109,6 +110,24 @@ class ActivityTrackerCog(commands.Cog):
         state.last_norm_ts = now
         return True
 
+    async def _is_reply_to_jevarius(self, message: discord.Message) -> bool:
+        ref = message.reference
+        if ref is None or ref.message_id is None:
+            return False
+
+        resolved = ref.resolved
+        if isinstance(resolved, discord.Message):
+            return bool(resolved.author and resolved.author.id == JEVARIUS_BOT_ID)
+
+        channel = message.channel
+        if not isinstance(channel, discord.abc.Messageable):
+            return False
+        try:
+            replied = await channel.fetch_message(ref.message_id)
+        except Exception:
+            return False
+        return replied.author.id == JEVARIUS_BOT_ID
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.guild is None:
@@ -155,6 +174,14 @@ class ActivityTrackerCog(commands.Cog):
                         counter_key="chatroom_messages",
                         amount=1,
                     )
+                if message.attachments:
+                    await increment_counter(
+                        session,
+                        guild_id=guild_id,
+                        user_id=user_id,
+                        counter_key="images_posted",
+                        amount=1,
+                    )
                 if message.channel.id == SELFIE_CHANNEL_ID and message.attachments:
                     await increment_counter(
                         session,
@@ -164,11 +191,56 @@ class ActivityTrackerCog(commands.Cog):
                         amount=1,
                     )
 
+                mentioned_jevarius = any(m.id == JEVARIUS_BOT_ID for m in message.mentions)
+                replied_to_jevarius = await self._is_reply_to_jevarius(message)
+                if mentioned_jevarius or replied_to_jevarius:
+                    await increment_counter(
+                        session,
+                        guild_id=guild_id,
+                        user_id=user_id,
+                        counter_key="jevarius_interactions",
+                        amount=1,
+                    )
+
                 await award_xp(
                     session,
                     guild_id=guild_id,
                     user_id=user_id,
                     amount=CHAT_XP.xp_per_message,
+                )
+                unlocks = await check_and_grant_achievements(
+                    session,
+                    guild_id=guild_id,
+                    user_id=user_id,
+                )
+        if unlocks:
+            queue_achievement_announcements(
+                bot=self.bot,
+                guild_id=guild_id,
+                user_id=user_id,
+                unlocks=unlocks,
+            )
+
+    @commands.Cog.listener()
+    async def on_reaction_add(self, reaction: discord.Reaction, user: discord.abc.User):
+        if user.bot:
+            return
+        message = reaction.message
+        if message.guild is None:
+            return
+
+        guild_id = message.guild.id
+        user_id = user.id
+        unlocks = []
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                await ensure_user_rows(session, guild_id=guild_id, user_id=user_id)
+                await increment_counter(
+                    session,
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    counter_key="reactions_added",
+                    amount=1,
                 )
                 unlocks = await check_and_grant_achievements(
                     session,
@@ -421,6 +493,15 @@ class ActivityTrackerCog(commands.Cog):
                             day=day,
                         )
                         daily.vc_seconds += int(seconds)
+
+                    for user_id, minutes in awards:
+                        await increment_counter(
+                            session,
+                            guild_id=guild.id,
+                            user_id=user_id,
+                            counter_key="vc_minutes",
+                            amount=minutes,
+                        )
 
                     for user_id, minutes in awards:
                         await award_xp(

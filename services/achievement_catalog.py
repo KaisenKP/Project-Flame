@@ -367,6 +367,111 @@ def _build_catalog() -> None:
         )
         order += 10
 
+    images_goals = [1, 5, 10, 25, 50, 100, 250, 500]
+    for idx, goal in enumerate(images_goals, start=1):
+        tier = (
+            AchievementTier.COMMON
+            if goal <= 10
+            else AchievementTier.RARE
+            if goal <= 50
+            else AchievementTier.EPIC
+            if goal <= 250
+            else AchievementTier.LEGENDARY
+        )
+        if goal >= 500:
+            tier = AchievementTier.MYTHIC
+        _add(
+            achievement_key=f"images_{goal}",
+            name=f"Gallery Drop {idx}",
+            description=f"Post {goal:,} messages with images attached.",
+            category="social",
+            tier=tier,
+            icon="🖼️",
+            flavor_text="camera roll is eating every single day.",
+            unlock_condition=f"images_posted >= {goal}",
+            sort_order=order,
+        )
+        order += 10
+
+    reaction_goals = [1, 10, 25, 50, 100, 250, 500, 1_000]
+    for idx, goal in enumerate(reaction_goals, start=1):
+        tier = (
+            AchievementTier.COMMON
+            if goal <= 25
+            else AchievementTier.RARE
+            if goal <= 100
+            else AchievementTier.EPIC
+            if goal <= 500
+            else AchievementTier.LEGENDARY
+        )
+        if goal >= 1_000:
+            tier = AchievementTier.MYTHIC
+        _add(
+            achievement_key=f"reactions_{goal}",
+            name=f"Reaction Dealer {idx}",
+            description=f"Add {goal:,} reactions.",
+            category="social",
+            tier=tier,
+            icon="😤",
+            flavor_text="emoji economy booming because of you.",
+            unlock_condition=f"reactions_added >= {goal}",
+            sort_order=order,
+        )
+        order += 10
+
+    jevarius_goals = [1, 5, 10, 25, 50, 100, 250]
+    for idx, goal in enumerate(jevarius_goals, start=1):
+        tier = (
+            AchievementTier.COMMON
+            if goal <= 10
+            else AchievementTier.RARE
+            if goal <= 25
+            else AchievementTier.EPIC
+            if goal <= 100
+            else AchievementTier.LEGENDARY
+        )
+        if goal >= 250:
+            tier = AchievementTier.MYTHIC
+        _add(
+            achievement_key=f"jevarius_{goal}",
+            name=f"Jevarius Ping Arc {idx}",
+            description=f"Ping or reply to Jevarius {goal:,} times.",
+            category="social",
+            tier=tier,
+            icon="🤖",
+            flavor_text="you and jevarius are in silly mode again.",
+            unlock_condition=f"jevarius_interactions >= {goal}",
+            sort_order=order,
+        )
+        order += 10
+
+    vc_goals = [30, 60, 180, 300, 600, 1_000, 2_500, 5_000, 10_000]
+    for idx, goal in enumerate(vc_goals, start=1):
+        tier = (
+            AchievementTier.COMMON
+            if goal <= 60
+            else AchievementTier.RARE
+            if goal <= 300
+            else AchievementTier.EPIC
+            if goal <= 1_000
+            else AchievementTier.LEGENDARY
+        )
+        if goal >= 5_000:
+            tier = AchievementTier.MYTHIC
+        _add(
+            achievement_key=f"vc_{goal}",
+            name=f"Voice Camper {idx}",
+            description=f"Spend {goal:,} total VC minutes while eligible.",
+            category="social",
+            tier=tier,
+            icon="🎧",
+            flavor_text="voice chats got your schedule in a headlock.",
+            unlock_condition=f"vc_minutes >= {goal}",
+            sort_order=order,
+        )
+        order += 10
+
+
 
 _build_catalog()
 
