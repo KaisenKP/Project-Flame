@@ -50,7 +50,7 @@ from services.jobs_core import (
     award_job_xp,
 )
 from .jobs import get_job_def
-from services.job_upgrades import apply_income_upgrade, get_upgrade_level
+from services.job_upgrades import apply_income_upgrade, get_upgrade_level, upgrade_once
 
 # -------------------------
 # Cooldowns
@@ -120,6 +120,13 @@ def _pct(n: int, d: int) -> int:
     d = max(int(d), 1)
     n = max(int(n), 0)
     return int(min(100, (n * 100) // d))
+
+
+def _effective_work_cooldown_seconds(*, base_seconds: float, work_level: int) -> float:
+    # 1% cooldown reduction per work level, capped at 50% reduction.
+    reduction_bp = clamp_int(max(int(work_level), 1) - 1, 0, 50) * 100
+    scale = max(0.5, 1.0 - (reduction_bp / 10_000.0))
+    return max(1.0, float(base_seconds) * scale)
 
 
 # -------------------------
@@ -390,6 +397,7 @@ class WorkCog(commands.Cog):
 
         embed: Optional[discord.Embed] = None
         key: Optional[str] = None
+        used_cooldown_seconds: Optional[float] = None
         unlocked_achievements = []
 
         async with self.sessionmaker() as session:
@@ -417,13 +425,6 @@ class WorkCog(commands.Cog):
                         "Your equipped job is VIP-locked and you’re not VIP. Pick another with **/job**.",
                         ephemeral=True,
                     )
-                    return
-
-                cd_key = (guild_id, user_id, key)
-                ready_at = _COOLDOWNS.get(cd_key, 0.0)
-                if ready_at > now:
-                    left = int(max(ready_at - now, 0))
-                    await interaction.followup.send(f"Cooldown. Try again in **{fmt_int(left)}s**.", ephemeral=True)
                     return
 
                 job_row = await get_or_create_job_row(session, job_key=key)
@@ -458,6 +459,16 @@ class WorkCog(commands.Cog):
                     tier=tier,
                     extras=None,
                 )
+                effective_cd = _effective_work_cooldown_seconds(
+                    base_seconds=float(d.cooldown_seconds),
+                    work_level=int(snap_before.level),
+                )
+                cd_key = (guild_id, user_id, key)
+                ready_at = _COOLDOWNS.get(cd_key, 0.0)
+                if ready_at > now:
+                    left = int(max(ready_at - now, 0))
+                    await interaction.followup.send(f"Cooldown. Try again in **{fmt_int(left)}s**.", ephemeral=True)
+                    return
 
                 job_effects = await compute_effects_from_upgrades_and_items(
                     session,
@@ -647,14 +658,20 @@ class WorkCog(commands.Cog):
                     guild_id=guild_id,
                     user_id=user_id,
                 )
+                used_cooldown_seconds = effective_cd
 
-        if key is not None:
-            job_def = get_job_def(key)
-            if job_def is not None:
-                _COOLDOWNS[(guild_id, user_id, key)] = now + float(job_def.cooldown_seconds)
+        if key is not None and used_cooldown_seconds is not None:
+            _COOLDOWNS[(guild_id, user_id, key)] = now + float(used_cooldown_seconds)
 
         if embed is not None:
-            await interaction.followup.send(embed=embed)
+            await interaction.followup.send(
+                embed=embed,
+                view=_WorkUpgradeView(
+                    sessionmaker=self.sessionmaker,
+                    guild_id=guild_id,
+                    user_id=user_id,
+                ),
+            )
             if unlocked_achievements:
                 queue_achievement_announcements(
                     bot=self.bot,
@@ -665,3 +682,80 @@ class WorkCog(commands.Cog):
         else:
             await interaction.followup.send("Something went wrong generating the work result.", ephemeral=True)
 
+
+class _WorkUpgradeView(discord.ui.View):
+    def __init__(self, *, sessionmaker, guild_id: int, user_id: int):
+        super().__init__(timeout=120)
+        self.sessionmaker = sessionmaker
+        self.guild_id = int(guild_id)
+        self.user_id = int(user_id)
+
+    async def on_timeout(self) -> None:
+        self.upgrade_tool.disabled = True
+
+    @discord.ui.button(label="Upgrade Tool", style=discord.ButtonStyle.primary, emoji="⚙️")
+    async def upgrade_tool(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None or interaction.guild.id != self.guild_id:
+            await interaction.response.send_message("This button only works in the original server.", ephemeral=True)
+            return
+
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Only the user who ran /work can use this button.", ephemeral=True)
+            return
+
+        if button.disabled:
+            await interaction.response.send_message("This upgrade action was already used.", ephemeral=True)
+            return
+
+        button.disabled = True
+        if interaction.message is not None:
+            await interaction.message.edit(view=self)
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                await ensure_user_rows(session, guild_id=self.guild_id, user_id=self.user_id)
+                key = await get_equipped_key(session, guild_id=self.guild_id, user_id=self.user_id)
+                if not key:
+                    await interaction.followup.send("You don’t have a job equipped. Use **/job** first.", ephemeral=True)
+                    return
+
+                d = get_job_def(key)
+                if d is None:
+                    await interaction.followup.send(
+                        "Your equipped job no longer exists. Re-equip with **/job**.",
+                        ephemeral=True,
+                    )
+                    return
+
+                if d.vip_only and not is_vip_member(interaction.user):
+                    await interaction.followup.send(
+                        "Your equipped job is VIP-locked and you’re not VIP. Pick another with **/job**.",
+                        ephemeral=True,
+                    )
+                    return
+
+                job_row = await get_or_create_job_row(session, job_key=key, name=d.name)
+                if not bool(getattr(job_row, "enabled", True)):
+                    await interaction.followup.send(f"Job `{key}` is disabled in DB.", ephemeral=True)
+                    return
+
+                ok, result_text, snap = await upgrade_once(
+                    session,
+                    guild_id=self.guild_id,
+                    user_id=self.user_id,
+                    job_row=job_row,
+                    job_def=d,
+                )
+
+        if not ok:
+            await interaction.followup.send(f"❌ {result_text}", ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            "✅ "
+            f"{result_text}\n"
+            f"Next upgrade cost: **{fmt_int(snap.next_cost)}** silver.",
+            ephemeral=True,
+        )
