@@ -16,6 +16,7 @@ from services.activity_rules import CHAT_XP, VOICE_XP, vc_xp_per_minute
 from services.db import sessions
 from services.users import ensure_user_rows
 from services.xp_award import award_xp, get_or_create_activity_daily
+from services.achievements import check_and_grant_achievements, queue_achievement_announcements
 
 
 _ws_re = re.compile(r"\s+")
@@ -120,6 +121,7 @@ class ActivityTrackerCog(commands.Cog):
         if not ok:
             return
 
+        unlocks = []
         async with self.sessionmaker() as session:
             async with session.begin():
                 await ensure_user_rows(session, guild_id=guild_id, user_id=user_id)
@@ -139,6 +141,18 @@ class ActivityTrackerCog(commands.Cog):
                     user_id=user_id,
                     amount=CHAT_XP.xp_per_message,
                 )
+                unlocks = await check_and_grant_achievements(
+                    session,
+                    guild_id=guild_id,
+                    user_id=user_id,
+                )
+        if unlocks:
+            queue_achievement_announcements(
+                bot=self.bot,
+                guild_id=guild_id,
+                user_id=user_id,
+                unlocks=unlocks,
+            )
 
     # --------------------
     # VC helpers
@@ -251,6 +265,7 @@ class ActivityTrackerCog(commands.Cog):
                 return
 
             async with self.sessionmaker() as session:
+                pending_unlocks: dict[int, list] = {}
                 async with session.begin():
                     open_row = await session.scalar(
                         select(VoiceSessionRow)
@@ -365,6 +380,7 @@ class ActivityTrackerCog(commands.Cog):
             if not awards:
                 continue
 
+            pending_unlocks: dict[int, list] = {}
             async with self.sessionmaker() as session:
                 async with session.begin():
                     for user_id, seconds in vc_seconds_add:
@@ -384,6 +400,20 @@ class ActivityTrackerCog(commands.Cog):
                             user_id=user_id,
                             amount=minutes * per_min,
                         )
+                        unlocks = await check_and_grant_achievements(
+                            session,
+                            guild_id=guild.id,
+                            user_id=user_id,
+                        )
+                        if unlocks:
+                            pending_unlocks[user_id] = unlocks
+            for user_id, unlocks in pending_unlocks.items():
+                queue_achievement_announcements(
+                    bot=self.bot,
+                    guild_id=guild.id,
+                    user_id=user_id,
+                    unlocks=unlocks,
+                )
 
     @vc_tick.before_loop
     async def _before_vc_tick(self):

@@ -20,6 +20,11 @@ from services.vip import is_vip_member
 from services.xp_award import award_xp
 
 from services.jobs_balance import job_xp_for_work, stamina_cost_for_work, user_xp_for_work
+from services.achievements import (
+    check_and_grant_achievements,
+    increment_counter,
+    queue_achievement_announcements,
+)
 
 from services.jobs_core import (
     JOB_DEFS,
@@ -381,6 +386,7 @@ class WorkCog(commands.Cog):
 
         embed: Optional[discord.Embed] = None
         key: Optional[str] = None
+        unlocked_achievements = []
 
         async with self.sessionmaker() as session:
             async with session.begin():
@@ -569,6 +575,13 @@ class WorkCog(commands.Cog):
                 base_user_xp = user_xp_for_work(user_level=user_level, category=d.category)
                 user_xp_gain = apply_bp(base_user_xp, int(merged_effects.user_xp_bonus_bp))
                 await award_xp(session, guild_id=guild_id, user_id=user_id, amount=int(user_xp_gain))
+                await increment_counter(
+                    session,
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    counter_key="jobs_completed",
+                    amount=1,
+                )
 
                 base_job_xp = job_xp_for_work(
                     job_level=job_level_now,
@@ -612,12 +625,24 @@ class WorkCog(commands.Cog):
                     leveled_up=bool(delta.leveled_up),
                     prestiged=bool(delta.prestiged),
                 )
+                unlocked_achievements = await check_and_grant_achievements(
+                    session,
+                    guild_id=guild_id,
+                    user_id=user_id,
+                )
 
         if key is not None and key in JOB_DEFS:
             _COOLDOWNS[(guild_id, user_id, key)] = now + float(JOB_DEFS[key].cooldown_seconds)
 
         if embed is not None:
             await interaction.followup.send(embed=embed)
+            if unlocked_achievements:
+                queue_achievement_announcements(
+                    bot=self.bot,
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    unlocks=unlocked_achievements,
+                )
         else:
             await interaction.followup.send("Something went wrong generating the work result.", ephemeral=True)
 
