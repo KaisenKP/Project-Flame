@@ -589,16 +589,21 @@ async def get_job_row_by_key(session, *, job_key: str) -> Optional[JobRow]:
     return await session.scalar(select(JobRow).where(JobRow.key == key))
 
 
-async def get_or_create_job_row(session, *, job_key: str) -> JobRow:
+async def get_or_create_job_row(session, *, job_key: str, name: Optional[str] = None) -> JobRow:
     d = JOB_DEFS.get(job_key)
     if d is None:
         raise ValueError("Unknown job key")
 
     row = await get_job_row_by_key(session, job_key=job_key)
     if row is None:
-        row = JobRow(key=job_key, name=d.name, enabled=True)
+        row = JobRow(key=job_key, name=name or d.name, enabled=True)
         session.add(row)
         await session.flush()
+    elif name:
+        clean_name = str(name).strip()
+        if clean_name and getattr(row, "name", None) != clean_name:
+            row.name = clean_name
+            await session.flush()
     return row
 
 
