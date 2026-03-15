@@ -487,6 +487,31 @@ class StaminaRow(Base):
     )
 
 
+class AdventureProfileRow(Base):
+    __tablename__ = "adventure_profiles"
+    __table_args__ = (
+        UniqueConstraint("guild_id", "user_id", name="uq_adventure_profiles_guild_user"),
+        Index("ix_adventure_profiles_guild_user", "guild_id", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    adventure_xp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    adventure_level: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    class_key: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+
+    runs_completed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_stage_wins: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        TS,
+        server_default=NOW,
+        onupdate=NOW,
+        nullable=False,
+    )
+
+
 class ToolRow(Base):
     __tablename__ = "tools"
 
