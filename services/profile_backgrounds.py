@@ -20,17 +20,19 @@ DEFAULT_BACKGROUNDS: tuple[BackgroundDef, ...] = (
     BackgroundDef(key="royal_sunrise", name="Royal Sunrise", source="default"),
 )
 
-SEASONAL_BACKGROUNDS: tuple[BackgroundDef, ...] = (
-    BackgroundDef(key="season_winter", name="Winter Pulse", source="seasonal"),
+EVENT_BACKGROUNDS: tuple[BackgroundDef, ...] = (
+    BackgroundDef(key="season_winter", name="Winter Pulse", source="event"),
 )
 
 STORE_BACKGROUNDS: tuple[BackgroundDef, ...] = (
     BackgroundDef(key="store_obsidian", name="Obsidian Grid", source="store"),
 )
 
+RARE_BACKGROUNDS: tuple[BackgroundDef, ...] = ()
+
 ALL_BACKGROUNDS: dict[str, BackgroundDef] = {
     b.key: b
-    for b in (*DEFAULT_BACKGROUNDS, *SEASONAL_BACKGROUNDS, *STORE_BACKGROUNDS)
+    for b in (*DEFAULT_BACKGROUNDS, *EVENT_BACKGROUNDS, *STORE_BACKGROUNDS, *RARE_BACKGROUNDS)
 }
 
 
