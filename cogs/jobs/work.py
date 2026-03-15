@@ -690,10 +690,11 @@ class _WorkUpgradeView(discord.ui.View):
         self.guild_id = int(guild_id)
         self.user_id = int(user_id)
 
+    async def on_timeout(self) -> None:
+        self.upgrade_tool.disabled = True
+
     @discord.ui.button(label="Upgrade Tool", style=discord.ButtonStyle.primary, emoji="⚙️")
     async def upgrade_tool(self, interaction: discord.Interaction, button: discord.ui.Button):
-        _ = button
-
         if interaction.guild is None or interaction.guild.id != self.guild_id:
             await interaction.response.send_message("This button only works in the original server.", ephemeral=True)
             return
@@ -701,6 +702,14 @@ class _WorkUpgradeView(discord.ui.View):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("Only the user who ran /work can use this button.", ephemeral=True)
             return
+
+        if button.disabled:
+            await interaction.response.send_message("This upgrade action was already used.", ephemeral=True)
+            return
+
+        button.disabled = True
+        if interaction.message is not None:
+            await interaction.message.edit(view=self)
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
@@ -720,7 +729,18 @@ class _WorkUpgradeView(discord.ui.View):
                     )
                     return
 
+                if d.vip_only and not is_vip_member(interaction.user):
+                    await interaction.followup.send(
+                        "Your equipped job is VIP-locked and you’re not VIP. Pick another with **/job**.",
+                        ephemeral=True,
+                    )
+                    return
+
                 job_row = await get_or_create_job_row(session, job_key=key, name=d.name)
+                if not bool(getattr(job_row, "enabled", True)):
+                    await interaction.followup.send(f"Job `{key}` is disabled in DB.", ephemeral=True)
+                    return
+
                 ok, result_text, snap = await upgrade_once(
                     session,
                     guild_id=self.guild_id,
