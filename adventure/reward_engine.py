@@ -53,9 +53,28 @@ class RewardEngine:
             chance += 180
         return chance
 
-    def resolve_rare_event(self) -> tuple[AdventureRewards, list[str]]:
+    def resolve_rare_event(self, *, stage_tag: StageTag, party_size: int, class_keys: list[str]) -> tuple[AdventureRewards, list[str]]:
         rewards = AdventureRewards()
-        event = random.choice(["golden_merchant", "traveling_sage", "legendary_chest", "hidden_dungeon", "artifact_shard"])
+        weighted_events: list[tuple[str, int]] = [
+            ("golden_merchant", 24),
+            ("traveling_sage", 20),
+            ("legendary_chest", 12),
+            ("hidden_dungeon", 18),
+            ("artifact_shard", 16),
+            ("echoing_arsenal", 10),
+            ("moonwell_oasis", 14),
+        ]
+        if stage_tag == StageTag.BOSS:
+            weighted_events.append(("war_trophy", 18))
+        if stage_tag == StageTag.SOCIAL:
+            weighted_events.append(("patron_contract", 18))
+        if party_size >= 3:
+            weighted_events.append(("traveling_sage", 6))
+            weighted_events.append(("patron_contract", 5))
+        if AdventureClass.TREASURE_HUNTER.value in class_keys:
+            weighted_events.append(("golden_merchant", 8))
+            weighted_events.append(("legendary_chest", 6))
+        event = random.choices([name for name, _ in weighted_events], weights=[weight for _, weight in weighted_events], k=1)[0]
         if event == "golden_merchant":
             bonus = random.randint(400, 1000)
             rewards.silver += bonus
@@ -75,6 +94,29 @@ class RewardEngine:
             rewards.silver += silver
             rewards.adventure_xp += advxp
             return rewards, ["🕳️ Rare Event: A hidden dungeon corridor opens behind a false wall.", f"You salvage relic fragments worth **{fmt_int(silver)} silver** and **+{fmt_int(advxp)} Adventure XP**."]
+        if event == "echoing_arsenal":
+            xp = random.randint(80, 180)
+            rewards.xp += xp
+            rewards.items["training_manual"] = rewards.items.get("training_manual", 0) + 1
+            return rewards, ["🛡️ Rare Event: You uncover an echoing arsenal sealed in time.", f"Ancient drills grant **+{fmt_int(xp)} XP** and a **{ITEMS['training_manual'].name}**."]
+        if event == "moonwell_oasis":
+            silver = random.randint(250, 620)
+            advxp = random.randint(30, 70)
+            rewards.silver += silver
+            rewards.adventure_xp += advxp
+            rewards.items["energy_drink"] = rewards.items.get("energy_drink", 0) + 1
+            return rewards, ["🌙 Rare Event: A moonwell oasis appears between heartbeats.", f"You recover valuables worth **{fmt_int(silver)} silver**, gain **+{fmt_int(advxp)} Adventure XP**, and bottle an **{ITEMS['energy_drink'].name}**."]
+        if event == "war_trophy":
+            silver = random.randint(500, 1200)
+            rewards.silver += silver
+            rewards.lootboxes["rare"] = rewards.lootboxes.get("rare", 0) + 1
+            return rewards, ["🏆 Rare Event: A fallen warlord cache surfaces after the battle.", f"You salvage **{fmt_int(silver)} silver** and secure a **Rare Lootbox**."]
+        if event == "patron_contract":
+            xp = random.randint(110, 220)
+            silver = random.randint(200, 500)
+            rewards.xp += xp
+            rewards.silver += silver
+            return rewards, ["📝 Rare Event: A hidden patron offers a high-risk contract on the spot.", f"Smart negotiation earns **+{fmt_int(xp)} XP** and **{fmt_int(silver)} silver**."]
         item_key = random.choice(["training_manual", "study_sprint_timer", "adrenaline_patch"])
         rewards.items[item_key] = rewards.items.get(item_key, 0) + 1
         return rewards, ["🧿 Rare Event: An ancient artifact shard hums in your hands.", f"The shard stabilizes into **{ITEMS[item_key].name}**."]
