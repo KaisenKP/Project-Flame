@@ -75,6 +75,7 @@ try:
         BusinessManageSnapshot,
         HiredManagerSnapshot,
         HiredWorkerSnapshot,
+        WorkerCandidateSnapshot,
         ManagerAssignmentSlotSnapshot,
         WorkerAssignmentSlotSnapshot,
         buy_business,
@@ -87,6 +88,8 @@ try:
         hire_manager_manual,
         hire_worker,
         hire_worker_manual,
+        roll_worker_candidate,
+        WORKER_CANDIDATE_REROLL_COST,
         remove_manager,
         remove_worker,
         start_business_run,
@@ -195,6 +198,16 @@ except Exception:
         flat_profit_bonus: int
         percent_profit_bonus_bp: int
         hire_cost: int
+
+
+    @dataclass(slots=True)
+    class WorkerCandidateSnapshot:
+        worker_name: str
+        worker_type: str
+        rarity: str
+        flat_profit_bonus: int
+        percent_profit_bonus_bp: int
+        reroll_cost: int
 
     @dataclass(slots=True)
     class HiredManagerSnapshot:
@@ -436,6 +449,25 @@ except Exception:
         )
 
 
+try:
+    WORKER_CANDIDATE_REROLL_COST
+except NameError:
+    WORKER_CANDIDATE_REROLL_COST = 500
+
+try:
+    roll_worker_candidate
+except NameError:
+    async def roll_worker_candidate(
+        session,
+        *,
+        guild_id: int,
+        user_id: int,
+        business_key: str,
+        reroll_cost: int = WORKER_CANDIDATE_REROLL_COST,
+    ) -> BusinessActionResult:
+        _ = session, guild_id, user_id, business_key, reroll_cost
+        return BusinessActionResult(ok=False, message="Worker candidate services are not wired yet.")
+
 # =========================================================
 # CONSTANTS
 # =========================================================
@@ -550,7 +582,8 @@ async def _safe_defer(interaction: discord.Interaction, *, thinking: bool = Fals
 async def _safe_edit_panel(
     interaction: discord.Interaction,
     *,
-    embed: discord.Embed,
+    embed: Optional[discord.Embed] = None,
+    embeds: Optional[Sequence[discord.Embed]] = None,
     view: Optional[discord.ui.View] = None,
     message_id: Optional[int] = None,
 ) -> bool:
@@ -567,11 +600,12 @@ async def _safe_edit_panel(
         return False
 
     try:
-        await interaction.followup.edit_message(
-            message_id=int(panel_message_id),
-            embed=embed,
-            view=view,
-        )
+        kwargs = {"message_id": int(panel_message_id), "view": view}
+        if embeds:
+            kwargs["embeds"] = list(embeds)
+        else:
+            kwargs["embed"] = embed
+        await interaction.followup.edit_message(**kwargs)
         return True
     except (discord.NotFound, discord.HTTPException, AttributeError):
         await interaction.followup.send(
@@ -812,7 +846,7 @@ def _build_worker_assignments_embed(
     title = f"👷 Worker Panel • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}"
     description = (
         f"Slots in use: `{_slot_text(getattr(detail, 'worker_slots_used', 0), getattr(detail, 'worker_slots_total', 0))}`\n"
-        "Use **Hire Worker** to fill a free slot or **Remove Worker** to deactivate an assigned worker."
+        "Use **Hire Worker** to open recruitment, then **Reroll Worker** for a new candidate or **Cancel** to return."
     )
     e = _base_embed(title=title, description=description)
     e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
@@ -900,9 +934,30 @@ def _build_worker_hire_result_embed(
     )
     e.add_field(
         name="Assignment",
-        value=f"Slot `#{_fmt_int(hired.slot_index)}` • Cost `{_fmt_int(hired.hire_cost)} Silver`",
+        value=f"Slot `#{_fmt_int(hired.slot_index)}` • Cost `Free`",
         inline=False,
     )
+    e.set_footer(text="Worker successfully assigned.")
+    return e
+
+
+def _build_worker_candidate_embed(
+    *,
+    user: discord.abc.User,
+    detail: BusinessManageSnapshot,
+    candidate: WorkerCandidateSnapshot,
+) -> discord.Embed:
+    e = _base_embed(
+        title="👷 Worker Candidate",
+        description="Review this worker before hiring.",
+    )
+    e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
+    e.add_field(name="Name", value=f"**{_safe_str(candidate.worker_name, 'Worker')}**", inline=False)
+    e.add_field(name="Worker Type", value=f"`{_safe_str(candidate.worker_type, 'efficient')}`", inline=True)
+    e.add_field(name="Rarity", value=f"`{_safe_str(candidate.rarity, 'common')}`", inline=True)
+    e.add_field(name="Flat Profit Bonus", value=f"+{_fmt_int(getattr(candidate, 'flat_profit_bonus', 0))}", inline=True)
+    e.add_field(name="Percent Profit Bonus", value=f"+{_fmt_int(getattr(candidate, 'percent_profit_bonus_bp', 0))} bp", inline=True)
+    e.set_footer(text=f"Reroll Cost: {_fmt_int(getattr(candidate, 'reroll_cost', WORKER_CANDIDATE_REROLL_COST))} Silver")
     return e
 
 
@@ -1865,40 +1920,113 @@ class WorkerAssignmentsView(BusinessBaseView):
         super().__init__(cog=cog, owner_id=owner_id, guild_id=guild_id)
         self.business_key = business_key
         self.panel_message_id = int(panel_message_id)
+        self.current_candidate: Optional[WorkerCandidateSnapshot] = None
+
+    async def _refresh_assignments_embed(self, interaction: discord.Interaction) -> Optional[tuple[BusinessManageSnapshot, Sequence[WorkerAssignmentSlotSnapshot], discord.Embed]]:
+        async with self.cog.sessionmaker() as session:
+            async with session.begin():
+                detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+                slots = await get_worker_assignment_slots(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+        if detail is None:
+            await interaction.followup.send("That business could not be found.", ephemeral=True)
+            return None
+        return detail, slots, _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots)
+
+    async def _show_recruitment_board(self, interaction: discord.Interaction, action_message: Optional[str] = None) -> None:
+        payload = await self._refresh_assignments_embed(interaction)
+        if payload is None:
+            return
+        detail, _slots, assignments_embed = payload
+        if self.current_candidate is None:
+            assignments_embed.add_field(
+                name="Recruitment Board",
+                value=f"Press **Hire Worker** to generate a candidate for **{_fmt_int(WORKER_CANDIDATE_REROLL_COST)} Silver**.",
+                inline=False,
+            )
+            if action_message:
+                assignments_embed.add_field(name="Action", value=action_message, inline=False)
+            await _safe_edit_panel(interaction, embed=assignments_embed, view=self, message_id=self.panel_message_id)
+            return
+
+        candidate_embed = _build_worker_candidate_embed(user=interaction.user, detail=detail, candidate=self.current_candidate)
+        if action_message:
+            candidate_embed.add_field(name="Action", value=action_message, inline=False)
+        await _safe_edit_panel(interaction, embeds=[candidate_embed, assignments_embed], view=self, message_id=self.panel_message_id)
 
     @discord.ui.button(label="Hire Worker", style=discord.ButtonStyle.success, emoji="➕", row=0)
     async def hire_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await _safe_defer(interaction)
+
+        if self.current_candidate is None:
+            async with self.cog.sessionmaker() as session:
+                async with session.begin():
+                    result = await roll_worker_candidate(
+                        session,
+                        guild_id=self.guild_id,
+                        user_id=self.owner_id,
+                        business_key=self.business_key,
+                        reroll_cost=WORKER_CANDIDATE_REROLL_COST,
+                    )
+            if not result.ok or result.worker_candidate is None:
+                await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
+                return
+            self.current_candidate = result.worker_candidate
+            await self._show_recruitment_board(interaction, action_message="✅ Candidate generated. Hiring is free.")
+            return
+
+        candidate = self.current_candidate
         async with self.cog.sessionmaker() as session:
             async with session.begin():
-                result = await hire_worker(
+                result = await hire_worker_manual(
                     session,
                     guild_id=self.guild_id,
                     user_id=self.owner_id,
                     business_key=self.business_key,
+                    worker_name=str(getattr(candidate, "worker_name", "Worker")),
+                    worker_type=str(getattr(candidate, "worker_type", "efficient")),
+                    rarity=str(getattr(candidate, "rarity", "common")),
+                    flat_profit_bonus=int(getattr(candidate, "flat_profit_bonus", 0) or 0),
+                    percent_profit_bonus_bp=int(getattr(candidate, "percent_profit_bonus_bp", 0) or 0),
+                    charge_silver=False,
                 )
                 detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
                 slots = await get_worker_assignment_slots(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
+
         assignments_embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots)
         if result.ok and result.hired_worker is not None:
+            self.current_candidate = None
             result_embed = _build_worker_hire_result_embed(user=interaction.user, detail=detail, hired=result.hired_worker)
             await _safe_edit_panel(interaction, embeds=[result_embed, assignments_embed], view=self, message_id=self.panel_message_id)
             return
-        assignments_embed.add_field(name="Action", value="❌ " + result.message, inline=False)
-        await _safe_edit_panel(interaction, embed=assignments_embed, view=self, message_id=self.panel_message_id)
+        await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
 
-    @discord.ui.button(label="Remove Worker", style=discord.ButtonStyle.danger, emoji="➖", row=0)
-    async def remove_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    @discord.ui.button(label="Reroll Worker", style=discord.ButtonStyle.primary, emoji="🎲", row=0)
+    async def reroll_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
-        await interaction.response.send_modal(RemoveWorkerModal(self))
+        await _safe_defer(interaction)
+        async with self.cog.sessionmaker() as session:
+            async with session.begin():
+                result = await roll_worker_candidate(
+                    session,
+                    guild_id=self.guild_id,
+                    user_id=self.owner_id,
+                    business_key=self.business_key,
+                    reroll_cost=WORKER_CANDIDATE_REROLL_COST,
+                )
+        if not result.ok or result.worker_candidate is None:
+            await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
+            return
+        self.current_candidate = result.worker_candidate
+        await self._show_recruitment_board(interaction, action_message="✅ Candidate rerolled.")
 
-    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, emoji="⬅️", row=1)
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="⬅️", row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
+        self.current_candidate = None
         await _safe_defer(interaction)
         async with self.cog.sessionmaker() as session:
             async with session.begin():
