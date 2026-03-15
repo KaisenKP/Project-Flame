@@ -10,8 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import JobRow, UserJobUpgradeRow, WalletRow
 from services.jobs_core import JobCategory, JobDef, fmt_int
 
-COST_GROWTH = 1.25
-INCOME_GROWTH = 1.25
+COST_GROWTH = 1.5
+INCOME_GROWTH_PER_LEVEL = 0.25
 
 BASE_UPGRADE_COST_BY_CATEGORY: Dict[JobCategory, int] = {
     JobCategory.EASY: 25,
@@ -63,7 +63,7 @@ def current_upgrade_cost(job_def: JobDef, level: int) -> int:
 
 def income_multiplier_for_level(level: int) -> float:
     lvl = max(int(level), 0)
-    return INCOME_GROWTH ** lvl
+    return 1.0 + (INCOME_GROWTH_PER_LEVEL * lvl)
 
 
 def apply_income_upgrade(base_income: int, upgrade_level: int) -> int:
