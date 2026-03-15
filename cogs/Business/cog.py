@@ -86,6 +86,7 @@ try:
         remove_manager,
         remove_worker,
         start_business_run,
+        stop_business_run,
         upgrade_business,
     )
 except Exception:
@@ -384,6 +385,19 @@ except Exception:
             message="Business services are not wired yet. Build start_business_run(...) in cogs/Business/core.py.",
         )
 
+    async def stop_business_run(
+        session,
+        *,
+        guild_id: int,
+        user_id: int,
+        business_key: str,
+    ) -> BusinessActionResult:
+        _ = session, guild_id, user_id, business_key
+        return BusinessActionResult(
+            ok=False,
+            message="Business services are not wired yet. Build stop_business_run(...) in cogs/Business/core.py.",
+        )
+
     async def upgrade_business(
         session,
         *,
@@ -499,12 +513,12 @@ def _build_hub_embed(
     owned_cards = [c for c in snap.cards if c.owned]
 
     desc = (
-        f"💰 **Silver:** `{_fmt_int(snap.silver_balance)}`\n"
-        f"📈 **Active Income:** `{_fmt_int(snap.total_hourly_income_active)}/hr`\n"
-        f"🏢 **Businesses Owned:** `{_fmt_int(snap.owned_count)}`"
+        f"`Silver` `{_fmt_int(snap.silver_balance)}` • "
+        f"`Active` `{_fmt_int(snap.total_hourly_income_active)}/hr` • "
+        f"`Owned` `{_fmt_int(snap.owned_count)}`"
     )
 
-    e = _base_embed(title="🏢 Your Businesses", description=desc)
+    e = _base_embed(title="🏢 Business Hub", description=desc)
     e.set_author(
         name=_safe_str(user),
         icon_url=getattr(getattr(user, "display_avatar", None), "url", None),
@@ -516,30 +530,27 @@ def _build_hub_embed(
 
     if not owned_cards:
         e.add_field(
-            name="No Businesses Yet",
-            value=(
-                "You don’t own any businesses yet.\n"
-                "Use **🛒 Buy** to get started."
-            ),
+            name="No Businesses",
+            value="Use **Buy** to purchase your first business.",
             inline=False,
         )
         return e
 
-    lines: list[str] = []
+    rows: list[str] = []
     for c in owned_cards[:10]:
-        runtime_txt = f"{_fmt_int(c.runtime_remaining_hours)}h left" if c.running else "Not running"
-        lines.append(
-            f"{c.emoji} **{c.name}**\n"
-            f"└ {_status_badge(c.running, c.owned)} • `{_fmt_int(c.hourly_profit)}/hr`\n"
-            f"└ ⏱️ {runtime_txt}"
+        state = "Running" if c.running else "Stopped"
+        remaining = f"{_fmt_int(c.runtime_remaining_hours)}h" if c.running else "—"
+        rows.append(
+            f"{c.emoji} **{c.name}** • Lvl `{_fmt_int(c.level)}`\n"
+            f"`Status` **{state}** • `Time Left` `{remaining}` • `Profit` `{_fmt_int(c.hourly_profit)}/hr`"
         )
 
+    e.add_field(name="Overview", value="\n\n".join(rows), inline=False)
     e.add_field(
-        name="Your Business List",
-        value="\n\n".join(lines),
+        name="Controls",
+        value="Select a business below, then use **Run**, **Stop**, **Manage**, **Workers**, **Managers**, or **Upgrade**.",
         inline=False,
     )
-
     return e
 
 
@@ -668,50 +679,45 @@ def _build_business_detail_embed(
     user: discord.abc.User,
     snap: BusinessManageSnapshot,
 ) -> discord.Embed:
-    owned_badge = "✅ Owned" if snap.owned else "🔒 Locked"
-    running_badge = "🟢 Running" if snap.running else "⚪ Idle"
+    status = "🟢 Running" if snap.running else "🔴 Stopped"
+    remaining = f"{_fmt_int(snap.runtime_remaining_hours)}h" if snap.running else "—"
+    projected_total = int(snap.hourly_profit) * int(snap.total_runtime_hours)
 
-    desc = (
-        f"{snap.emoji} **{snap.name}**\n"
-        f"{_safe_str(snap.description)}\n\n"
-        f"🏷️ **Status:** {owned_badge} • {running_badge}\n"
-        f"📈 **Current Hourly Profit:** `{_fmt_int(snap.hourly_profit)}/hr`\n"
-        f"💼 **Base Hourly Profit:** `{_fmt_int(snap.base_hourly_income)}/hr`\n"
-        f"⏱️ **Runtime:** `{_fmt_int(snap.runtime_remaining_hours)}h` remaining / `{_fmt_int(snap.total_runtime_hours)}h` total"
+    e = _base_embed(
+        title=f"📊 {snap.emoji} {snap.name}",
+        description=f"`Status` {status} • `Level` `{_fmt_int(snap.level)}` • `Prestige` `{_fmt_int(snap.prestige)}`",
     )
-
-    e = _base_embed(title=f"{snap.emoji} Business Details", description=desc)
     e.set_author(name=_safe_str(user), icon_url=getattr(getattr(user, "display_avatar", None), "url", None))
 
     e.add_field(
-        name="Progress",
+        name="Run Status",
         value=(
-            f"🏗️ **Level:** `{_fmt_int(snap.level)}`\n"
-            f"✨ **Prestige:** `{_fmt_int(snap.prestige)}`\n"
-            f"⬆️ **Upgrade Cost:** `{_fmt_int(snap.upgrade_cost or 0)}` Silver"
+            f"Runtime Remaining: `{remaining}`\n"
+            f"Cycle Runtime: `{_fmt_int(snap.total_runtime_hours)}h`\n"
+            f"Projected Cycle Profit: `{_fmt_int(projected_total)} Silver`"
         ),
         inline=True,
     )
     e.add_field(
-        name="Staffing",
+        name="Income",
         value=(
-            f"👷 **Workers:** `{_slot_text(snap.worker_slots_used, snap.worker_slots_total)}`\n"
-            f"🧑‍💼 **Managers:** `{_slot_text(snap.manager_slots_used, snap.manager_slots_total)}`"
+            f"Current Profit: `{_fmt_int(snap.hourly_profit)}/hr`\n"
+            f"Base Profit: `{_fmt_int(snap.base_hourly_income)}/hr`\n"
+            f"Upgrade Cost: `{_fmt_int(snap.upgrade_cost or 0)} Silver`"
         ),
         inline=True,
     )
     e.add_field(
-        name="Business Flavor",
-        value=_safe_str(snap.flavor, "No flavor text configured yet."),
+        name="Staff",
+        value=(
+            f"Workers: `{_slot_text(snap.worker_slots_used, snap.worker_slots_total)}`\n"
+            f"Managers: `{_slot_text(snap.manager_slots_used, snap.manager_slots_total)}`"
+        ),
         inline=False,
     )
 
     if snap.notes:
-        e.add_field(
-            name="Notes",
-            value="\n".join(f"• {x}" for x in snap.notes[:10]),
-            inline=False,
-        )
+        e.add_field(name="Active Bonuses", value="\n".join(f"• {x}" for x in snap.notes[:6]), inline=False)
 
     if snap.banner_url:
         e.set_image(url=snap.banner_url)
@@ -721,21 +727,20 @@ def _build_business_detail_embed(
     return e
 
 
-
 def _build_worker_assignments_embed(
     *,
     user: discord.abc.User,
     detail: BusinessManageSnapshot,
     slots: Sequence[WorkerAssignmentSlotSnapshot],
 ) -> discord.Embed:
-    e = _base_embed(title=f"👷 Worker Assignments • {detail.emoji} {detail.name}")
+    e = _base_embed(title=f"👷 Worker Panel • {detail.emoji} {detail.name}")
     e.set_author(name=_safe_str(user), icon_url=getattr(getattr(user, "display_avatar", None), "url", None))
     lines: list[str] = []
     for slot in slots:
         if slot.is_active:
             lines.append(
                 f"`#{slot.slot_index}` **{_safe_str(slot.worker_name, 'Worker')}** ({_safe_str(slot.rarity, 'common')})\n"
-                f"└ type `{_safe_str(slot.worker_type, 'efficient')}` • +{_fmt_int(slot.flat_profit_bonus)} flat • +{_fmt_int(slot.percent_profit_bonus_bp)} bp"
+                f"└ Type `{_safe_str(slot.worker_type, 'efficient')}` • Rarity `{_safe_str(slot.rarity, 'common')}` • +{_fmt_int(slot.flat_profit_bonus)} flat • +{_fmt_int(slot.percent_profit_bonus_bp)} bp • Status `Active`"
             )
         else:
             lines.append(f"`#{slot.slot_index}` *(empty)*")
@@ -753,14 +758,14 @@ def _build_manager_assignments_embed(
     detail: BusinessManageSnapshot,
     slots: Sequence[ManagerAssignmentSlotSnapshot],
 ) -> discord.Embed:
-    e = _base_embed(title=f"🧑‍💼 Manager Assignments • {detail.emoji} {detail.name}")
+    e = _base_embed(title=f"🧑‍💼 Manager Panel • {detail.emoji} {detail.name}")
     e.set_author(name=_safe_str(user), icon_url=getattr(getattr(user, "display_avatar", None), "url", None))
     lines: list[str] = []
     for slot in slots:
         if slot.is_active:
             lines.append(
                 f"`#{slot.slot_index}` **{_safe_str(slot.manager_name, 'Manager')}** ({_safe_str(slot.rarity, 'common')})\n"
-                f"└ +{_fmt_int(slot.runtime_bonus_hours)}h runtime • +{_fmt_int(slot.profit_bonus_bp)} bp • auto `{_fmt_int(slot.auto_restart_charges)}`"
+                f"└ Rarity `{_safe_str(slot.rarity, 'common')}` • +{_fmt_int(slot.runtime_bonus_hours)}h runtime • +{_fmt_int(slot.profit_bonus_bp)} bp • auto `{_fmt_int(slot.auto_restart_charges)}` • Status `Active`"
             )
         else:
             lines.append(f"`#{slot.slot_index}` *(empty)*")
@@ -1089,6 +1094,51 @@ class ManageBusinessSelect(discord.ui.Select):
 # VIEWS
 # =========================================================
 
+class HubBusinessSelect(discord.ui.Select):
+    def __init__(self, *, view: "BusinessHubView"):
+        self.hub_view = view
+        owned = [c for c in view.hub_snapshot.cards if c.owned]
+        options: list[discord.SelectOption] = []
+        for c in owned[:25]:
+            options.append(
+                discord.SelectOption(
+                    label=_trim(c.name, 100),
+                    value=c.key,
+                    description=_trim(f"Lvl {_fmt_int(c.level)} • {_status_badge(c.running, c.owned)} • {_fmt_int(c.hourly_profit)}/hr", 100),
+                    emoji=c.emoji,
+                    default=(c.key == view.selected_business_key),
+                )
+            )
+        super().__init__(
+            placeholder="Select business for controls...",
+            min_values=1,
+            max_values=1,
+            options=options or [discord.SelectOption(label="No owned businesses", value="__none__")],
+            disabled=(len(owned) == 0),
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        picked = self.values[0]
+        if picked == "__none__":
+            await interaction.response.send_message("You do not own a business yet.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        self.hub_view.selected_business_key = picked
+        async with self.hub_view.cog.sessionmaker() as session:
+            async with session.begin():
+                snap = await get_business_hub_snapshot(session, guild_id=self.hub_view.guild_id, user_id=self.hub_view.owner_id)
+        embed = _build_hub_embed(user=interaction.user, snap=snap)
+        view = BusinessHubView(
+            cog=self.hub_view.cog,
+            owner_id=self.hub_view.owner_id,
+            guild_id=self.hub_view.guild_id,
+            hub_snapshot=snap,
+            selected_business_key=picked,
+        )
+        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
+
+
 class BusinessHubView(BusinessBaseView):
     def __init__(
         self,
@@ -1097,122 +1147,160 @@ class BusinessHubView(BusinessBaseView):
         owner_id: int,
         guild_id: int,
         hub_snapshot: BusinessHubSnapshot,
+        selected_business_key: Optional[str] = None,
     ):
         super().__init__(cog=cog, owner_id=owner_id, guild_id=guild_id)
         self.hub_snapshot = hub_snapshot
+        owned_cards = [c for c in hub_snapshot.cards if c.owned]
+        self.selected_business_key = selected_business_key or (owned_cards[0].key if owned_cards else None)
+        self.add_item(HubBusinessSelect(view=self))
         self._configure_buttons()
 
     def _configure_buttons(self) -> None:
         owns_all = self.hub_snapshot.total_count > 0 and self.hub_snapshot.owned_count >= self.hub_snapshot.total_count
+        has_selected = bool(self.selected_business_key)
         self.buy_button.disabled = owns_all
-        self.run_button.disabled = self.hub_snapshot.owned_count <= 0
-        self.manage_button.disabled = self.hub_snapshot.owned_count <= 0
+        self.manage_button.disabled = not has_selected
+        self.run_button.disabled = not has_selected
+        self.stop_button.disabled = not has_selected
+        self.workers_button.disabled = not has_selected
+        self.managers_button.disabled = not has_selected
+        self.upgrade_button.disabled = not has_selected
 
-    @discord.ui.button(label="Buy", style=discord.ButtonStyle.success, emoji="🛒", row=0)
-    async def buy_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        _ = button
-        await interaction.response.defer()
-
+    async def _load_selected_detail(self):
+        if not self.selected_business_key:
+            return None
         async with self.cog.sessionmaker() as session:
             async with session.begin():
-                defs = await fetch_business_defs(session)
-                snap = await get_business_hub_snapshot(
+                return await get_business_manage_snapshot(
                     session,
                     guild_id=self.guild_id,
                     user_id=self.owner_id,
+                    business_key=self.selected_business_key,
                 )
 
-        embed = _build_buy_menu_embed(user=interaction.user, defs=defs, snap=snap)
-        view = BuyBusinessView(
-            cog=self.cog,
-            owner_id=self.owner_id,
-            guild_id=self.guild_id,
-            defs=defs,
-            hub_snapshot=snap,
-        )
-        await interaction.followup.edit_message(
-            message_id=interaction.message.id,
-            embed=embed,
-            view=view,
-        )
-
-    @discord.ui.button(label="Run", style=discord.ButtonStyle.primary, emoji="▶️", row=0)
-    async def run_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        _ = button
-        await interaction.response.defer()
-
-        async with self.cog.sessionmaker() as session:
-            async with session.begin():
-                snap = await get_business_hub_snapshot(
-                    session,
-                    guild_id=self.guild_id,
-                    user_id=self.owner_id,
-                )
-
-        embed = _build_run_menu_embed(user=interaction.user, snap=snap)
-        view = RunBusinessView(
-            cog=self.cog,
-            owner_id=self.owner_id,
-            guild_id=self.guild_id,
-            hub_snapshot=snap,
-        )
-        await interaction.followup.edit_message(
-            message_id=interaction.message.id,
-            embed=embed,
-            view=view,
-        )
-
-    @discord.ui.button(label="Manage", style=discord.ButtonStyle.secondary, emoji="🛠️", row=0)
+    @discord.ui.button(label="Manage Business", style=discord.ButtonStyle.secondary, emoji="🛠️", row=1)
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await interaction.response.defer()
+        detail = await self._load_selected_detail()
+        if detail is None:
+            await interaction.followup.send("Select an owned business first.", ephemeral=True)
+            return
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=detail.key, owned=detail.owned)
+        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
 
+    @discord.ui.button(label="Run Business", style=discord.ButtonStyle.success, emoji="▶️", row=1)
+    async def run_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await interaction.response.defer()
+        if not self.selected_business_key:
+            await interaction.followup.send("Select an owned business first.", ephemeral=True)
+            return
         async with self.cog.sessionmaker() as session:
             async with session.begin():
-                snap = await get_business_hub_snapshot(
-                    session,
-                    guild_id=self.guild_id,
-                    user_id=self.owner_id,
-                )
+                result = await start_business_run(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.selected_business_key)
+                detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.selected_business_key)
+        if detail is None:
+            await interaction.followup.send("That business could not be found.", ephemeral=True)
+            return
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        embed.add_field(name="Run Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.selected_business_key, owned=detail.owned)
+        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
 
-        embed = _build_manage_menu_embed(user=interaction.user, snap=snap)
-        view = ManageBusinessView(
-            cog=self.cog,
-            owner_id=self.owner_id,
-            guild_id=self.guild_id,
-            hub_snapshot=snap,
-        )
-        await interaction.followup.edit_message(
-            message_id=interaction.message.id,
-            embed=embed,
-            view=view,
-        )
+    @discord.ui.button(label="Stop Business", style=discord.ButtonStyle.danger, emoji="⏹️", row=1)
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await interaction.response.defer()
+        if not self.selected_business_key:
+            await interaction.followup.send("Select an owned business first.", ephemeral=True)
+            return
+        async with self.cog.sessionmaker() as session:
+            async with session.begin():
+                result = await stop_business_run(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.selected_business_key)
+                detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.selected_business_key)
+        if detail is None:
+            await interaction.followup.send("That business could not be found.", ephemeral=True)
+            return
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        embed.add_field(name="Stop Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.selected_business_key, owned=detail.owned)
+        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
 
-    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, emoji="🔄", row=1)
+    @discord.ui.button(label="View Workers", style=discord.ButtonStyle.secondary, emoji="👷", row=2)
+    async def workers_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await interaction.response.defer()
+        detail = await self._load_selected_detail()
+        if detail is None:
+            await interaction.followup.send("Select an owned business first.", ephemeral=True)
+            return
+        async with self.cog.sessionmaker() as session:
+            async with session.begin():
+                slots = await get_worker_assignment_slots(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=detail.key)
+        embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots)
+        view = WorkerAssignmentsView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=detail.key, panel_message_id=int(interaction.message.id))
+        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
+
+    @discord.ui.button(label="View Managers", style=discord.ButtonStyle.secondary, emoji="🧑‍💼", row=2)
+    async def managers_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await interaction.response.defer()
+        detail = await self._load_selected_detail()
+        if detail is None:
+            await interaction.followup.send("Select an owned business first.", ephemeral=True)
+            return
+        async with self.cog.sessionmaker() as session:
+            async with session.begin():
+                slots = await get_manager_assignment_slots(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=detail.key)
+        embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots)
+        view = ManagerAssignmentsView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=detail.key, panel_message_id=int(interaction.message.id))
+        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
+
+    @discord.ui.button(label="Upgrade Business", style=discord.ButtonStyle.primary, emoji="⬆️", row=2)
+    async def upgrade_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await interaction.response.defer()
+        if not self.selected_business_key:
+            await interaction.followup.send("Select an owned business first.", ephemeral=True)
+            return
+        async with self.cog.sessionmaker() as session:
+            async with session.begin():
+                await ensure_user_rows(session, guild_id=self.guild_id, user_id=self.owner_id)
+                result = await upgrade_business(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.selected_business_key)
+                detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.selected_business_key)
+        if detail is None:
+            await interaction.followup.send("That business could not be found.", ephemeral=True)
+            return
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        embed.add_field(name="Upgrade Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.selected_business_key, owned=detail.owned)
+        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
+
+    @discord.ui.button(label="Buy", style=discord.ButtonStyle.success, emoji="🛒", row=3)
+    async def buy_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await interaction.response.defer()
+        async with self.cog.sessionmaker() as session:
+            async with session.begin():
+                defs = await fetch_business_defs(session)
+                snap = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
+        embed = _build_buy_menu_embed(user=interaction.user, defs=defs, snap=snap)
+        view = BuyBusinessView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, defs=defs, hub_snapshot=snap)
+        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
+
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, emoji="🔄", row=3)
     async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await interaction.response.defer()
-
         async with self.cog.sessionmaker() as session:
             async with session.begin():
-                snap = await get_business_hub_snapshot(
-                    session,
-                    guild_id=self.guild_id,
-                    user_id=self.owner_id,
-                )
-
+                snap = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
         embed = _build_hub_embed(user=interaction.user, snap=snap)
-        view = BusinessHubView(
-            cog=self.cog,
-            owner_id=self.owner_id,
-            guild_id=self.guild_id,
-            hub_snapshot=snap,
-        )
-        await interaction.followup.edit_message(
-            message_id=interaction.message.id,
-            embed=embed,
-            view=view,
-        )
+        view = BusinessHubView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, hub_snapshot=snap, selected_business_key=self.selected_business_key)
+        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
 
 
 class BuyBusinessView(BusinessBaseView):
@@ -1452,226 +1540,124 @@ class BusinessDetailView(BusinessBaseView):
     ):
         super().__init__(cog=cog, owner_id=owner_id, guild_id=guild_id)
         self.business_key = business_key
-
-        # Keep compatibility with both call styles that may exist across branches.
         is_enabled = bool(upgrade_enabled) if upgrade_enabled is not None else bool(owned)
         self.upgrade_button.disabled = not is_enabled
         self.workers_button.disabled = not is_enabled
         self.managers_button.disabled = not is_enabled
+        self.run_button.disabled = not is_enabled
+        self.stop_button.disabled = not is_enabled
 
-    @discord.ui.button(label="Run", style=discord.ButtonStyle.success, emoji="▶️", row=0)
+    async def _reload_detail(self):
+        async with self.cog.sessionmaker() as session:
+            async with session.begin():
+                return await get_business_manage_snapshot(
+                    session,
+                    guild_id=self.guild_id,
+                    user_id=self.owner_id,
+                    business_key=self.business_key,
+                )
+
+    @discord.ui.button(label="Run Business", style=discord.ButtonStyle.success, emoji="▶️", row=0)
     async def run_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await interaction.response.defer()
-
         async with self.cog.sessionmaker() as session:
             async with session.begin():
-                result = await start_business_run(
-                    session,
-                    guild_id=self.guild_id,
-                    user_id=self.owner_id,
-                    business_key=self.business_key,
-                )
-                detail = await get_business_manage_snapshot(
-                    session,
-                    guild_id=self.guild_id,
-                    user_id=self.owner_id,
-                    business_key=self.business_key,
-                )
-
+                result = await start_business_run(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+                detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
-
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
-        if result.message:
-            embed.add_field(
-                name="Action Result",
-                value=("✅ " if result.ok else "❌ ") + result.message,
-                inline=False,
-            )
+        embed.add_field(name="Run Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned)
+        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
 
-        view = BusinessDetailView(
-            cog=self.cog,
-            owner_id=self.owner_id,
-            guild_id=self.guild_id,
-            business_key=self.business_key,
-            upgrade_enabled=detail.owned,
-        )
-        await interaction.followup.edit_message(
-            message_id=interaction.message.id,
-            embed=embed,
-            view=view,
-        )
-
-    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, emoji="🔄", row=0)
-    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    @discord.ui.button(label="Stop Business", style=discord.ButtonStyle.danger, emoji="⏹️", row=0)
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await interaction.response.defer()
-
         async with self.cog.sessionmaker() as session:
             async with session.begin():
-                detail = await get_business_manage_snapshot(
-                    session,
-                    guild_id=self.guild_id,
-                    user_id=self.owner_id,
-                    business_key=self.business_key,
-                )
-
+                result = await stop_business_run(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+                detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
-
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
-        view = BusinessDetailView(
-            cog=self.cog,
-            owner_id=self.owner_id,
-            guild_id=self.guild_id,
-            business_key=self.business_key,
-            upgrade_enabled=detail.owned,
-        )
-        await interaction.followup.edit_message(
-            message_id=interaction.message.id,
-            embed=embed,
-            view=view,
-        )
+        embed.add_field(name="Stop Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned)
+        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
 
-    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, emoji="⬅️", row=0)
-    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    @discord.ui.button(label="Status", style=discord.ButtonStyle.secondary, emoji="📡", row=0)
+    async def status_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await interaction.response.defer()
+        detail = await self._reload_detail()
+        if detail is None:
+            await interaction.followup.send("That business could not be found.", ephemeral=True)
+            return
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        embed.add_field(name="Status", value="Current runtime, bonuses, and staffing shown above.", inline=False)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned)
+        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
 
-        async with self.cog.sessionmaker() as session:
-            async with session.begin():
-                hub = await get_business_hub_snapshot(
-                    session,
-                    guild_id=self.guild_id,
-                    user_id=self.owner_id,
-                )
-
-        embed = _build_manage_menu_embed(user=interaction.user, snap=hub)
-        view = ManageBusinessView(
-            cog=self.cog,
-            owner_id=self.owner_id,
-            guild_id=self.guild_id,
-            hub_snapshot=hub,
-        )
-        await interaction.followup.edit_message(
-            message_id=interaction.message.id,
-            embed=embed,
-            view=view,
-        )
-
-    @discord.ui.button(label="Upgrade", style=discord.ButtonStyle.primary, emoji="⬆️", row=1)
+    @discord.ui.button(label="Upgrade Business", style=discord.ButtonStyle.primary, emoji="⬆️", row=1)
     async def upgrade_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await interaction.response.defer()
-
         async with self.cog.sessionmaker() as session:
             async with session.begin():
                 await ensure_user_rows(session, guild_id=self.guild_id, user_id=self.owner_id)
-                result = await upgrade_business(
-                    session,
-                    guild_id=self.guild_id,
-                    user_id=self.owner_id,
-                    business_key=self.business_key,
-                )
-                detail = result.manage_snapshot
-                if detail is None:
-                    detail = await get_business_manage_snapshot(
-                        session,
-                        guild_id=self.guild_id,
-                        user_id=self.owner_id,
-                        business_key=self.business_key,
-                    )
-
+                result = await upgrade_business(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+                detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
-
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
-        if result.message:
-            embed.add_field(
-                name="Action Result",
-                value=("✅ " if result.ok else "❌ ") + result.message,
-                inline=False,
-            )
+        embed.add_field(name="Upgrade Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned)
+        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
 
-        view = BusinessDetailView(
-            cog=self.cog,
-            owner_id=self.owner_id,
-            guild_id=self.guild_id,
-            business_key=self.business_key,
-            upgrade_enabled=detail.owned,
-        )
-        await interaction.followup.edit_message(
-            message_id=interaction.message.id,
-            embed=embed,
-            view=view,
-        )
-
-    @discord.ui.button(label="Employees", style=discord.ButtonStyle.secondary, emoji="👷", row=1, disabled=True)
+    @discord.ui.button(label="View Workers", style=discord.ButtonStyle.secondary, emoji="👷", row=1, disabled=True)
     async def workers_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await interaction.response.defer()
-
         async with self.cog.sessionmaker() as session:
             async with session.begin():
-                detail = await get_business_manage_snapshot(
-                    session,
-                    guild_id=self.guild_id,
-                    user_id=self.owner_id,
-                    business_key=self.business_key,
-                )
-                slots = await get_worker_assignment_slots(
-                    session,
-                    guild_id=self.guild_id,
-                    user_id=self.owner_id,
-                    business_key=self.business_key,
-                )
+                detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+                slots = await get_worker_assignment_slots(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
         embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots)
-        view = WorkerAssignmentsView(
-            cog=self.cog,
-            owner_id=self.owner_id,
-            guild_id=self.guild_id,
-            business_key=self.business_key,
-            panel_message_id=int(interaction.message.id),
-        )
+        view = WorkerAssignmentsView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, panel_message_id=int(interaction.message.id))
         await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
 
-    @discord.ui.button(label="Managers", style=discord.ButtonStyle.secondary, emoji="🧑‍💼", row=1, disabled=True)
+    @discord.ui.button(label="View Managers", style=discord.ButtonStyle.secondary, emoji="🧑‍💼", row=1, disabled=True)
     async def managers_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await interaction.response.defer()
-
         async with self.cog.sessionmaker() as session:
             async with session.begin():
-                detail = await get_business_manage_snapshot(
-                    session,
-                    guild_id=self.guild_id,
-                    user_id=self.owner_id,
-                    business_key=self.business_key,
-                )
-                slots = await get_manager_assignment_slots(
-                    session,
-                    guild_id=self.guild_id,
-                    user_id=self.owner_id,
-                    business_key=self.business_key,
-                )
+                detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+                slots = await get_manager_assignment_slots(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
         embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots)
-        view = ManagerAssignmentsView(
-            cog=self.cog,
-            owner_id=self.owner_id,
-            guild_id=self.guild_id,
-            business_key=self.business_key,
-            panel_message_id=int(interaction.message.id),
-        )
+        view = ManagerAssignmentsView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, panel_message_id=int(interaction.message.id))
+        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
+
+    @discord.ui.button(label="Back to Business Hub", style=discord.ButtonStyle.secondary, emoji="⬅️", row=2)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await interaction.response.defer()
+        async with self.cog.sessionmaker() as session:
+            async with session.begin():
+                hub = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
+        embed = _build_hub_embed(user=interaction.user, snap=hub)
+        view = BusinessHubView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, hub_snapshot=hub, selected_business_key=self.business_key)
         await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=view)
 
 
