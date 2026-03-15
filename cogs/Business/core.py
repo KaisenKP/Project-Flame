@@ -1262,6 +1262,76 @@ async def start_business_run(
     )
 
 
+async def stop_business_run(
+    session,
+    *,
+    guild_id: int,
+    user_id: int,
+    business_key: str,
+) -> BusinessActionResult:
+    defn = _def_for_key(business_key)
+    if defn is None:
+        return BusinessActionResult(ok=False, message="That business does not exist.")
+
+    current_run = await _get_running_run_for_business(
+        session,
+        guild_id=guild_id,
+        user_id=user_id,
+        business_key=business_key,
+    )
+    if current_run is None:
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        manage = await get_business_manage_snapshot(
+            session,
+            guild_id=guild_id,
+            user_id=user_id,
+            business_key=business_key,
+        )
+        return BusinessActionResult(
+            ok=False,
+            message=f"**{defn.name}** is not currently running.",
+            snapshot=hub,
+            manage_snapshot=manage,
+        )
+
+    now = _utc_now()
+    hours_elapsed = max(0, int((now - _as_utc(current_run.started_at)).total_seconds() // 3600))
+    runtime_hours = max(1, int(current_run.runtime_hours_snapshot or 0))
+    paid_hours = max(0, int(current_run.hours_paid_total or 0))
+    unclaimed_hours = max(0, min(hours_elapsed, runtime_hours) - paid_hours)
+    estimated_earned = unclaimed_hours * int(current_run.hourly_profit_snapshot or 0)
+
+    current_run.status = RUN_STATUS_CANCELLED
+    current_run.completed_at = now
+    current_run.report_json = {
+        "run_id": int(current_run.id),
+        "status": RUN_STATUS_CANCELLED,
+        "reason": "Stopped manually by user.",
+        "completed_at_iso": now.isoformat(),
+        "estimated_unclaimed_hours": int(unclaimed_hours),
+        "estimated_unclaimed_silver": int(estimated_earned),
+    }
+
+    hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+    manage = await get_business_manage_snapshot(
+        session,
+        guild_id=guild_id,
+        user_id=user_id,
+        business_key=business_key,
+    )
+
+    return BusinessActionResult(
+        ok=True,
+        message=(
+            f"Stopped **{defn.emoji} {defn.name}**.\n"
+            f"Estimated unclaimed progress: **{unclaimed_hours}h**\n"
+            f"Estimated unclaimed earnings: **{estimated_earned:,} Silver**"
+        ),
+        snapshot=hub,
+        manage_snapshot=manage,
+    )
+
+
 async def upgrade_business(
     session,
     *,
