@@ -1,6 +1,7 @@
 # cogs/jobs/work.py
 from __future__ import annotations
 
+import asyncio
 import random
 import time
 from dataclasses import dataclass, replace
@@ -581,7 +582,7 @@ class WorkCog(commands.Cog):
                         job_id=int(getattr(job_row, "id")),
                     )
                     payout = apply_income_upgrade(payout, upgrade_level)
-                    upgrade_bonus_pct = max(int(round(((1.25 ** upgrade_level) - 1.0) * 100)), 0)
+                    upgrade_bonus_pct = max(int(upgrade_level) * 25, 0)
 
                     if int(item_mods.double_payout_chance_bp) > 0 and roll_bp(int(item_mods.double_payout_chance_bp)):
                         did_double = True
@@ -664,14 +665,15 @@ class WorkCog(commands.Cog):
             _COOLDOWNS[(guild_id, user_id, key)] = now + float(used_cooldown_seconds)
 
         if embed is not None:
-            await interaction.followup.send(
-                embed=embed,
-                view=_WorkUpgradeView(
-                    sessionmaker=self.sessionmaker,
-                    guild_id=guild_id,
-                    user_id=user_id,
-                ),
+            cooldown_ready_at = now + float(used_cooldown_seconds or 0.0)
+            view = _WorkUpgradeView(
+                sessionmaker=self.sessionmaker,
+                guild_id=guild_id,
+                user_id=user_id,
+                cooldown_ready_at=cooldown_ready_at,
             )
+            sent_msg = await interaction.followup.send(embed=embed, view=view, wait=True)
+            view.bind_message(sent_msg)
             if unlocked_achievements:
                 queue_achievement_announcements(
                     bot=self.bot,
@@ -684,14 +686,39 @@ class WorkCog(commands.Cog):
 
 
 class _WorkUpgradeView(discord.ui.View):
-    def __init__(self, *, sessionmaker, guild_id: int, user_id: int):
-        super().__init__(timeout=120)
+    def __init__(self, *, sessionmaker, guild_id: int, user_id: int, cooldown_ready_at: float):
+        super().__init__(timeout=300)
         self.sessionmaker = sessionmaker
         self.guild_id = int(guild_id)
         self.user_id = int(user_id)
+        self.cooldown_ready_at = float(cooldown_ready_at)
+        self._message: Optional[discord.Message] = None
+        self.work_again.disabled = (time.time() < self.cooldown_ready_at)
+
+    def bind_message(self, message: discord.Message) -> None:
+        self._message = message
+        if self.work_again.disabled:
+            asyncio.create_task(self._enable_work_when_ready())
+
+    async def _enable_work_when_ready(self) -> None:
+        wait_s = max(self.cooldown_ready_at - time.time(), 0.0)
+        if wait_s > 0:
+            await asyncio.sleep(wait_s)
+        self.work_again.disabled = False
+        if self._message is not None:
+            try:
+                await self._message.edit(view=self)
+            except Exception:
+                pass
 
     async def on_timeout(self) -> None:
         self.upgrade_tool.disabled = True
+        self.work_again.disabled = True
+        if self._message is not None:
+            try:
+                await self._message.edit(view=self)
+            except Exception:
+                pass
 
     @discord.ui.button(label="Upgrade Tool", style=discord.ButtonStyle.primary, emoji="⚙️")
     async def upgrade_tool(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -703,13 +730,68 @@ class _WorkUpgradeView(discord.ui.View):
             await interaction.response.send_message("Only the user who ran /work can use this button.", ephemeral=True)
             return
 
-        if button.disabled:
-            await interaction.response.send_message("This upgrade action was already used.", ephemeral=True)
+        await interaction.response.send_message(
+            "Confirm upgrade for your currently equipped job?",
+            ephemeral=True,
+            view=_UpgradeConfirmView(
+                sessionmaker=self.sessionmaker,
+                guild_id=self.guild_id,
+                user_id=self.user_id,
+                source_view=self,
+            ),
+        )
+
+    @discord.ui.button(label="Work Again", style=discord.ButtonStyle.success, emoji="🔁")
+    async def work_again(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None or interaction.guild.id != self.guild_id:
+            await interaction.response.send_message("This button only works in the original server.", ephemeral=True)
             return
 
-        button.disabled = True
-        if interaction.message is not None:
-            await interaction.message.edit(view=self)
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Only the user who ran /work can use this button.", ephemeral=True)
+            return
+
+        if button.disabled:
+            left = max(int(self.cooldown_ready_at - time.time()), 0)
+            await interaction.response.send_message(
+                f"Cooldown. Try again in **{fmt_int(left)}s**.",
+                ephemeral=True,
+            )
+            return
+
+        cog = interaction.client.get_cog("WorkCog") if interaction.client else None
+        cmd = getattr(cog, "work_cmd", None) if cog is not None else None
+        if cog is None or cmd is None or not hasattr(cmd, "callback"):
+            await interaction.response.send_message("Work command is currently unavailable.", ephemeral=True)
+            return
+
+        await cmd.callback(cog, interaction)
+
+
+class _UpgradeConfirmView(discord.ui.View):
+    def __init__(self, *, sessionmaker, guild_id: int, user_id: int, source_view: _WorkUpgradeView):
+        super().__init__(timeout=30)
+        self.sessionmaker = sessionmaker
+        self.guild_id = int(guild_id)
+        self.user_id = int(user_id)
+        self.source_view = source_view
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger, emoji="✅")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None or interaction.guild.id != self.guild_id:
+            await interaction.response.send_message("This button only works in the original server.", ephemeral=True)
+            return
+
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Only the user who ran /work can use this button.", ephemeral=True)
+            return
+
+        self.source_view.upgrade_tool.disabled = True
+        if self.source_view._message is not None:
+            try:
+                await self.source_view._message.edit(view=self.source_view)
+            except Exception:
+                pass
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
@@ -750,6 +832,12 @@ class _WorkUpgradeView(discord.ui.View):
                 )
 
         if not ok:
+            self.source_view.upgrade_tool.disabled = False
+            if self.source_view._message is not None:
+                try:
+                    await self.source_view._message.edit(view=self.source_view)
+                except Exception:
+                    pass
             await interaction.followup.send(f"❌ {result_text}", ephemeral=True)
             return
 
@@ -759,3 +847,7 @@ class _WorkUpgradeView(discord.ui.View):
             f"Next upgrade cost: **{fmt_int(snap.next_cost)}** silver.",
             ephemeral=True,
         )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("Upgrade cancelled.", ephemeral=True)

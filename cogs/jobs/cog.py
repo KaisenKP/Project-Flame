@@ -263,7 +263,7 @@ class JobsCog(commands.Cog):
                 f"Current Level: **{snap.level}**\n"
                 f"Income Bonus: **+{snap.income_bonus_pct}%**\n"
                 f"Next Cost: **{fmt_int(snap.next_cost)} silver**\n\n"
-                "Each level increases income by **25%**, and each new upgrade costs **25% more**."
+                "Each level increases income by a flat **25%**, and each new upgrade cost grows by **50%**."
             ),
             color=discord.Color.gold(),
         )
