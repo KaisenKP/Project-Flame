@@ -97,6 +97,43 @@ class WalletRow(Base):
     )
 
 
+class ProfileBackgroundRow(Base):
+    __tablename__ = "profile_backgrounds"
+    __table_args__ = (
+        UniqueConstraint("guild_id", "user_id", "background_key", name="uq_profile_backgrounds_user_bg"),
+        Index("ix_profile_backgrounds_user", "guild_id", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    background_key: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(24), nullable=False, default="default")
+
+    unlocked_at: Mapped[datetime] = mapped_column(TS, server_default=NOW, nullable=False)
+
+
+class ProfileSettingsRow(Base):
+    __tablename__ = "profile_settings"
+    __table_args__ = (
+        UniqueConstraint("guild_id", "user_id", name="uq_profile_settings_user"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    selected_background_key: Mapped[str] = mapped_column(String(48), nullable=False, default="neon_night")
+
+    updated_at: Mapped[datetime] = mapped_column(
+        TS,
+        server_default=NOW,
+        onupdate=NOW,
+        nullable=False,
+    )
+
+
 # =============================================================================
 # Activity
 # =============================================================================
