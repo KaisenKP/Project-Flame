@@ -306,6 +306,19 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _as_utc(dt: datetime) -> datetime:
+    """
+    Normalize datetimes to UTC-aware values.
+
+    Some DB backends (notably sqlite) can return naive datetimes even when
+    timezone=True is set on the column, which breaks direct comparisons
+    against timezone-aware "now" values.
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _def_for_key(business_key: str) -> Optional[BusinessDef]:
     return _BUSINESS_DEF_MAP.get(str(business_key).strip())
 
@@ -323,7 +336,7 @@ def _hours_remaining(ends_at: Optional[datetime], *, now: Optional[datetime] = N
         return 0
     if now is None:
         now = _utc_now()
-    seconds = int((ends_at - now).total_seconds())
+    seconds = int((_as_utc(ends_at) - _as_utc(now)).total_seconds())
     if seconds <= 0:
         return 0
 
@@ -559,7 +572,7 @@ async def _get_running_run_map_for_user(
     for row in rows:
         if row.business_key in found:
             continue
-        if row.ends_at <= now:
+        if _as_utc(row.ends_at) <= now:
             continue
         found[row.business_key] = row
     return found
@@ -585,7 +598,7 @@ async def _get_running_run_for_business(
     )
     if row is None:
         return None
-    if row.ends_at <= now:
+    if _as_utc(row.ends_at) <= now:
         return None
     return row
 
