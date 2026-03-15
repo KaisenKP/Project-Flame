@@ -399,7 +399,6 @@ class WorkCog(commands.Cog):
         embed: Optional[discord.Embed] = None
         key: Optional[str] = None
         used_cooldown_seconds: Optional[float] = None
-        unlocked_achievements = []
 
         async with self.sessionmaker() as session:
             async with session.begin():
@@ -654,11 +653,6 @@ class WorkCog(commands.Cog):
                     leveled_up=bool(delta.leveled_up),
                     prestiged=bool(delta.prestiged),
                 )
-                unlocked_achievements = await check_and_grant_achievements(
-                    session,
-                    guild_id=guild_id,
-                    user_id=user_id,
-                )
                 used_cooldown_seconds = effective_cd
 
         if key is not None and used_cooldown_seconds is not None:
@@ -674,15 +668,31 @@ class WorkCog(commands.Cog):
             )
             sent_msg = await interaction.followup.send(embed=embed, view=view, wait=True)
             view.bind_message(sent_msg)
-            if unlocked_achievements:
+            asyncio.create_task(
+                self._check_and_announce_achievements(guild_id=guild_id, user_id=user_id),
+                name="jobs.work.achievements",
+            )
+        else:
+            await interaction.followup.send("Something went wrong generating the work result.", ephemeral=True)
+
+    async def _check_and_announce_achievements(self, *, guild_id: int, user_id: int) -> None:
+        try:
+            async with self.sessionmaker() as session:
+                async with session.begin():
+                    unlocks = await check_and_grant_achievements(
+                        session,
+                        guild_id=guild_id,
+                        user_id=user_id,
+                    )
+            if unlocks:
                 queue_achievement_announcements(
                     bot=self.bot,
                     guild_id=guild_id,
                     user_id=user_id,
-                    unlocks=unlocked_achievements,
+                    unlocks=unlocks,
                 )
-        else:
-            await interaction.followup.send("Something went wrong generating the work result.", ephemeral=True)
+        except Exception:
+            return
 
 
 class _WorkUpgradeView(discord.ui.View):
