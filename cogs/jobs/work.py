@@ -50,6 +50,7 @@ from services.jobs_core import (
     award_job_xp,
 )
 from .jobs import get_job_def
+from services.job_upgrades import apply_income_upgrade, get_upgrade_level
 
 # -------------------------
 # Cooldowns
@@ -280,6 +281,8 @@ def _build_work_embed(
     effects: JobEffects,
     item_mods: _ItemMods,
     did_double: bool,
+    upgrade_level: int,
+    upgrade_bonus_pct: int,
     work_image_url: Optional[str],
     leveled_up: bool,
     prestiged: bool,
@@ -309,7 +312,8 @@ def _build_work_embed(
 
     gain_block = (
         f"🧠 User XP: **+{fmt_int(user_xp)}**\n"
-        f"🧰 Job XP: **+{fmt_int(job_xp)}**"
+        f"🧰 Job XP: **+{fmt_int(job_xp)}**\n"
+        f"⚙️ Upgrade: **Lv {fmt_int(upgrade_level)}** (**+{fmt_int(upgrade_bonus_pct)}% income**)"
     )
 
     notes: list[str] = []
@@ -527,6 +531,8 @@ class WorkCog(commands.Cog):
                 payout = 0
                 action_text = ""
                 did_double = False
+                upgrade_level = 0
+                upgrade_bonus_pct = 0
 
                 if failed:
                     action = _pick_weighted(fail_actions)
@@ -556,6 +562,15 @@ class WorkCog(commands.Cog):
 
                     p1 = _roll_payout_once()
                     payout = max(p1, _roll_payout_once()) if extra_roll else p1
+
+                    upgrade_level = await get_upgrade_level(
+                        session,
+                        guild_id=guild_id,
+                        user_id=user_id,
+                        job_id=int(getattr(job_row, "id")),
+                    )
+                    payout = apply_income_upgrade(payout, upgrade_level)
+                    upgrade_bonus_pct = max(int(round(((1.25 ** upgrade_level) - 1.0) * 100)), 0)
 
                     if int(item_mods.double_payout_chance_bp) > 0 and roll_bp(int(item_mods.double_payout_chance_bp)):
                         did_double = True
@@ -621,6 +636,8 @@ class WorkCog(commands.Cog):
                     effects=merged_effects,
                     item_mods=item_mods,
                     did_double=did_double,
+                    upgrade_level=upgrade_level,
+                    upgrade_bonus_pct=upgrade_bonus_pct,
                     work_image_url=work_image_url,
                     leveled_up=bool(delta.leveled_up),
                     prestiged=bool(delta.prestiged),

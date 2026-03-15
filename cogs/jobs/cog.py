@@ -18,6 +18,7 @@ from services.jobs_core import (
     get_or_create_job_row,
     job_row_image_set,
 )
+from services.job_upgrades import build_upgrade_snapshot, play_upgrade_animation, upgrade_once
 from services.jobs_embeds import make_panel_embed
 from services.jobs_views import EquipConfirmView, JobsPanelView
 from services.users import ensure_user_rows
@@ -169,6 +170,104 @@ class JobsCog(commands.Cog):
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+
+
+    @app_commands.command(name="job_upgrade", description="Upgrade your currently equipped job tool for more income.")
+    async def job_upgrade_cmd(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message("This only works in a server.", ephemeral=True)
+            return
+
+        guild_id = interaction.guild.id
+        user_id = interaction.user.id
+
+        await interaction.response.defer(ephemeral=True)
+
+        status_msg = await interaction.followup.send("⚙️ Preparing upgrade...", ephemeral=True, wait=True)
+
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                await ensure_user_rows(session, guild_id=guild_id, user_id=user_id)
+
+                key = await get_equipped_key(session, guild_id=guild_id, user_id=user_id)
+                if not key:
+                    await status_msg.edit(content="You don’t have a job equipped. Use **/job** first.")
+                    return
+
+                d = get_job_def(key)
+                if d is None:
+                    await status_msg.edit(content="Your equipped job no longer exists. Re-equip with **/job**.")
+                    return
+
+                job_row = await get_or_create_job_row(session, job_key=key, name=d.name)
+                ok, result_text, snap = await upgrade_once(
+                    session,
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    job_row=job_row,
+                    job_def=d,
+                )
+
+                if not ok:
+                    await status_msg.edit(content=f"❌ {result_text}")
+                    return
+
+                await play_upgrade_animation(status_msg, label=snap.label)
+
+                await status_msg.edit(
+                    content=(
+                        "✅ "
+                        f"{result_text}\n"
+                        f"Next upgrade cost: **{fmt_int(snap.next_cost)}** silver."
+                    )
+                )
+
+    @app_commands.command(name="job_upgrade_info", description="View upgrade progress and next cost for a job.")
+    @app_commands.describe(job="Optional job key. Defaults to your equipped job.")
+    async def job_upgrade_info_cmd(self, interaction: discord.Interaction, job: Optional[str] = None):
+        if interaction.guild is None:
+            await interaction.response.send_message("This only works in a server.", ephemeral=True)
+            return
+
+        guild_id = interaction.guild.id
+        user_id = interaction.user.id
+
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                key = (job or "").strip().lower()
+                if not key:
+                    eq = await get_equipped_key(session, guild_id=guild_id, user_id=user_id)
+                    if not eq:
+                        await interaction.response.send_message("No equipped job. Use **/job** first.", ephemeral=True)
+                        return
+                    key = eq
+
+                d = get_job_def(key)
+                if d is None:
+                    await interaction.response.send_message(f"Unknown job key `{key}`.", ephemeral=True)
+                    return
+
+                job_row = await get_or_create_job_row(session, job_key=key, name=d.name)
+                snap = await build_upgrade_snapshot(
+                    session,
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    job_row=job_row,
+                    job_def=d,
+                )
+
+        embed = discord.Embed(
+            title=f"{d.name} Upgrade",
+            description=(
+                f"Tool: **{snap.label}**\n"
+                f"Current Level: **{snap.level}**\n"
+                f"Income Bonus: **+{snap.income_bonus_pct}%**\n"
+                f"Next Cost: **{fmt_int(snap.next_cost)} silver**\n\n"
+                "Each level increases income by **25%**, and each new upgrade costs **25% more**."
+            ),
+            color=discord.Color.gold(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
     @job_admin.autocomplete("job")
     async def job_admin_autocomplete(self, interaction: discord.Interaction, current: str):
         cur = (current or "").lower()

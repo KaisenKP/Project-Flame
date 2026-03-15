@@ -436,6 +436,33 @@ class JobProgressRow(Base):
     )
 
 
+class UserJobUpgradeRow(Base):
+    __tablename__ = "user_job_upgrades"
+    __table_args__ = (
+        UniqueConstraint("guild_id", "user_id", "job_id", name="uq_user_job_upgrades"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    job_id: Mapped[int] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    upgrade_level: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    silver_spent: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=NOW, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        TS,
+        server_default=NOW,
+        onupdate=NOW,
+        nullable=False,
+    )
+
+
 class StaminaRow(Base):
     __tablename__ = "stamina"
     __table_args__ = (
