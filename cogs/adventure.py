@@ -70,6 +70,24 @@ class AdventureCog(commands.Cog):
         self.engine = AdventureEngine()
         self.active_adventure_channels: set[int] = set()
         self.active_lobbies: dict[int, LobbyView] = {}
+        self.allowed_adventure_channels: set[int] = self._load_configured_channel_ids()
+
+    def _load_configured_channel_ids(self) -> set[int]:
+        configured_ids: set[int] = set()
+        raw = ",".join(
+            filter(
+                None,
+                [
+                    (os.getenv("ADVENTURE_CHANNEL_IDS") or "").strip(),
+                    (os.getenv("ADVENTURE_CHANNEL_ID") or "").strip(),
+                ],
+            )
+        )
+        for part in raw.split(","):
+            token = part.strip()
+            if token.isdigit():
+                configured_ids.add(int(token))
+        return configured_ids
 
     @app_commands.command(name="adventure", description="Begin a story-driven multiplayer adventure.")
     async def adventure(self, interaction: discord.Interaction) -> None:
@@ -90,6 +108,42 @@ class AdventureCog(commands.Cog):
             await interaction.response.send_message("Choose your class before your first adventure.", view=ClassSelectView(self, int(interaction.user.id)), ephemeral=True)
             return
         await interaction.response.send_message("### Adventure Setup\nChoose your run style:", view=SetupView(self, int(interaction.user.id)), ephemeral=True)
+
+    @app_commands.command(name="adventure_add_channel", description="Allow another channel to run /adventure.")
+    @app_commands.default_permissions(manage_guild=True)
+    async def adventure_add_channel(
+        self,
+        interaction: discord.Interaction,
+        channel: Optional[discord.TextChannel] = None,
+        channel_id: Optional[str] = None,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+        target_id: Optional[int] = None
+        target_mention: str
+        if channel is not None:
+            target_id = int(channel.id)
+            target_mention = channel.mention
+        elif channel_id is not None:
+            cleaned = str(channel_id).strip().replace("<#", "").replace(">", "")
+            if not cleaned.isdigit():
+                await interaction.response.send_message("Use a channel mention (e.g. #adventure) or a numeric channel ID.", ephemeral=True)
+                return
+            target_id = int(cleaned)
+            target_mention = f"<#{target_id}>"
+        else:
+            await interaction.response.send_message("Pass either `channel` or `channel_id`.", ephemeral=True)
+            return
+        assert target_id is not None
+        if target_id in self.allowed_adventure_channels:
+            await interaction.response.send_message(f"{target_mention} is already enabled for adventures.", ephemeral=True)
+            return
+        self.allowed_adventure_channels.add(target_id)
+        await interaction.response.send_message(
+            f"✅ Added {target_mention} to adventure channels. Total allowed channels: **{len(self.allowed_adventure_channels)}**.",
+            ephemeral=True,
+        )
 
     async def create_lobby(self, interaction: discord.Interaction) -> None:
         assert interaction.guild is not None and interaction.channel is not None
@@ -155,9 +209,8 @@ class AdventureCog(commands.Cog):
             self.active_adventure_channels.discard(lobby.channel_id)
 
     def _is_adventure_channel(self, channel: discord.abc.GuildChannel | discord.Thread) -> bool:
-        configured = (os.getenv("ADVENTURE_CHANNEL_ID") or "").strip()
-        if configured.isdigit():
-            return int(channel.id) == int(configured)
+        if int(channel.id) in self.allowed_adventure_channels:
+            return True
         return str(getattr(channel, "name", "")).lower() == "adventure"
 
 
