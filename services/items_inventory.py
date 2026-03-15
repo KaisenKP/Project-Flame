@@ -6,7 +6,7 @@ from typing import Dict
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from services.items_models import ItemInventoryRow
+from db.models import ItemInventoryRow
 from services.items_catalog import ITEMS
 
 
