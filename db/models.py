@@ -134,6 +134,53 @@ class ProfileSettingsRow(Base):
     )
 
 
+class UserAssetRow(Base):
+    __tablename__ = "user_assets"
+    __table_args__ = (
+        Index("ix_user_assets_user", "guild_id", "user_id"),
+        Index("ix_user_assets_showcase", "guild_id", "user_id", "showcase_slot"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    asset_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    purchased_at: Mapped[datetime] = mapped_column(TS, server_default=NOW, nullable=False)
+    purchase_price: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    showcase_slot: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    is_showcased: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    is_seized: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    seized_at: Mapped[Optional[datetime]] = mapped_column(TS, nullable=True)
+
+
+class LuxuryLoanRow(Base):
+    __tablename__ = "luxury_loans"
+    __table_args__ = (
+        Index("ix_luxury_loans_user_status", "guild_id", "user_id", "status"),
+        Index("ix_luxury_loans_due", "status", "due_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    principal_amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    interest_rate: Mapped[float] = mapped_column(nullable=False, default=0.12)
+    total_due: Mapped[int] = mapped_column(Integer, nullable=False)
+    remaining_balance: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    issued_at: Mapped[datetime] = mapped_column(TS, server_default=NOW, nullable=False)
+    due_at: Mapped[datetime] = mapped_column(TS, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    last_interest_applied_at: Mapped[datetime] = mapped_column(TS, server_default=NOW, nullable=False)
+
+    debt_recovery_mode: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    recovery_rate_bp: Mapped[int] = mapped_column(Integer, nullable=False, default=3000)
+
+
 # =============================================================================
 # Activity
 # =============================================================================
