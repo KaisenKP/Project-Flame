@@ -16,7 +16,13 @@ from services.activity_rules import CHAT_XP, VOICE_XP, vc_xp_per_minute
 from services.db import sessions
 from services.users import ensure_user_rows
 from services.xp_award import award_xp, get_or_create_activity_daily
-from services.achievements import check_and_grant_achievements, queue_achievement_announcements
+from services.achievements import (
+    CHATROOM_CHANNEL_ID,
+    SELFIE_CHANNEL_ID,
+    check_and_grant_achievements,
+    increment_counter,
+    queue_achievement_announcements,
+)
 
 
 _ws_re = re.compile(r"\s+")
@@ -134,6 +140,29 @@ class ActivityTrackerCog(commands.Cog):
                     day=day,
                 )
                 daily.message_count += 1
+                await increment_counter(
+                    session,
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    counter_key="messages_sent",
+                    amount=1,
+                )
+                if message.channel.id == CHATROOM_CHANNEL_ID:
+                    await increment_counter(
+                        session,
+                        guild_id=guild_id,
+                        user_id=user_id,
+                        counter_key="chatroom_messages",
+                        amount=1,
+                    )
+                if message.channel.id == SELFIE_CHANNEL_ID and message.attachments:
+                    await increment_counter(
+                        session,
+                        guild_id=guild_id,
+                        user_id=user_id,
+                        counter_key="selfies_posted",
+                        amount=1,
+                    )
 
                 await award_xp(
                     session,

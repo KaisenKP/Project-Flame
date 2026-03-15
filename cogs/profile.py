@@ -7,9 +7,11 @@ from typing import Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from db.models import JobRow, ProfileBackgroundRow, ProfileSettingsRow, UserJobSlotRow, WalletRow, XpRow
+from db.models import JobRow, ProfileBackgroundRow, ProfileSettingsRow, UserAchievementRow, UserJobSlotRow, WalletRow, XpRow
+from services.achievement_catalog import sorted_achievements
+from services.achievements import build_achievement_context, parse_unlock_condition
 from services.db import sessions
 from services.profile_backgrounds import (
     ALL_BACKGROUNDS,
@@ -252,6 +254,89 @@ class ProfileCog(commands.Cog):
         sent = await ctx.send(embed=embed, view=view, ephemeral=True)
         if isinstance(sent, discord.Message):
             view.message = sent
+
+
+    @profile_group.command(name="achievements", description="View your achievements dashboard and unlock paths.")
+    @app_commands.describe(user="View another member's achievements dashboard (optional).")
+    async def profile_achievements(self, ctx: commands.Context, user: Optional[discord.Member] = None):
+        if ctx.guild is None:
+            await ctx.reply("This only works in a server.", ephemeral=True)
+            return
+
+        target: discord.Member = user or ctx.author  # type: ignore[assignment]
+
+        try:
+            await ctx.defer(thinking=True)
+        except Exception:
+            pass
+
+        async with self.sessions() as session:
+            async with session.begin():
+                unlocked_count = int(
+                    await session.scalar(
+                        select(func.count(UserAchievementRow.id)).where(
+                            UserAchievementRow.guild_id == ctx.guild.id,
+                            UserAchievementRow.user_id == target.id,
+                        )
+                    )
+                    or 0
+                )
+                ach_ctx = await build_achievement_context(
+                    session,
+                    guild_id=ctx.guild.id,
+                    user_id=target.id,
+                )
+
+        defs = sorted_achievements()
+        total = len(defs)
+
+        pending_lines: list[str] = []
+        for definition in defs:
+            parsed = parse_unlock_condition(definition.unlock_condition)
+            if parsed is None:
+                continue
+            stat_key, threshold = parsed
+            current = int(getattr(ach_ctx, stat_key, 0))
+            if current >= threshold:
+                continue
+            pending_lines.append(
+                f"{definition.icon} **{definition.name}**\n"
+                f"Goal: {definition.description}\n"
+                f"Progress: `{_fmt_int(current)}/{_fmt_int(threshold)}`"
+            )
+            if len(pending_lines) >= 8:
+                break
+
+        completion_pct = (unlocked_count / total * 100.0) if total else 0.0
+        embed = discord.Embed(
+            title=f"🏆 {target.display_name}'s Achievement Dashboard",
+            description=(
+                "Track your unlocks, chase your next milestones, and farm that leaderboard aura.\n"
+                "No gatekeeping, just clean goals and chaos."
+            ),
+            color=discord.Color.gold(),
+        )
+        embed.add_field(
+            name="Completion",
+            value=f"**{_fmt_int(unlocked_count)} / {_fmt_int(total)}** unlocked ({completion_pct:.1f}%)",
+            inline=False,
+        )
+        embed.add_field(
+            name="Social Questboard",
+            value=(
+                "• Post your first selfie in <#1460859587275001866>\n"
+                "• Type your first 100 messages in <#1460856536795578443>\n"
+                "• Keep chatting to stack message and chatroom milestones"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Your Next Unlocks",
+            value="\n\n".join(pending_lines) if pending_lines else "You are caught up. This is elite behavior.",
+            inline=False,
+        )
+        embed.set_footer(text="Tip: use /work, /business, and chat regularly to progress multiple tracks at once.")
+        await ctx.send(embed=embed)
 
     async def _render_profile_card(self, *, guild_id: int, target: discord.Member) -> Optional[bytes]:
         user_id = target.id

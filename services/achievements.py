@@ -12,11 +12,13 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import BusinessOwnershipRow, UserAssetRow, WalletRow, XpRow
+from db.models import ActivityDailyRow, BusinessOwnershipRow, UserAssetRow, WalletRow, XpRow
 from services.achievement_card import AchievementCardPayload, AchievementCardRenderer
-from services.achievement_catalog import ACHIEVEMENT_CATALOG, AchievementDefinition
+from services.achievement_catalog import ACHIEVEMENT_CATALOG, AchievementDefinition, sorted_achievements
 
 ANNOUNCEMENT_CHANNEL_ID = 1482554988759875758
+CHATROOM_CHANNEL_ID = 1460856536795578443
+SELFIE_CHANNEL_ID = 1460859587275001866
 _POST_DELAY_SECONDS = 0.5
 _DELETE_AFTER_SECONDS = 10.0
 
@@ -45,6 +47,9 @@ class AchievementContext:
     wallet_silver: int = 0
     level: int = 1
     net_worth: int = 0
+    messages_sent: int = 0
+    chatroom_messages: int = 0
+    selfies_posted: int = 0
 
 
 class AchievementAnnouncementService:
@@ -106,6 +111,24 @@ class AchievementAnnouncementService:
 
 
 _ANNOUNCER = AchievementAnnouncementService()
+
+
+def parse_unlock_condition(condition: str) -> tuple[str, int] | None:
+    left, sep, right = condition.partition(">=")
+    if sep != ">=":
+        return None
+    key = left.strip()
+    value_text = right.strip().replace("_", "")
+    if not key:
+        return None
+    try:
+        return key, int(value_text)
+    except ValueError:
+        return None
+
+
+def context_value(ctx: AchievementContext, stat_key: str) -> int:
+    return int(getattr(ctx, stat_key, 0))
 
 
 async def has_achievement(session: AsyncSession, *, guild_id: int, user_id: int, achievement_key: str) -> bool:
@@ -188,6 +211,34 @@ async def _build_context(session: AsyncSession, *, guild_id: int, user_id: int) 
     )
     jobs_completed = int(jobs_counter or 0)
 
+    chatroom_counter = await session.scalar(
+        select(UserAchievementCounterRow.counter_value).where(
+            UserAchievementCounterRow.guild_id == guild_id,
+            UserAchievementCounterRow.user_id == user_id,
+            UserAchievementCounterRow.counter_key == "chatroom_messages",
+        )
+    )
+    chatroom_messages = int(chatroom_counter or 0)
+
+    selfie_counter = await session.scalar(
+        select(UserAchievementCounterRow.counter_value).where(
+            UserAchievementCounterRow.guild_id == guild_id,
+            UserAchievementCounterRow.user_id == user_id,
+            UserAchievementCounterRow.counter_key == "selfies_posted",
+        )
+    )
+    selfies_posted = int(selfie_counter or 0)
+
+    messages_sent = int(
+        await session.scalar(
+            select(func.coalesce(func.sum(ActivityDailyRow.message_count), 0)).where(
+                ActivityDailyRow.guild_id == guild_id,
+                ActivityDailyRow.user_id == user_id,
+            )
+        )
+        or 0
+    )
+
     businesses_owned = int(
         await session.scalar(
             select(func.count(BusinessOwnershipRow.id)).where(
@@ -234,23 +285,25 @@ async def _build_context(session: AsyncSession, *, guild_id: int, user_id: int) 
         wallet_silver=wallet_silver,
         level=level,
         net_worth=net_worth,
+        messages_sent=messages_sent,
+        chatroom_messages=chatroom_messages,
+        selfies_posted=selfies_posted,
     )
+
+
+async def build_achievement_context(session: AsyncSession, *, guild_id: int, user_id: int) -> AchievementContext:
+    return await _build_context(session, guild_id=guild_id, user_id=user_id)
 
 
 def check_achievement_conditions(ctx: AchievementContext) -> list[str]:
     unlocked: list[str] = []
-    if ctx.jobs_completed >= 1:
-        unlocked.append("first_job")
-    if ctx.businesses_owned >= 1:
-        unlocked.append("first_business")
-    if ctx.wallet_silver >= 1_000_000:
-        unlocked.append("millionaire")
-    if ctx.jobs_completed >= 100:
-        unlocked.append("grind_master")
-    if ctx.level >= 50:
-        unlocked.append("xp_addict")
-    if ctx.net_worth >= 10_000_000:
-        unlocked.append("wealth_lord")
+    for definition in sorted_achievements():
+        parsed = parse_unlock_condition(definition.unlock_condition)
+        if parsed is None:
+            continue
+        stat_key, threshold = parsed
+        if context_value(ctx, stat_key) >= threshold:
+            unlocked.append(definition.achievement_key)
     return unlocked
 
 
