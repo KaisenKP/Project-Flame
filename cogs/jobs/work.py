@@ -1,4 +1,4 @@
-# cogs/work.py
+# cogs/jobs/work.py
 from __future__ import annotations
 
 import random
@@ -27,7 +27,6 @@ from services.achievements import (
 )
 
 from services.jobs_core import (
-    JOB_DEFS,
     JobAction,
     JobCategory,
     JobDef,
@@ -50,6 +49,7 @@ from services.jobs_core import (
     tier_for_category,
     award_job_xp,
 )
+from .jobs import get_job_def
 
 # -------------------------
 # Cooldowns
@@ -400,7 +400,7 @@ class WorkCog(commands.Cog):
                     )
                     return
 
-                d = JOB_DEFS.get(key)
+                d = get_job_def(key)
                 if d is None:
                     await interaction.followup.send(
                         "Your equipped job no longer exists. Use **/job** to pick a new one.",
@@ -631,8 +631,10 @@ class WorkCog(commands.Cog):
                     user_id=user_id,
                 )
 
-        if key is not None and key in JOB_DEFS:
-            _COOLDOWNS[(guild_id, user_id, key)] = now + float(JOB_DEFS[key].cooldown_seconds)
+        if key is not None:
+            job_def = get_job_def(key)
+            if job_def is not None:
+                _COOLDOWNS[(guild_id, user_id, key)] = now + float(job_def.cooldown_seconds)
 
         if embed is not None:
             await interaction.followup.send(embed=embed)
@@ -646,6 +648,3 @@ class WorkCog(commands.Cog):
         else:
             await interaction.followup.send("Something went wrong generating the work result.", ephemeral=True)
 
-
-async def setup(bot: commands.Bot):
-    await bot.add_cog(WorkCog(bot))
