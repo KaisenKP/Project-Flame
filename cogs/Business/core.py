@@ -387,23 +387,25 @@ def _hours_remaining(ends_at: Optional[datetime], *, now: Optional[datetime] = N
 def _upgrade_percent_bp_for_level(level: int) -> int:
     """
     Tiered upgrade scaling:
-    - levels 1-10: +25% each
-    - levels 11-20: +10% each
-    - levels 21+: +5% each
+    - levels 1-10: +35% each
+    - levels 11-20: +15% each
+    - levels 21+: +8% each
+
+    This keeps businesses feeling like a primary long-term income source.
     """
     lvl = max(int(level), 0)
     bp = 0
 
     first = min(lvl, 10)
-    bp += first * 2500
+    bp += first * 3500
 
     if lvl > 10:
         second = min(lvl - 10, 10)
-        bp += second * 1000
+        bp += second * 1500
 
     if lvl > 20:
         third = lvl - 20
-        bp += third * 500
+        bp += third * 800
 
     return bp
 
@@ -455,8 +457,12 @@ def _prestige_bonus_bp(prestige: int) -> int:
 
 def _upgrade_cost(defn: BusinessDef, level: int) -> int:
     current_level = max(int(level), 0)
-    # cost to buy next level
-    return int(defn.base_upgrade_cost) * (2 ** current_level)
+    # Keep upgrade ROI around ~12 hours of additional income.
+    # This keeps every next upgrade in roughly the same payback window.
+    cur_income = _effective_base_income(defn, level=current_level, prestige=0)
+    next_income = _effective_base_income(defn, level=current_level + 1, prestige=0)
+    delta_income = max(int(next_income) - int(cur_income), 1)
+    return max(int(round(delta_income * 12)), 1)
 
 
 def _manager_runtime_bonus_hours_from_rarity(rarity: str) -> int:
