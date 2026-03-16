@@ -99,6 +99,50 @@ class WalletRow(Base):
 
 
 
+
+
+class SlotJackpotRow(Base):
+    __tablename__ = "slot_jackpots"
+    __table_args__ = (
+        UniqueConstraint("guild_id", name="uq_slot_jackpots_guild"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    pool_silver: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    updated_at: Mapped[datetime] = mapped_column(
+        TS,
+        server_default=NOW,
+        onupdate=NOW,
+        nullable=False,
+    )
+
+
+class SlotPlayerStatsRow(Base):
+    __tablename__ = "slot_player_stats"
+    __table_args__ = (
+        UniqueConstraint("guild_id", "user_id", name="uq_slot_player_stats_user"),
+        Index("ix_slot_player_stats_user", "guild_id", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    slot_xp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    jackpots_won: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    best_session_streak: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cosmetics: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    updated_at: Mapped[datetime] = mapped_column(
+        TS,
+        server_default=NOW,
+        onupdate=NOW,
+        nullable=False,
+    )
+
+
 class UserAchievementRow(Base):
     __tablename__ = "user_achievements"
     __table_args__ = (
