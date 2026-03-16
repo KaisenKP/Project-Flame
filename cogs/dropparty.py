@@ -145,16 +145,9 @@ class DropPartyDropView(discord.ui.View):
         self._edit_lock = asyncio.Lock()
 
     async def on_timeout(self) -> None:
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                item.disabled = True
-
         try:
             if self.message:
-                embed = self.message.embeds[0] if self.message.embeds else None
-                if embed:
-                    embed.set_footer(text="This drop expired.")
-                await self.message.edit(embed=embed, view=self)
+                await self.message.delete()
         except Exception:
             pass
 
@@ -265,7 +258,7 @@ class DropPartyCog(commands.Cog):
     );
     """
 
-    DROP_EXPIRES_SECONDS = 60.0
+    DROP_EXPIRES_SECONDS = 20.0
     DROP_EDIT_MIN_INTERVAL_SECONDS = 1.8
 
     DEFAULT_MESSAGES_PER_DROP = 5
