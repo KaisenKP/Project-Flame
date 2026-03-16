@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Optional, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from db.models import JobRow, UserJobSlotRow, XpRow
 
@@ -83,6 +83,8 @@ JOB_SWITCH_COST: Dict[JobCategory, int] = {
     JobCategory.STABLE: 5000,
     JobCategory.HARD: 10000,
 }
+
+MAX_EQUIPPED_JOB_SLOTS = 3
 
 
 def _base_user_xp(job_key: str, category: JobCategory) -> int:
@@ -552,53 +554,80 @@ async def get_level(session, *, guild_id: int, user_id: int) -> int:
 
 
 async def get_equipped_key(session, *, guild_id: int, user_id: int) -> Optional[str]:
-    slot = await session.scalar(
-        select(UserJobSlotRow).where(
+    keys = await get_equipped_keys(session, guild_id=guild_id, user_id=user_id)
+    return keys[0] if keys else None
+
+
+async def get_equipped_keys(session, *, guild_id: int, user_id: int) -> list[str]:
+    rows = await session.execute(
+        select(UserJobSlotRow)
+        .where(
             UserJobSlotRow.guild_id == guild_id,
             UserJobSlotRow.user_id == user_id,
-            UserJobSlotRow.slot_index == 0,
+            UserJobSlotRow.slot_index >= 0,
+            UserJobSlotRow.slot_index < MAX_EQUIPPED_JOB_SLOTS,
         )
+        .order_by(UserJobSlotRow.slot_index.asc())
     )
-    if slot is None:
-        return None
 
-    job = await session.get(JobRow, int(slot.job_id))
-    if job is None:
-        return None
-
-    return str(job.key)
+    out: list[str] = []
+    for slot in rows.scalars():
+        job = await session.get(JobRow, int(slot.job_id))
+        if job is not None:
+            out.append(str(job.key))
+    return out
 
 
 async def set_equipped_key(session, *, guild_id: int, user_id: int, job_key: str) -> None:
-    d = JOB_DEFS.get(job_key)
-    if d is None:
-        raise ValueError("Unknown job key")
+    await set_equipped_keys(session, guild_id=guild_id, user_id=user_id, job_keys=[job_key])
 
-    job_row = await session.scalar(select(JobRow).where(JobRow.key == job_key))
-    if job_row is None:
-        job_row = JobRow(key=job_key, name=d.name, enabled=True)
-        session.add(job_row)
-        await session.flush()
 
-    slot = await session.scalar(
-        select(UserJobSlotRow).where(
+async def set_equipped_keys(session, *, guild_id: int, user_id: int, job_keys: Sequence[str]) -> list[str]:
+    cleaned: list[str] = []
+    for key in job_keys:
+        k = (key or "").strip().lower()
+        if not k or k in cleaned:
+            continue
+        if k not in JOB_DEFS:
+            raise ValueError(f"Unknown job key: {k}")
+        cleaned.append(k)
+        if len(cleaned) >= MAX_EQUIPPED_JOB_SLOTS:
+            break
+
+    await session.execute(
+        delete(UserJobSlotRow).where(
             UserJobSlotRow.guild_id == guild_id,
             UserJobSlotRow.user_id == user_id,
-            UserJobSlotRow.slot_index == 0,
         )
     )
-    if slot is None:
+
+    for idx, key in enumerate(cleaned):
+        d = JOB_DEFS[key]
+        job_row = await session.scalar(select(JobRow).where(JobRow.key == key))
+        if job_row is None:
+            job_row = JobRow(key=key, name=d.name, enabled=True)
+            session.add(job_row)
+            await session.flush()
+
         slot = UserJobSlotRow(
             guild_id=guild_id,
             user_id=user_id,
-            slot_index=0,
+            slot_index=idx,
             job_id=int(job_row.id),
         )
         session.add(slot)
-    else:
-        slot.job_id = int(job_row.id)
 
     await session.flush()
+    return cleaned
+
+
+async def rotate_equipped_jobs(session, *, guild_id: int, user_id: int) -> list[str]:
+    keys = await get_equipped_keys(session, guild_id=guild_id, user_id=user_id)
+    if len(keys) <= 1:
+        return keys
+    rotated = [*keys[1:], keys[0]]
+    await set_equipped_keys(session, guild_id=guild_id, user_id=user_id, job_keys=rotated)
+    return rotated
 
 
 async def get_job_row_by_key(session, *, job_key: str) -> Optional[JobRow]:

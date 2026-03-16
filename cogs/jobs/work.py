@@ -41,10 +41,12 @@ from services.jobs_core import (
     compute_effects_from_upgrades_and_items,
     fmt_int,
     get_equipped_key,
+    get_equipped_keys,
     get_job_snapshot,
     get_level,
     get_or_create_job_row,
     job_row_image_get,
+    rotate_equipped_jobs,
     roll_bp,
     sub_bp,
     tier_for_category,
@@ -294,6 +296,7 @@ def _build_work_embed(
     work_image_url: Optional[str],
     leveled_up: bool,
     prestiged: bool,
+    next_job_name: Optional[str],
 ) -> discord.Embed:
     color = _work_color(d.category)
 
@@ -373,7 +376,10 @@ def _build_work_embed(
     if work_image_url:
         embed.set_image(url=work_image_url)
 
-    embed.set_footer(text="Use /job to switch jobs")
+    if next_job_name:
+        embed.set_footer(text=f"Next shift: {next_job_name} • Use /job to edit your 3 job slots")
+    else:
+        embed.set_footer(text="Use /job to edit your 3 job slots")
     return embed
 
 
@@ -399,15 +405,17 @@ class WorkCog(commands.Cog):
         embed: Optional[discord.Embed] = None
         key: Optional[str] = None
         used_cooldown_seconds: Optional[float] = None
+        next_job_name: Optional[str] = None
 
         async with self.sessionmaker() as session:
             async with session.begin():
                 await ensure_user_rows(session, guild_id=guild_id, user_id=user_id)
 
-                key = await get_equipped_key(session, guild_id=guild_id, user_id=user_id)
+                equipped_keys = await get_equipped_keys(session, guild_id=guild_id, user_id=user_id)
+                key = equipped_keys[0] if equipped_keys else None
                 if not key:
                     await interaction.followup.send(
-                        "You don’t have a job equipped yet.\nUse **/job** to open the panel.",
+                        "You don’t have any jobs equipped yet.\nUse **/job** to set up your 3 job slots.",
                         ephemeral=True,
                     )
                     return
@@ -415,14 +423,14 @@ class WorkCog(commands.Cog):
                 d = get_job_def(key)
                 if d is None:
                     await interaction.followup.send(
-                        "Your equipped job no longer exists. Use **/job** to pick a new one.",
+                        "Your first job slot no longer exists. Use **/job** to set your slots again.",
                         ephemeral=True,
                     )
                     return
 
                 if d.vip_only and not vip:
                     await interaction.followup.send(
-                        "Your equipped job is VIP-locked and you’re not VIP. Pick another with **/job**.",
+                        "Your current slot is VIP-locked and you’re not VIP. Pick another with **/job**.",
                         ephemeral=True,
                     )
                     return
@@ -630,6 +638,12 @@ class WorkCog(commands.Cog):
 
                 work_image_url = job_row_image_get(job_row)
 
+                rotated_keys = await rotate_equipped_jobs(session, guild_id=guild_id, user_id=user_id)
+                if rotated_keys:
+                    next_key = rotated_keys[0]
+                    next_def = get_job_def(next_key)
+                    next_job_name = next_def.name if next_def is not None else next_key
+
                 embed = _build_work_embed(
                     user=interaction.user,
                     d=d,
@@ -652,6 +666,7 @@ class WorkCog(commands.Cog):
                     work_image_url=work_image_url,
                     leveled_up=bool(delta.leveled_up),
                     prestiged=bool(delta.prestiged),
+                    next_job_name=next_job_name,
                 )
                 used_cooldown_seconds = effective_cd
 
@@ -823,7 +838,7 @@ class _UpgradeConfirmView(discord.ui.View):
 
                 if d.vip_only and not is_vip_member(interaction.user):
                     await interaction.followup.send(
-                        "Your equipped job is VIP-locked and you’re not VIP. Pick another with **/job**.",
+                        "Your current slot is VIP-locked and you’re not VIP. Pick another with **/job**.",
                         ephemeral=True,
                     )
                     return
