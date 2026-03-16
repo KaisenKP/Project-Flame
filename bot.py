@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Iterable
 
@@ -10,6 +12,9 @@ import discord
 from discord.ext import commands
 
 log = logging.getLogger("bot")
+
+RESTART_BLOCK_MESSAGE = "The bot is having a scheduled restart please come back in a couple minutes"
+EST = dt.timezone(dt.timedelta(hours=-5), name="EST")
 
 
 def _truthy(value: str | None, default: bool = False) -> bool:
@@ -96,6 +101,7 @@ class PulseBot(commands.Bot):
         self._ready_once = asyncio.Event()
 
     async def setup_hook(self) -> None:
+        self.tree.interaction_check(self._interaction_restart_guard)
         await self.load_all_extensions()
         await self._ensure_db_schema()
 
@@ -184,6 +190,32 @@ class PulseBot(commands.Bot):
 
     def start_background_tasks(self) -> None:
         self._spawn_task(self._heartbeat_loop(), name="pulse.heartbeat")
+        self._spawn_task(self._scheduled_restart_loop(), name="pulse.scheduled_restart")
+
+    def _is_restart_block_window(self, now: dt.datetime | None = None) -> bool:
+        now_est = (now or dt.datetime.now(tz=EST)).astimezone(EST)
+        return now_est.hour == 0 and now_est.minute == 59
+
+    async def _interaction_restart_guard(self, interaction: discord.Interaction) -> bool:
+        if not self._is_restart_block_window():
+            return True
+
+        if interaction.response.is_done():
+            await interaction.followup.send(RESTART_BLOCK_MESSAGE, ephemeral=True)
+        else:
+            await interaction.response.send_message(RESTART_BLOCK_MESSAGE, ephemeral=True)
+        return False
+
+    async def process_commands(self, message: discord.Message) -> None:
+        if message.author.bot:
+            return
+
+        ctx = await self.get_context(message)
+        if ctx.command and self._is_restart_block_window():
+            await message.channel.send(RESTART_BLOCK_MESSAGE)
+            return
+
+        await super().process_commands(message)
 
     async def stop_background_tasks(self) -> None:
         if not self._bg_tasks:
@@ -215,6 +247,26 @@ class PulseBot(commands.Bot):
         while not self.is_closed():
             await asyncio.sleep(60)
             log.debug("Pulse heartbeat tick")
+
+    async def _scheduled_restart_loop(self) -> None:
+        await self._ready_once.wait()
+
+        while not self.is_closed():
+            now_est = dt.datetime.now(tz=EST)
+            target_est = now_est.replace(hour=1, minute=0, second=0, microsecond=0)
+            if now_est >= target_est:
+                target_est += dt.timedelta(days=1)
+
+            sleep_for = max((target_est - now_est).total_seconds(), 0)
+            log.info("Scheduled restart task sleeping for %.0f seconds until %s", sleep_for, target_est.isoformat())
+            await asyncio.sleep(sleep_for)
+
+            if self.is_closed():
+                return
+
+            log.warning("Executing scheduled restart at 1:00 AM EST")
+            await self.close()
+            os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
 async def build_bot_from_env() -> PulseBot:
