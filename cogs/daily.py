@@ -103,8 +103,13 @@ def _mode_emoji(mode: RemindMode) -> str:
 class DailyReward:
     silver: int
     xp: int
+    bonus_silver: int
+    bonus_xp: int
     streak: int
     xp_mult: float
+    milestone_hit: bool
+    comeback_bonus_hit: bool
+    jackpot_hit: bool
     lootbox_rarity: LootboxRarity | None
     lootbox_amount: int
     lootbox_write_failed: bool
@@ -271,6 +276,18 @@ class DailyCog(commands.Cog):
 
     STREAK_SILVER_BONUS = 10
     XP_STEP_BONUS = 0.2
+
+    STREAK_MILESTONE_INTERVAL = 7
+    STREAK_MILESTONE_SILVER = 450
+    STREAK_MILESTONE_XP = 150
+
+    COMEBACK_MIN_PREV_STREAK = 7
+    COMEBACK_SILVER = 220
+    COMEBACK_XP = 100
+
+    JACKPOT_BP_MIN = 120
+    JACKPOT_BP_MAX = 400
+    JACKPOT_SILVER_MULTIPLIER = 0.40
 
     LOOTBOX_DROP_BP_MIN = 1800
     LOOTBOX_DROP_BP_MAX = 4200
@@ -708,6 +725,20 @@ class DailyCog(commands.Cog):
         s = _clamp(streak, 1, self.STREAK_MAX)
         return 1.0 + (self.XP_STEP_BONUS * float(s))
 
+    def _jackpot_chance_bp(self, streak: int) -> int:
+        s = _clamp(streak, 1, self.STREAK_MAX)
+        t = s / float(self.STREAK_MAX) if self.STREAK_MAX > 0 else 0.0
+        return int(round(_lerp(self.JACKPOT_BP_MIN, self.JACKPOT_BP_MAX, t)))
+
+    @staticmethod
+    def _progress_bar(value: int, total: int, *, width: int = 12) -> str:
+        w = max(int(width), 3)
+        if total <= 0:
+            return "░" * w
+        ratio = max(0.0, min(float(value) / float(total), 1.0))
+        filled = int(round(ratio * w))
+        return ("█" * filled) + ("░" * max(w - filled, 0))
+
     # -------------------------
     # UI helpers
     # -------------------------
@@ -791,11 +822,31 @@ class DailyCog(commands.Cog):
 
         vip_mult = self.VIP_MULT if vip else 1
 
-        silver = int(self.BASE_SILVER + (self.STREAK_SILVER_BONUS * next_streak))
-        xp = int(round(float(self.BASE_XP) * float(xp_mult)))
+        base_silver = int(self.BASE_SILVER + (self.STREAK_SILVER_BONUS * next_streak))
+        base_xp = int(round(float(self.BASE_XP) * float(xp_mult)))
+
+        milestone_hit = next_streak > 0 and (next_streak % self.STREAK_MILESTONE_INTERVAL == 0)
+        milestone_silver = int(self.STREAK_MILESTONE_SILVER) if milestone_hit else 0
+        milestone_xp = int(self.STREAK_MILESTONE_XP) if milestone_hit else 0
+
+        streak_was_broken = last_ts > 0 and (now - last_ts) > self.STREAK_BREAK_SECONDS
+        comeback_bonus_hit = bool(streak_was_broken and int(prev_streak) >= self.COMEBACK_MIN_PREV_STREAK)
+        comeback_silver = int(self.COMEBACK_SILVER) if comeback_bonus_hit else 0
+        comeback_xp = int(self.COMEBACK_XP) if comeback_bonus_hit else 0
+
+        silver = int(base_silver + milestone_silver + comeback_silver)
+        xp = int(base_xp + milestone_xp + comeback_xp)
 
         silver *= int(vip_mult)
         xp *= int(vip_mult)
+
+        jackpot_bp = self._jackpot_chance_bp(next_streak)
+        jackpot_hit = self._roll_bp(jackpot_bp)
+        jackpot_silver = int(round(float(silver) * float(self.JACKPOT_SILVER_MULTIPLIER))) if jackpot_hit else 0
+        silver += int(jackpot_silver)
+
+        bonus_silver = int((milestone_silver + comeback_silver) * int(vip_mult)) + int(jackpot_silver)
+        bonus_xp = int((milestone_xp + comeback_xp) * int(vip_mult))
 
         loot_rarity: LootboxRarity | None = None
         loot_amount = 0
@@ -805,6 +856,10 @@ class DailyCog(commands.Cog):
             loot_rarity = self._pick_lootbox_rarity(next_streak)
             triple_bp = self._lootbox_triple_chance_bp(next_streak)
             loot_amount = 3 if self._roll_bp(triple_bp) else 1
+
+        if milestone_hit and (loot_rarity is None or loot_amount <= 0):
+            loot_rarity = LootboxRarity.RARE
+            loot_amount = 1
 
         async with self.sessionmaker() as session:
             async with session.begin():
@@ -872,8 +927,13 @@ class DailyCog(commands.Cog):
         reward = DailyReward(
             silver=silver,
             xp=xp,
+            bonus_silver=bonus_silver,
+            bonus_xp=bonus_xp,
             streak=next_streak,
             xp_mult=xp_mult,
+            milestone_hit=milestone_hit,
+            comeback_bonus_hit=comeback_bonus_hit,
+            jackpot_hit=jackpot_hit,
             lootbox_rarity=loot_rarity,
             lootbox_amount=loot_amount,
             lootbox_write_failed=loot_write_failed,
@@ -888,6 +948,9 @@ class DailyCog(commands.Cog):
             color=discord.Color.green(),
         )
 
+        streak_bar = self._progress_bar(reward.streak, self.STREAK_MAX)
+        embed.description = f"{embed.description}\n`{streak_bar}` **{reward.streak}/{self.STREAK_MAX}**"
+
         embed.add_field(name="🔥 Streak", value=f"**{_fmt_int(reward.streak)}** / {self.STREAK_MAX}", inline=True)
         embed.add_field(name="💰 Silver", value=f"**+{_fmt_int(reward.silver)}**", inline=True)
         embed.add_field(name="🧠 XP", value=f"**+{_fmt_int(reward.xp)}**", inline=True)
@@ -900,6 +963,19 @@ class DailyCog(commands.Cog):
             value=f"**ON** ({_mode_label(reward.remind_mode)})" if reward.remind_enabled else "**OFF** (silent)",
             inline=True,
         )
+
+        if reward.bonus_silver > 0 or reward.bonus_xp > 0:
+            bonus_lines: list[str] = []
+            if reward.milestone_hit:
+                bonus_lines.append("🏁 Milestone day bonus")
+            if reward.comeback_bonus_hit:
+                bonus_lines.append("🤝 Comeback protection bonus")
+            if reward.jackpot_hit:
+                bonus_lines.append(f"🎰 Streak jackpot (+{_fmt_int(jackpot_silver)} silver)")
+
+            summary = "\n".join(bonus_lines) if bonus_lines else "Special bonus"
+            summary += f"\nTotal extra: **+{_fmt_int(reward.bonus_silver)} silver**, **+{_fmt_int(reward.bonus_xp)} XP**"
+            embed.add_field(name="🌟 Bonus events", value=summary, inline=False)
 
         if reward.lootbox_write_failed:
             embed.color = discord.Color.red()
@@ -977,12 +1053,16 @@ class DailyCog(commands.Cog):
         gap = now - last_ts
         streak_alive = gap <= self.STREAK_BREAK_SECONDS
         shown_streak = int(streak) if streak_alive else 0
+        next_streak = self._compute_next_streak(last_ts=last_ts, now_ts=now, prev_streak=shown_streak)
+        next_milestone_at = ((shown_streak // self.STREAK_MILESTONE_INTERVAL) + 1) * self.STREAK_MILESTONE_INTERVAL
+        until_milestone = max(next_milestone_at - shown_streak, 0)
 
         embed = discord.Embed(
             title="📅 Daily status",
             color=discord.Color.green() if can_claim else discord.Color.orange(),
         )
         embed.description = "✅ You can claim now.\nUse **/daily claim**." if can_claim else f"⏳ Next claim in **{_cooldown_hms(remaining)}**."
+        embed.description += f"\n`{self._progress_bar(shown_streak, self.STREAK_MAX)}`"
 
         embed.add_field(name="🕒 Last claim", value=_utc_stamp(last_ts), inline=False)
         embed.add_field(name="🔥 Streak", value=f"**{_fmt_int(shown_streak)}** / {self.STREAK_MAX}", inline=True)
@@ -991,6 +1071,23 @@ class DailyCog(commands.Cog):
 
         break_in = int(self.STREAK_BREAK_SECONDS - gap)
         embed.add_field(name="⏱️ Breaks in", value=_cooldown_hms(break_in) if break_in > 0 else "Already broken", inline=False)
+        embed.add_field(
+            name="🏁 Next milestone",
+            value=(
+                f"At streak **{_fmt_int(next_milestone_at)}**"
+                f" (in **{_fmt_int(until_milestone)}** claim{'s' if until_milestone != 1 else ''})"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="🎁 Next claim preview",
+            value=(
+                f"Streak after claim: **{_fmt_int(next_streak)}**\n"
+                f"Lootbox chance: **{self._lootbox_drop_chance_bp(next_streak) / 100:.2f}%**\n"
+                f"Jackpot chance: **{self._jackpot_chance_bp(next_streak) / 100:.2f}%**"
+            ),
+            inline=False,
+        )
 
         embed.set_footer(text=self._footer_times(last_ts=last_ts))
 
