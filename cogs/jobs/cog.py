@@ -14,6 +14,7 @@ from services.jobs_core import (
     ensure_job_row,
     fmt_int,
     get_equipped_key,
+    get_equipped_keys,
     get_level,
     get_or_create_job_row,
     job_row_image_set,
@@ -70,9 +71,9 @@ class JobsCog(commands.Cog):
         else:
             await interaction.followup.send(f"✅ Cleared /work image for **{d.name}**.", ephemeral=True)
 
-    @app_commands.command(name="job", description="Open jobs panel or equip a job.")
-    @app_commands.describe(job="Job key to equip (miner, fisherman, robber, etc.)")
-    async def job_cmd(self, interaction: discord.Interaction, job: Optional[str] = None):
+    @app_commands.command(name="job", description="Open jobs panel or equip one or more jobs.")
+    @app_commands.describe(jobs="Optional comma-separated job keys (up to 3). Example: miner,fisherman,blacksmith")
+    async def job_cmd(self, interaction: discord.Interaction, jobs: Optional[str] = None):
         if interaction.guild is None:
             await interaction.response.send_message("This only works in a server.", ephemeral=True)
             return
@@ -81,54 +82,86 @@ class JobsCog(commands.Cog):
         user_id = interaction.user.id
         vip = is_vip_member(interaction.user)  # type: ignore[arg-type]
 
-        if job is not None and str(job).strip():
-            key = str(job).strip().lower()
-            d = get_job_def(key)
-            if d is None:
-                await interaction.response.send_message(
-                    f"Unknown job key `{key}`. Use `/job` to open the panel.",
-                    ephemeral=True,
-                )
+        if jobs is not None and str(jobs).strip():
+            requested = []
+            for raw in str(jobs).split(","):
+                key = raw.strip().lower()
+                if key and key not in requested:
+                    requested.append(key)
+            requested = requested[:3]
+
+            if not requested:
+                await interaction.response.send_message("Provide at least one valid job key.", ephemeral=True)
                 return
 
-            if d.vip_only and not vip:
-                await interaction.response.send_message("That job is VIP-locked.", ephemeral=True)
-                return
+            for key in requested:
+                d = get_job_def(key)
+                if d is None:
+                    await interaction.response.send_message(
+                        f"Unknown job key `{key}`. Use `/job` to open the panel.",
+                        ephemeral=True,
+                    )
+                    return
+                if d.vip_only and not vip:
+                    await interaction.response.send_message(f"**{d.name}** is VIP-locked.", ephemeral=True)
+                    return
 
             await interaction.response.defer(ephemeral=True)
 
             async with self.sessionmaker() as session:
                 async with session.begin():
                     await ensure_user_rows(session, guild_id=guild_id, user_id=user_id)
-
                     level = await get_level(session, guild_id=guild_id, user_id=user_id)
-                    need = JOB_UNLOCK_LEVEL[d.category]
-                    if (not vip) and level < need:
-                        await interaction.followup.send(
-                            f"🔒 **{d.name}** unlocks at **Level {need}**.",
-                            ephemeral=True,
-                        )
-                        return
 
-                    row = await ensure_job_row(session, key=key, name=d.name)
-                    if not bool(getattr(row, "enabled", True)):
-                        await interaction.followup.send(f"Job `{key}` is disabled in DB.", ephemeral=True)
-                        return
+                    for key in requested:
+                        d = get_job_def(key)
+                        if d is None:
+                            await interaction.followup.send(f"Unknown job key `{key}`.", ephemeral=True)
+                            return
 
-                    old = await get_equipped_key(session, guild_id=guild_id, user_id=user_id)
-                    first_free = old is None
-                    cost = JOB_SWITCH_COST[d.category]
+                        need = JOB_UNLOCK_LEVEL[d.category]
+                        if (not vip) and level < need:
+                            await interaction.followup.send(
+                                f"🔒 **{d.name}** unlocks at **Level {need}**.",
+                                ephemeral=True,
+                            )
+                            return
 
-            msg = "Equip this job for free?" if old is None else f"Switch jobs for **{fmt_int(cost)} Silver**?"
+                        row = await ensure_job_row(session, key=key, name=d.name)
+                        if not bool(getattr(row, "enabled", True)):
+                            await interaction.followup.send(f"Job `{key}` is disabled in DB.", ephemeral=True)
+                            return
+
+                    old_keys = await get_equipped_keys(session, guild_id=guild_id, user_id=user_id)
+
+                    old_set = set(old_keys)
+                    first_free = len(old_keys) == 0
+                    cost = 0
+                    for key in requested:
+                        if key in old_set:
+                            continue
+                        d = get_job_def(key)
+                        if d is None:
+                            continue
+                        add = JOB_SWITCH_COST[d.category]
+                        if vip:
+                            add = add // 2
+                        if first_free:
+                            add = 0
+                            first_free = False
+                        cost += add
+
+            names = [get_job_def(k).name for k in requested if get_job_def(k) is not None]
+            listing = "\n".join(f"{idx+1}. **{name}**" for idx, name in enumerate(names))
+            msg = ("Set this loadout for free?\n" + listing) if cost <= 0 else ("Set this loadout?\n" + listing + f"\n\nCost: **{fmt_int(cost)} Silver**")
             view = EquipConfirmView(
                 sessionmaker=self.sessionmaker,
                 guild_id=guild_id,
                 user_id=user_id,
                 vip=vip,
-                new_key=key,
-                old_key=old,
+                new_keys=requested,
+                old_keys=old_keys,
                 cost=cost,
-                first_free=first_free,
             )
             await interaction.followup.send(msg, view=view, ephemeral=True)
             return
@@ -136,8 +169,9 @@ class JobsCog(commands.Cog):
         async with self.sessionmaker() as session:
             async with session.begin():
                 equipped = await get_equipped_key(session, guild_id=guild_id, user_id=user_id)
+                equipped_keys = await get_equipped_keys(session, guild_id=guild_id, user_id=user_id)
 
-        embed = make_panel_embed(user=interaction.user, vip=vip, page="standard", equipped=equipped)
+        embed = make_panel_embed(user=interaction.user, vip=vip, page="standard", equipped=equipped, equipped_keys=equipped_keys)
         view = JobsPanelView(sessionmaker=self.sessionmaker, vip=vip, guild_id=guild_id, user_id=user_id)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 

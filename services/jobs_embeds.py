@@ -25,7 +25,15 @@ def work_color(category: JobCategory) -> discord.Color:
     return discord.Color.blurple()
 
 
-def _equipped_line(equipped: Optional[str]) -> str:
+def _equipped_line(equipped: Optional[str], equipped_keys: Optional[list[str]] = None) -> str:
+    if equipped_keys:
+        names = []
+        for key in equipped_keys:
+            d = JOB_DEFS.get(key)
+            names.append(d.name if d else key)
+        lines = ["✅ Equipped Jobs:"]
+        lines.extend(f"{idx+1}. **{name}**" for idx, name in enumerate(names))
+        return "\n".join(lines)
     if not equipped:
         return "No job equipped yet."
     d = JOB_DEFS.get(equipped)
@@ -56,15 +64,15 @@ def job_list_lines(*, vip: bool, want_vip: bool, equipped: Optional[str]) -> lis
     return lines
 
 
-def make_panel_embed(*, user: discord.abc.User, vip: bool, page: str, equipped: Optional[str]) -> discord.Embed:
+def make_panel_embed(*, user: discord.abc.User, vip: bool, page: str, equipped: Optional[str], equipped_keys: Optional[list[str]] = None) -> discord.Embed:
     color = discord.Color.gold() if vip else discord.Color.blurple()
 
     desc_lines = [
-        _equipped_line(equipped),
+        _equipped_line(equipped, equipped_keys),
         "",
-        "Pick a job in the dropdown to preview.",
+        "Pick up to 3 jobs in the dropdown to build your loadout.",
         "Equip with the **Equip Selected** button.",
-        "Run your equipped job with **/work**.",
+        "Each **/work** uses the first slot, then rotates to the next slot.",
         "",
         "**Unlocks + Switch Costs**",
         f"• Hard: unlock lvl {JOB_UNLOCK_LEVEL[JobCategory.HARD]}, switch {fmt_int(JOB_SWITCH_COST[JobCategory.HARD])}",
@@ -171,7 +179,8 @@ def make_rules_embed(*, vip: bool) -> discord.Embed:
         "• Pick a job from the dropdown",
         "• Click **Equip Selected**",
         "• Switching costs Silver after your first equip",
-        "• Run your equipped job with `/work`",
+        "• Pick up to 3 jobs and equip the loadout",
+        "• `/work` cycles slots: 1 → 2 → 3 → 1",
         "",
         "**Unlocks**",
         f"• Easy: level {JOB_UNLOCK_LEVEL[JobCategory.EASY]} ({fmt_int(JOB_SWITCH_COST[JobCategory.EASY])} to switch)",
