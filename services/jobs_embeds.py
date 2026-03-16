@@ -54,11 +54,12 @@ def job_list_lines(*, vip: bool, want_vip: bool, equipped: Optional[str]) -> lis
         unlock = JOB_UNLOCK_LEVEL[d.category]
         cost = JOB_SWITCH_COST[d.category]
 
+        cooldown = f"{fmt_int(d.cooldown_seconds)}s"
         if d.vip_only and not vip:
             lines.append(f"{marker}🔒 **{d.name}** (`{d.key}`) • VIP")
         else:
             lines.append(
-                f"{marker}• **{d.name}** (`{d.key}`) • {d.category.value} • unlock **{unlock}** • switch **{fmt_int(cost)}**"
+                f"{marker}• **{d.name}** (`{d.key}`) • {d.category.value} • unlock **{unlock}** • switch **{fmt_int(cost)}** • cd **{cooldown}**"
             )
 
     return lines
@@ -83,6 +84,7 @@ def make_panel_embed(*, user: discord.abc.User, vip: bool, page: str, equipped: 
         "• Each job has its own levels, titles, and prestige.",
         "• Your job title upgrades when you prestige.",
         "• **/work** awards user XP + job XP.",
+        "• Hard jobs pay higher but carry bigger fail chance.",
     ]
 
     embed = discord.Embed(
@@ -105,6 +107,14 @@ def make_panel_embed(*, user: discord.abc.User, vip: bool, page: str, equipped: 
             value="\n".join(lines) if lines else "No standard jobs configured.",
             inline=False,
         )
+
+    embed.add_field(
+        name="Quick Tips",
+        value="• Mix one stable job with one hard job for balanced income.\n"
+        "• Keep stamina tools stocked to sustain longer work sessions.\n"
+        "• Check `/job` often—cooldowns and costs differ by role.",
+        inline=False,
+    )
 
     embed.set_footer(text="Use: /job • /work • /job_admin • /work_image_admin")
     return embed
@@ -146,6 +156,8 @@ def make_job_info_embed(*, vip: bool, job_key: str, equipped: Optional[str]) -> 
         tag = " (failure)" if (a.can_fail and int(a.min_silver) == 0 and int(a.max_silver) == 0) else ""
         action_lines.append(f"• `{a.key}`: {lo} to {hi}{tag}")
 
+    avg_silver = int(sum((a.min_silver + a.max_silver) / 2 for a in d.actions) / max(len(d.actions), 1))
+
     title = d.name
     if equipped == d.key:
         title = f"✅ {title}"
@@ -164,6 +176,7 @@ def make_job_info_embed(*, vip: bool, job_key: str, equipped: Optional[str]) -> 
     embed.add_field(name="Job XP", value=f"**+{fmt_int(d.job_xp_gain)}**", inline=True)
     embed.add_field(name="Fail Chance", value=f"**{fail_txt}**", inline=True)
     embed.add_field(name="Bonus", value=f"**{bonus_txt}**", inline=True)
+    embed.add_field(name="Avg Silver", value=f"**{fmt_int(avg_silver)}**", inline=True)
     embed.add_field(
         name="Outcomes",
         value="\n".join(action_lines) if action_lines else "None",

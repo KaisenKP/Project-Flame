@@ -88,6 +88,7 @@ class ProfileCardRenderer:
         draw.text((286, 64), payload.username, fill=(255, 255, 255), font=self._font(58, bold=True))
         subtitle = "PLAYER CALLING CARD"
         draw.text((290, 128), subtitle, fill=(195, 215, 255), font=self._font(24, bold=False))
+        draw.text((290, 156), "Season Rank Snapshot", fill=(154, 183, 234), font=self._font(20, bold=False))
         if payload.vip:
             self._rounded_rect(draw, (860, 56, 1024, 108), 20, fill=(255, 208, 80, 240))
             draw.text((888, 70), "VIP", fill=(65, 38, 8), font=self._font(30, bold=True))
@@ -157,13 +158,20 @@ class ProfileCardRenderer:
             fill=(255, 255, 255),
             font=self._font(36, bold=True),
         )
+        bar = (648, 492, 804, 516)
+        self._rounded_rect(draw, bar, 10, fill=(45, 59, 88, 230))
+        stamina_ratio = 0.0 if payload.stamina_max <= 0 else max(0.0, min(payload.stamina_current / payload.stamina_max, 1.0))
+        fill_w = int((bar[2] - bar[0]) * stamina_ratio)
+        if fill_w > 0:
+            self._rounded_rect(draw, (bar[0], bar[1], bar[0] + fill_w, bar[3]), 10, fill=(75, 214, 164, 255))
 
         draw.text((828, 404), "JOBS", fill=(148, 181, 255), font=self._font(21, bold=True))
         y = 438
         if payload.jobs:
             for j in payload.jobs[:3]:
-                draw.text((828, y), f"S{j.slot}: {j.label}", fill=(242, 249, 255), font=self._font(23, bold=False))
-                y += 32
+                self._rounded_rect(draw, (820, y - 4, 1012, y + 28), 10, fill=(30, 44, 72, 225))
+                draw.text((830, y), f"S{j.slot}: {j.label}", fill=(242, 249, 255), font=self._font(21, bold=False))
+                y += 34
         else:
             draw.text((828, y), "No job equipped", fill=(242, 249, 255), font=self._font(23, bold=False))
 

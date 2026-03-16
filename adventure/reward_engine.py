@@ -49,9 +49,32 @@ class RewardEngine:
         chance = 450 + min(lead_level * 12, 500)
         if party_size > 1:
             chance += 200
+        class_variety = len({p.class_key for p in players if p.class_key})
+        chance += min(class_variety * 35, 175)
         if stage_tag in {StageTag.BOSS, StageTag.MYSTIC}:
             chance += 180
-        return chance
+        return min(chance, 2600)
+
+    def party_synergy_bonus(self, *, players: list[PlayerRuntime], stage_total: int) -> tuple[AdventureRewards, list[str]]:
+        rewards = AdventureRewards()
+        class_keys = {p.class_key for p in players if p.class_key}
+        if len(players) <= 1 or not class_keys:
+            return rewards, []
+
+        diversity = len(class_keys)
+        silver_bonus = 90 * len(players) * stage_total + (diversity * 55)
+        xp_bonus = 16 * len(players) + (diversity * 10)
+        adv_xp_bonus = 12 * stage_total + (diversity * 6)
+
+        rewards.silver += silver_bonus
+        rewards.xp += xp_bonus
+        rewards.adventure_xp += adv_xp_bonus
+
+        lines = [
+            "🤝 Party Synergy: Your mixed classes sync up mid-run.",
+            f"Teamplay bonus grants **{fmt_int(silver_bonus)} silver**, **+{fmt_int(xp_bonus)} XP**, and **+{fmt_int(adv_xp_bonus)} Adventure XP**.",
+        ]
+        return rewards, lines
 
     def resolve_rare_event(self, *, stage_tag: StageTag, party_size: int, class_keys: list[str]) -> tuple[AdventureRewards, list[str]]:
         rewards = AdventureRewards()
@@ -171,12 +194,22 @@ class RewardEngine:
         return level
 
     def summary_embed(self, *, players: list[PlayerRuntime], rewards: AdventureRewards) -> discord.Embed:
-        em = discord.Embed(title="Adventure Complete", description=f"Party: **{', '.join(p.display_name for p in players)}**", color=discord.Color.green())
+        em = discord.Embed(
+            title="Adventure Complete",
+            description=f"Party: **{', '.join(p.display_name for p in players)}**",
+            color=discord.Color.green(),
+        )
         em.add_field(name="Silver", value=f"{rewards.silver:+,}", inline=True)
         em.add_field(name="XP", value=f"+{fmt_int(rewards.xp)}", inline=True)
         em.add_field(name="Adventure XP", value=f"+{fmt_int(rewards.adventure_xp)}", inline=True)
+        em.add_field(name="Party Size", value=str(len(players)), inline=True)
         em.add_field(name="Lootboxes", value=lootbox_lines(rewards.lootboxes), inline=False)
         em.add_field(name="Items", value=item_lines(rewards.items), inline=False)
+        lootbox_total = sum(max(int(v), 0) for v in rewards.lootboxes.values())
+        item_total = sum(max(int(v), 0) for v in rewards.items.values())
+        em.add_field(name="Haul", value=f"{lootbox_total} lootbox(es) • {item_total} item(s)", inline=False)
         if rewards.stamina_penalty > 0:
             em.set_footer(text=f"Extra stamina lost from failed outcomes: {rewards.stamina_penalty}")
+        else:
+            em.set_footer(text="Clean run: no extra stamina penalties.")
         return em
