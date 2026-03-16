@@ -143,6 +143,7 @@ class BusinessActionResult:
     hired_worker: Optional["HiredWorkerSnapshot"] = None
     hired_manager: Optional["HiredManagerSnapshot"] = None
     worker_candidate: Optional["WorkerCandidateSnapshot"] = None
+    manager_candidate: Optional["ManagerCandidateSnapshot"] = None
 
 
 @dataclass(slots=True)
@@ -175,6 +176,16 @@ class HiredManagerSnapshot:
     profit_bonus_bp: int
     auto_restart_charges: int
     hire_cost: int
+
+
+@dataclass(slots=True)
+class ManagerCandidateSnapshot:
+    manager_name: str
+    rarity: str
+    runtime_bonus_hours: int
+    profit_bonus_bp: int
+    auto_restart_charges: int
+    reroll_cost: int
 
 
 @dataclass(slots=True)
@@ -329,6 +340,7 @@ HOTEL_STARTING_WORKER_SLOTS = 4
 BASE_WORKER_HIRE_COST = 10_000
 BASE_MANAGER_HIRE_COST = 35_000
 WORKER_CANDIDATE_REROLL_COST = 500
+MANAGER_CANDIDATE_REROLL_COST = 1_000
 
 RUN_STATUS_RUNNING = "running"
 RUN_STATUS_COMPLETED = "completed"
@@ -2140,6 +2152,62 @@ async def hire_manager(
         ),
     )
 
+
+
+async def roll_manager_candidate(
+    session,
+    *,
+    guild_id: int,
+    user_id: int,
+    business_key: str,
+    reroll_cost: int = MANAGER_CANDIDATE_REROLL_COST,
+) -> BusinessActionResult:
+    defn = _def_for_key(business_key)
+    if defn is None:
+        return BusinessActionResult(ok=False, message="That business does not exist.")
+
+    ownership = await _get_ownership_row(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    if ownership is None:
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        return BusinessActionResult(ok=False, message=f"You do not own **{defn.name}** yet.", snapshot=hub)
+
+    slots = await get_manager_assignment_slots(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    free_slot = next((s.slot_index for s in slots if not s.is_active), None)
+    if free_slot is None:
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        return BusinessActionResult(ok=False, message="All manager slots are full. Upgrade the business to unlock more slots.", snapshot=hub, manage_snapshot=manage)
+
+    wallet = await _get_wallet(session, guild_id=guild_id, user_id=user_id)
+    safe_cost = max(int(reroll_cost), 0)
+    if int(wallet.silver or 0) < safe_cost:
+        short = safe_cost - int(wallet.silver or 0)
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        return BusinessActionResult(ok=False, message=f"You need **{safe_cost:,} Silver** to reroll. Short by **{short:,} Silver**.", snapshot=hub, manage_snapshot=manage)
+
+    wallet.silver -= safe_cost
+    if hasattr(wallet, "silver_spent"):
+        wallet.silver_spent += safe_cost
+
+    roll = _generate_manager_roll()
+    candidate = ManagerCandidateSnapshot(
+        manager_name=str(roll["manager_name"]),
+        rarity=str(roll["rarity"]),
+        runtime_bonus_hours=int(roll["runtime_bonus_hours"]),
+        profit_bonus_bp=int(roll["profit_bonus_bp"]),
+        auto_restart_charges=int(roll["auto_restart_charges"]),
+        reroll_cost=int(safe_cost),
+    )
+    hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+    manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    return BusinessActionResult(
+        ok=True,
+        message=f"Generated manager candidate **{candidate.manager_name}** for **{safe_cost:,} Silver**.",
+        snapshot=hub,
+        manage_snapshot=manage,
+        manager_candidate=candidate,
+    )
 
 
 async def hire_manager_manual(
