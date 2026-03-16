@@ -49,19 +49,26 @@ Must provide:
 """
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
 import logging
+from pathlib import Path
 from typing import List, Optional, Sequence
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+from sqlalchemy import select
 
+from db.models import BusinessOwnershipRow, WalletRow
 from services.db import sessions
 from services.achievements import check_and_grant_achievements, queue_achievement_announcements
 from services.users import ensure_user_rows
-from .runtime import BusinessRuntimeEngine
+from .runtime import BusinessRuntimeEngine, CompletedRunNotice
 
 log = logging.getLogger(__name__)
+
+_BUSINESS_RUNTIME_STATE_PATH = Path("data/business_runtime_state.json")
 
 # =========================================================
 # CORE CONTRACT IMPORTS
@@ -2121,9 +2128,223 @@ class BusinessCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.sessionmaker = sessions()
-        self.runtime_engine = BusinessRuntimeEngine()
+        self.runtime_engine = BusinessRuntimeEngine(on_run_completed=self._notify_business_run_completed)
+
+    def _load_runtime_state(self) -> dict:
+        default = {
+            "refund_migration_ran": False,
+            "notification_prefs": {},
+            "pending_summaries": {},
+        }
+        try:
+            if not _BUSINESS_RUNTIME_STATE_PATH.exists():
+                return default
+            raw = json.loads(_BUSINESS_RUNTIME_STATE_PATH.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return default
+            default.update(raw)
+            return default
+        except Exception:
+            return default
+
+    def _save_runtime_state(self, state: dict) -> None:
+        _BUSINESS_RUNTIME_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _BUSINESS_RUNTIME_STATE_PATH.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+
+    def _state_key(self, *, guild_id: int, user_id: int) -> str:
+        return f"{int(guild_id)}:{int(user_id)}"
+
+    def _notifications_enabled_for(self, *, guild_id: int, user_id: int) -> bool:
+        state = self._load_runtime_state()
+        prefs = dict(state.get("notification_prefs", {}))
+        return bool(prefs.get(self._state_key(guild_id=guild_id, user_id=user_id), True))
+
+    def _set_notifications_enabled_for(self, *, guild_id: int, user_id: int, enabled: bool) -> None:
+        state = self._load_runtime_state()
+        prefs = dict(state.get("notification_prefs", {}))
+        prefs[self._state_key(guild_id=guild_id, user_id=user_id)] = bool(enabled)
+        state["notification_prefs"] = prefs
+        self._save_runtime_state(state)
+
+    def _push_pending_summary(self, *, guild_id: int, user_id: int, summary: dict) -> None:
+        state = self._load_runtime_state()
+        pending = dict(state.get("pending_summaries", {}))
+        key = self._state_key(guild_id=guild_id, user_id=user_id)
+        items = list(pending.get(key, []))
+        items.append(summary)
+        pending[key] = items[-20:]
+        state["pending_summaries"] = pending
+        self._save_runtime_state(state)
+
+    def _pop_pending_summaries(self, *, guild_id: int, user_id: int) -> list[dict]:
+        state = self._load_runtime_state()
+        pending = dict(state.get("pending_summaries", {}))
+        key = self._state_key(guild_id=guild_id, user_id=user_id)
+        items = list(pending.pop(key, []))
+        state["pending_summaries"] = pending
+        self._save_runtime_state(state)
+        return items
+
+    def _new_upgrade_cost(self, *, base_hourly_income: int, level: int) -> int:
+        lvl = max(int(level), 0)
+        first = min(lvl, 10)
+        bp = first * 3500
+        if lvl > 10:
+            bp += min(lvl - 10, 10) * 1500
+        if lvl > 20:
+            bp += (lvl - 20) * 800
+        cur = int(round(int(base_hourly_income) * (10_000 + bp) / 10_000))
+
+        nxt_lvl = lvl + 1
+        first_n = min(nxt_lvl, 10)
+        bp_n = first_n * 3500
+        if nxt_lvl > 10:
+            bp_n += min(nxt_lvl - 10, 10) * 1500
+        if nxt_lvl > 20:
+            bp_n += (nxt_lvl - 20) * 800
+        nxt = int(round(int(base_hourly_income) * (10_000 + bp_n) / 10_000))
+        delta = max(nxt - cur, 1)
+        return max(int(round(delta * 12)), 1)
+
+    async def _run_one_time_upgrade_refund(self) -> None:
+        state = self._load_runtime_state()
+        if bool(state.get("refund_migration_ran", False)):
+            return
+
+        refunded_total = 0
+        refunded_rows = 0
+
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                defs = await fetch_business_defs(session)
+                def_map = {str(d.key): d for d in defs}
+                ownership_rows = list((await session.scalars(select(BusinessOwnershipRow))).all())
+
+                for row in ownership_rows:
+                    defn = def_map.get(str(row.business_key))
+                    if defn is None:
+                        continue
+                    level = max(int(row.level or 0), 0)
+                    if level <= 0:
+                        continue
+                    legacy_spent = 0
+                    new_spent = 0
+                    for i in range(level):
+                        legacy_spent += int(defn.base_upgrade_cost) * (2 ** i)
+                        new_spent += self._new_upgrade_cost(base_hourly_income=int(defn.base_hourly_income), level=i)
+                    refund = max(int(legacy_spent) - int(new_spent), 0)
+                    if refund <= 0:
+                        continue
+
+                    wallet = await session.scalar(
+                        select(WalletRow).where(
+                            WalletRow.guild_id == int(row.guild_id),
+                            WalletRow.user_id == int(row.user_id),
+                        )
+                    )
+                    if wallet is None:
+                        wallet = WalletRow(
+                            guild_id=int(row.guild_id),
+                            user_id=int(row.user_id),
+                            silver=0,
+                            diamonds=0,
+                        )
+                        session.add(wallet)
+                        await session.flush()
+
+                    wallet.silver = int(wallet.silver or 0) + refund
+                    wallet.silver_earned = int(wallet.silver_earned or 0) + refund
+                    row.total_spent = max(int(row.total_spent or 0) - refund, 0)
+                    refunded_total += refund
+                    refunded_rows += 1
+
+        state["refund_migration_ran"] = True
+        self._save_runtime_state(state)
+        log.info("Business refund migration done | rows=%s refunded_total=%s", refunded_rows, refunded_total)
+
+    async def _notify_business_run_completed(self, notice: CompletedRunNotice) -> None:
+        business_name = notice.business_key.replace("_", " ").title()
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                defs = await fetch_business_defs(session)
+        def_map = {str(d.key): d for d in defs}
+        matched = def_map.get(str(notice.business_key))
+        if matched is not None:
+            business_name = f"{matched.emoji} {matched.name}"
+
+        event_summary = "No special events this run."
+        if notice.event_outcomes:
+            net_delta = sum(int(evt.silver_delta) for evt in notice.event_outcomes)
+            sign = "+" if net_delta >= 0 else ""
+            event_summary = (
+                f"Events: **{len(notice.event_outcomes)}** triggered "
+                f"(net {sign}{net_delta:,} Silver vs baseline)."
+            )
+
+        summary = {
+            "business_name": business_name,
+            "hours_paid_total": int(notice.hours_paid_total),
+            "silver_paid_total": int(notice.silver_paid_total),
+            "event_count": len(notice.event_outcomes),
+            "net_event_delta": int(sum(int(evt.silver_delta) for evt in notice.event_outcomes)),
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        message = (
+            f"<@{notice.user_id}> your business run finished: **{business_name}**\n"
+            f"• Runtime paid: **{notice.hours_paid_total}h**\n"
+            f"• Total earned: **{notice.silver_paid_total:,} Silver**\n"
+            f"• {event_summary}"
+        )
+
+        notify_enabled = self._notifications_enabled_for(guild_id=int(notice.guild_id), user_id=int(notice.user_id))
+        if not notify_enabled:
+            self._push_pending_summary(guild_id=int(notice.guild_id), user_id=int(notice.user_id), summary=summary)
+            return
+
+        guild = self.bot.get_guild(int(notice.guild_id))
+        if guild is None:
+            return
+
+        channels: list[discord.abc.Messageable] = []
+        if guild.system_channel is not None:
+            channels.append(guild.system_channel)
+        for channel in guild.text_channels:
+            if channel in channels:
+                continue
+            me = guild.me
+            if me is None:
+                continue
+            perms = channel.permissions_for(me)
+            if perms.send_messages:
+                channels.append(channel)
+            if len(channels) >= 3:
+                break
+
+        for channel in channels:
+            try:
+                await channel.send(message)
+                return
+            except Exception:
+                continue
+
+        user = self.bot.get_user(int(notice.user_id))
+        if user is None:
+            try:
+                user = await self.bot.fetch_user(int(notice.user_id))
+            except Exception:
+                user = None
+        if user is not None:
+            try:
+                await user.send(message)
+                return
+            except Exception:
+                self._push_pending_summary(guild_id=int(notice.guild_id), user_id=int(notice.user_id), summary=summary)
+                return
+        self._push_pending_summary(guild_id=int(notice.guild_id), user_id=int(notice.user_id), summary=summary)
 
     async def cog_load(self) -> None:
+        await self._run_one_time_upgrade_refund()
         log.info(
             "Business runtime start requested | cog=%s running=%s",
             self.__class__.__name__,
@@ -2191,6 +2412,21 @@ class BusinessCog(commands.Cog):
             return
 
         embed = _build_hub_embed(user=interaction.user, snap=snap)
+        pending = self._pop_pending_summaries(guild_id=guild_id, user_id=user_id)
+        if pending:
+            lines = []
+            for item in pending[-5:]:
+                business_name = str(item.get("business_name", "Business"))
+                silver = int(item.get("silver_paid_total", 0))
+                hours = int(item.get("hours_paid_total", 0))
+                net = int(item.get("net_event_delta", 0))
+                sign = "+" if net >= 0 else ""
+                lines.append(f"• **{business_name}** — {silver:,} Silver over {hours}h (events {sign}{net:,})")
+            embed.add_field(
+                name="📋 Offline Business Summary",
+                value="\n".join(lines),
+                inline=False,
+            )
         view = BusinessHubView(
             cog=self,
             owner_id=user_id,
@@ -2198,6 +2434,17 @@ class BusinessCog(commands.Cog):
             hub_snapshot=snap,
         )
         await interaction.followup.send(embed=embed, view=view)
+
+    @app_commands.command(name="business_notifications", description="Toggle business completion pings for your account.")
+    async def business_notifications_cmd(self, interaction: discord.Interaction, enabled: bool) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("This only works in a server.", ephemeral=True)
+            return
+        guild_id = int(interaction.guild.id)
+        user_id = int(interaction.user.id)
+        self._set_notifications_enabled_for(guild_id=guild_id, user_id=user_id, enabled=bool(enabled))
+        msg = "Business completion notifications are now **ON**." if enabled else "Business completion notifications are now **OFF**. You'll see summaries next time you run `/business`."
+        await interaction.response.send_message(msg, ephemeral=True)
 
 
 

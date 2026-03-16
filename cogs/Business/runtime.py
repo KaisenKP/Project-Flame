@@ -63,7 +63,8 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Sequence
+import random
+from typing import Awaitable, Callable, Optional, Sequence
 
 from sqlalchemy import select
 
@@ -86,6 +87,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_TICK_INTERVAL_SECONDS = 60
 SECONDS_PER_HOUR = 3600
+DEFAULT_EVENT_CHANCE_PER_HOUR = 0.22
 
 
 # =========================================================
@@ -113,6 +115,84 @@ class RuntimeTickResult:
     paid_hours: int
     paid_silver: int
     errored_runs: int
+    completed_notices: list["CompletedRunNotice"]
+
+
+@dataclass(slots=True)
+class RuntimeEventOutcome:
+    event_key: str
+    title: str
+    description: str
+    multiplier_bp: int
+    silver_delta: int
+
+
+@dataclass(slots=True)
+class CompletedRunNotice:
+    run_id: int
+    guild_id: int
+    user_id: int
+    business_key: str
+    hours_paid_total: int
+    silver_paid_total: int
+    event_outcomes: list[RuntimeEventOutcome]
+
+
+@dataclass(frozen=True, slots=True)
+class BusinessEventDef:
+    key: str
+    title: str
+    description: str
+    multiplier_bp: int
+
+
+_BUSINESS_EVENT_POOLS: dict[str, tuple[BusinessEventDef, ...]] = {
+    "farm": (
+        BusinessEventDef("blight", "Crop Blight", "A plant outbreak damaged part of the fields.", -2000),
+        BusinessEventDef("perfect_rain", "Perfect Rain", "Weather conditions were ideal for growth.", 2000),
+    ),
+    "restaurant": (
+        BusinessEventDef("health_scare", "Health Inspection Delay", "Kitchen operations slowed after a strict inspection.", -1200),
+        BusinessEventDef("viral_review", "Viral Review", "A food post exploded online and bookings surged.", 1800),
+    ),
+    "nightclub": (
+        BusinessEventDef("permit_noise", "Noise Complaint", "A permit warning forced an early close window.", -1700),
+        BusinessEventDef("headline_dj", "Headline DJ Night", "A surprise guest set packed the club.", 2200),
+    ),
+    "factory": (
+        BusinessEventDef("machine_jam", "Machine Jam", "A production line stalled and throughput dipped.", -1500),
+        BusinessEventDef("bulk_order", "Bulk Contract", "A large order boosted line utilization.", 1700),
+    ),
+    "casino": (
+        BusinessEventDef("compliance_audit", "Compliance Audit", "Table access tightened during a compliance review.", -1800),
+        BusinessEventDef("high_roller", "High Roller Rush", "VIP traffic and table volume spiked.", 2100),
+    ),
+    "tech_company": (
+        BusinessEventDef("service_outage", "Service Outage", "A core platform incident reduced billable activity.", -1600),
+        BusinessEventDef("enterprise_deal", "Enterprise Deal", "A major contract landed unexpectedly.", 2000),
+    ),
+    "shipping_company": (
+        BusinessEventDef("port_delay", "Port Delay", "Congestion delayed key routes.", -1500),
+        BusinessEventDef("fuel_efficiency", "Routing Optimization", "Fleet routing improvements lowered burn and waste.", 1600),
+    ),
+    "hotel": (
+        BusinessEventDef("maintenance", "Maintenance Incident", "Unexpected repairs closed premium rooms.", -1400),
+        BusinessEventDef("conference_week", "Conference Week", "A large event drove occupancy above forecast.", 1800),
+    ),
+    "movie_studio": (
+        BusinessEventDef("reshoot", "Reshoot Overrun", "A production reset slowed release commitments.", -1700),
+        BusinessEventDef("box_office_buzz", "Box Office Buzz", "Strong previews drove licensing demand.", 2200),
+    ),
+    "space_mining": (
+        BusinessEventDef("solar_storm", "Solar Storm", "Radiation spikes forced reduced extraction windows.", -2000),
+        BusinessEventDef("rich_vein", "Rich Vein", "A dense ore pocket was discovered on route.", 2400),
+    ),
+}
+
+_DEFAULT_EVENT_POOL: tuple[BusinessEventDef, ...] = (
+    BusinessEventDef("supply_disruption", "Supply Disruption", "A vendor issue reduced output for the hour.", -1200),
+    BusinessEventDef("efficiency_boost", "Efficiency Boost", "Ops worked smoothly with better than expected throughput.", 1200),
+)
 
 
 # =========================================================
@@ -211,7 +291,21 @@ def _build_run_report_json(run: BusinessRunRow, *, completed_at: datetime) -> di
         "silver_paid_total": int(run.silver_paid_total or 0),
         "hours_paid_total": int(run.hours_paid_total or 0),
         "auto_restart_remaining": int(run.auto_restart_remaining or 0),
+        "runtime_events": list((run.report_json or {}).get("runtime_events", [])),
     }
+
+
+def _event_pool_for_business_key(business_key: str) -> tuple[BusinessEventDef, ...]:
+    return _BUSINESS_EVENT_POOLS.get(str(business_key).strip().lower(), _DEFAULT_EVENT_POOL)
+
+
+def _roll_hourly_event(*, business_key: str) -> Optional[BusinessEventDef]:
+    if random.random() >= DEFAULT_EVENT_CHANCE_PER_HOUR:
+        return None
+    pool = _event_pool_for_business_key(business_key)
+    if not pool:
+        return None
+    return random.choice(pool)
 
 
 # =========================================================
@@ -295,7 +389,22 @@ async def process_single_run(
 
     if whole_hours_due > 0:
         hourly_profit = max(int(run.hourly_profit_snapshot or 0), 0)
-        silver_paid = hourly_profit * whole_hours_due
+        event_outcomes: list[RuntimeEventOutcome] = []
+        for _ in range(whole_hours_due):
+            event = _roll_hourly_event(business_key=str(run.business_key))
+            multiplier_bp = int(event.multiplier_bp) if event is not None else 0
+            hour_profit = max(int(round(hourly_profit * (10_000 + multiplier_bp) / 10_000)), 0)
+            silver_paid += hour_profit
+            if event is not None:
+                event_outcomes.append(
+                    RuntimeEventOutcome(
+                        event_key=str(event.key),
+                        title=str(event.title),
+                        description=str(event.description),
+                        multiplier_bp=multiplier_bp,
+                        silver_delta=hour_profit - hourly_profit,
+                    )
+                )
         hours_paid = whole_hours_due
 
         wallet = await _get_wallet(
@@ -313,6 +422,20 @@ async def process_single_run(
         run.silver_paid_total = int(run.silver_paid_total or 0) + silver_paid
         run.hours_paid_total = int(run.hours_paid_total or 0) + hours_paid
         run.last_payout_at = anchor + timedelta(hours=whole_hours_due)
+        run_report = dict(run.report_json or {})
+        existing_events = list(run_report.get("runtime_events", []))
+        existing_events.extend(
+            {
+                "event_key": e.event_key,
+                "title": e.title,
+                "description": e.description,
+                "multiplier_bp": int(e.multiplier_bp),
+                "silver_delta": int(e.silver_delta),
+            }
+            for e in event_outcomes
+        )
+        run_report["runtime_events"] = existing_events
+        run.report_json = run_report
 
     completed = False
 
@@ -373,6 +496,7 @@ async def tick_active_runs_in_session(
     paid_hours = 0
     paid_silver = 0
     errored_runs = 0
+    completed_notices: list[CompletedRunNotice] = []
 
     for run in runs:
         try:
@@ -381,6 +505,28 @@ async def tick_active_runs_in_session(
                 processed_runs += 1
             if result.completed:
                 completed_runs += 1
+                report_json = dict(run.report_json or {})
+                raw_events = list(report_json.get("runtime_events", []))
+                completed_notices.append(
+                    CompletedRunNotice(
+                        run_id=int(run.id),
+                        guild_id=int(run.guild_id),
+                        user_id=int(run.user_id),
+                        business_key=str(run.business_key),
+                        hours_paid_total=int(run.hours_paid_total or 0),
+                        silver_paid_total=int(run.silver_paid_total or 0),
+                        event_outcomes=[
+                            RuntimeEventOutcome(
+                                event_key=str(evt.get("event_key", "event")),
+                                title=str(evt.get("title", "Business Event")),
+                                description=str(evt.get("description", "")),
+                                multiplier_bp=int(evt.get("multiplier_bp", 0)),
+                                silver_delta=int(evt.get("silver_delta", 0)),
+                            )
+                            for evt in raw_events
+                        ],
+                    )
+                )
             paid_hours += int(result.hours_paid)
             paid_silver += int(result.silver_paid)
         except Exception:
@@ -400,6 +546,7 @@ async def tick_active_runs_in_session(
         paid_hours=paid_hours,
         paid_silver=paid_silver,
         errored_runs=errored_runs,
+        completed_notices=completed_notices,
     )
 
 
@@ -444,9 +591,11 @@ class BusinessRuntimeEngine:
         self,
         *,
         tick_interval_seconds: int = DEFAULT_TICK_INTERVAL_SECONDS,
+        on_run_completed: Optional[Callable[[CompletedRunNotice], Awaitable[None]]] = None,
     ):
         self.sessionmaker = sessions()
         self.tick_interval_seconds = max(int(tick_interval_seconds), 5)
+        self.on_run_completed = on_run_completed
         self._task: Optional[asyncio.Task] = None
         self._stopping = False
 
@@ -467,6 +616,19 @@ class BusinessRuntimeEngine:
                     session,
                     guild_id=guild_id,
                     now=now,
+                )
+            completed_notices = list(result.completed_notices)
+        for notice in completed_notices:
+            if self.on_run_completed is None:
+                continue
+            try:
+                await self.on_run_completed(notice)
+            except Exception:
+                log.exception(
+                    "Failed sending business completion notice | run_id=%s guild_id=%s user_id=%s",
+                    notice.run_id,
+                    notice.guild_id,
+                    notice.user_id,
                 )
         return result
 
