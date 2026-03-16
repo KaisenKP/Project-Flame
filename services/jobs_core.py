@@ -424,6 +424,25 @@ JOB_DEFS: Dict[str, JobDef] = {
             JobAction("big_score", 20, 320, 680, "Big score. You vanish into the night."),
         ),
     ),
+    "cheriff": JobDef(
+        key="cheriff",
+        name="Cheriff",
+        category=JobCategory.HARD,
+        cooldown_seconds=180,
+        fail_chance_bp=2800,
+        bonus_chance_bp=1500,
+        bonus_multiplier=3.4,
+        user_xp_gain=_base_user_xp("cheriff", JobCategory.HARD),
+        job_xp_gain=_base_job_xp("cheriff", JobCategory.HARD),
+        stamina_cost=_base_stamina("cheriff", JobCategory.HARD),
+        actions=(
+            JobAction("high_noon_duel", 18, 220, 460, "You win a high-noon duel and collect a heavy bounty."),
+            JobAction("gang_crackdown", 20, 300, 620, "You shut down a violent gang operation across the county."),
+            JobAction("hostage_rescue", 16, 380, 760, "You rescue hostages unharmed. The town pools a major reward."),
+            JobAction("corrupt_deputy", 18, 0, 0, "A corrupt deputy leaks your route. The mission collapses.", can_fail=True),
+            JobAction("legendary_manhunt", 28, 450, 980, "Legendary manhunt completed. Your badge becomes a myth."),
+        ),
+    ),
     # VIP
     "influencer": JobDef(
         key="influencer",

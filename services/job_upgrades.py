@@ -34,6 +34,7 @@ JOB_UPGRADE_LABELS: Dict[str, str] = {
     "swordsman": "Blade",
     "influencer": "Brand Studio",
     "bounty_hunter": "Bounty Gear",
+    "cheriff": "Badge Arsenal",
     "onlychat_model": "Content Studio",
 }
 
