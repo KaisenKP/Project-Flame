@@ -80,6 +80,11 @@ class AdventureEngine:
         rewards = AdventureRewards()
         await channel.send("The trail bends into the unknown...")
         await asyncio.sleep(0.8)
+        synergy_rewards, synergy_lines = self.reward_engine.party_synergy_bonus(players=players, stage_total=stage_total)
+        rewards.merge(synergy_rewards)
+        for line in synergy_lines:
+            await channel.send(line)
+            await asyncio.sleep(0.6)
         seen_stage_keys: set[str] = set()
         recent_tags = []
         for stage_number in range(1, stage_total + 1):
