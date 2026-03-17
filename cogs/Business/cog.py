@@ -1948,56 +1948,175 @@ class RemoveWorkerModal(discord.ui.Modal, title="Remove Worker"):
     def __init__(self, view: "WorkerAssignmentsView"):
         super().__init__()
         self.view = view
-        self.slot_index = discord.ui.TextInput(label="Slot Index", placeholder="1", max_length=4)
+        self.slot_index = discord.ui.TextInput(label="Reply with worker slot #", placeholder="1", max_length=4)
         self.add_item(self.slot_index)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await _safe_defer(interaction)
+        requested_slot = _parse_int(str(self.slot_index.value), 0)
         async with self.view.cog.sessionmaker() as session:
+            async with session.begin():
+                detail = await get_business_manage_snapshot(session, guild_id=self.view.guild_id, user_id=self.view.owner_id, business_key=self.view.business_key)
+                slots = await get_worker_assignment_slots(session, guild_id=self.view.guild_id, user_id=self.view.owner_id, business_key=self.view.business_key)
+        if detail is None:
+            await interaction.response.send_message("That business could not be found.", ephemeral=True)
+            return
+        selected_slot = next((slot for slot in slots if int(getattr(slot, "slot_index", 0)) == int(requested_slot)), None)
+        if not selected_slot or not bool(getattr(selected_slot, "is_active", False)):
+            await _safe_defer(interaction)
+            embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots)
+            embed.add_field(name="Action", value=f"❌ No active worker found in slot **#{_fmt_int(requested_slot)}**.", inline=False)
+            await _safe_edit_panel(interaction, embed=embed, view=self.view, message_id=self.view.panel_message_id)
+            return
+
+        worker_name = _safe_str(getattr(selected_slot, "worker_name", None), "Worker")
+        worker_rarity = _safe_str(getattr(selected_slot, "rarity", None), "common")
+        worker_type = _safe_str(getattr(selected_slot, "worker_type", None), "efficient")
+
+        embed = discord.Embed(
+            title="Confirm Worker Removal",
+            description=(
+                f"You are removing worker **{worker_name}** from slot **#{_fmt_int(requested_slot)}**.\n"
+                "Are you sure you want to continue?"
+            ),
+            color=discord.Color.orange(),
+        )
+        embed.add_field(name="Worker", value=f"{worker_name} ({worker_rarity})", inline=True)
+        embed.add_field(name="Type", value=worker_type, inline=True)
+        await interaction.response.send_message(
+            embed=embed,
+            ephemeral=True,
+            view=ConfirmWorkerRemovalView(parent_view=self.view, slot_index=int(requested_slot), worker_name=worker_name),
+        )
+
+
+class ConfirmWorkerRemovalView(discord.ui.View):
+    def __init__(self, *, parent_view: "WorkerAssignmentsView", slot_index: int, worker_name: str):
+        super().__init__(timeout=60)
+        self.parent_view = parent_view
+        self.slot_index = int(slot_index)
+        self.worker_name = str(worker_name)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if int(interaction.user.id) != self.parent_view.owner_id:
+            await interaction.response.send_message("This confirmation belongs to someone else.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm Remove", style=discord.ButtonStyle.danger, emoji="✅")
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await _safe_defer(interaction)
+        async with self.parent_view.cog.sessionmaker() as session:
             async with session.begin():
                 result = await remove_worker(
                     session,
-                    guild_id=self.view.guild_id,
-                    user_id=self.view.owner_id,
-                    business_key=self.view.business_key,
-                    slot_index=_parse_int(str(self.slot_index.value), 0),
+                    guild_id=self.parent_view.guild_id,
+                    user_id=self.parent_view.owner_id,
+                    business_key=self.parent_view.business_key,
+                    slot_index=self.slot_index,
                 )
-                detail = await get_business_manage_snapshot(session, guild_id=self.view.guild_id, user_id=self.view.owner_id, business_key=self.view.business_key)
-                slots = await get_worker_assignment_slots(session, guild_id=self.view.guild_id, user_id=self.view.owner_id, business_key=self.view.business_key)
+                detail = await get_business_manage_snapshot(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key)
+                slots = await get_worker_assignment_slots(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key)
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
         embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots)
         embed.add_field(name="Action", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        await _safe_edit_panel(interaction, embed=embed, view=self.view, message_id=self.view.panel_message_id)
+        await _safe_edit_panel(interaction, embed=embed, view=self.parent_view, message_id=self.parent_view.panel_message_id)
+        await interaction.edit_original_response(content="Removal confirmed.", embed=None, view=None)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await interaction.response.edit_message(content="Worker removal cancelled.", embed=None, view=None)
 
 
 class RemoveManagerModal(discord.ui.Modal, title="Remove Manager"):
     def __init__(self, view: "ManagerAssignmentsView"):
         super().__init__()
         self.view = view
-        self.slot_index = discord.ui.TextInput(label="Slot Index", placeholder="1", max_length=4)
+        self.slot_index = discord.ui.TextInput(label="Reply with manager slot #", placeholder="1", max_length=4)
         self.add_item(self.slot_index)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await _safe_defer(interaction)
+        requested_slot = _parse_int(str(self.slot_index.value), 0)
         async with self.view.cog.sessionmaker() as session:
+            async with session.begin():
+                detail = await get_business_manage_snapshot(session, guild_id=self.view.guild_id, user_id=self.view.owner_id, business_key=self.view.business_key)
+                slots = await get_manager_assignment_slots(session, guild_id=self.view.guild_id, user_id=self.view.owner_id, business_key=self.view.business_key)
+        if detail is None:
+            await interaction.response.send_message("That business could not be found.", ephemeral=True)
+            return
+        selected_slot = next((slot for slot in slots if int(getattr(slot, "slot_index", 0)) == int(requested_slot)), None)
+        if not selected_slot or not bool(getattr(selected_slot, "is_active", False)):
+            await _safe_defer(interaction)
+            embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots)
+            embed.add_field(name="Action", value=f"❌ No active manager found in slot **#{_fmt_int(requested_slot)}**.", inline=False)
+            await _safe_edit_panel(interaction, embed=embed, view=self.view, message_id=self.view.panel_message_id)
+            return
+
+        manager_name = _safe_str(getattr(selected_slot, "manager_name", None), "Manager")
+        manager_rarity = _safe_str(getattr(selected_slot, "rarity", None), "common")
+        runtime_bonus = _fmt_int(getattr(selected_slot, "runtime_bonus_hours", 0))
+        profit_bonus = _fmt_int(getattr(selected_slot, "profit_bonus_bp", 0))
+
+        embed = discord.Embed(
+            title="Confirm Manager Removal",
+            description=(
+                f"You are removing manager **{manager_name}** from slot **#{_fmt_int(requested_slot)}**.\n"
+                "Are you sure you want to continue?"
+            ),
+            color=discord.Color.orange(),
+        )
+        embed.add_field(name="Manager", value=f"{manager_name} ({manager_rarity})", inline=True)
+        embed.add_field(name="Bonuses", value=f"+{runtime_bonus}h runtime • +{profit_bonus} bp", inline=True)
+        await interaction.response.send_message(
+            embed=embed,
+            ephemeral=True,
+            view=ConfirmManagerRemovalView(parent_view=self.view, slot_index=int(requested_slot), manager_name=manager_name),
+        )
+
+
+class ConfirmManagerRemovalView(discord.ui.View):
+    def __init__(self, *, parent_view: "ManagerAssignmentsView", slot_index: int, manager_name: str):
+        super().__init__(timeout=60)
+        self.parent_view = parent_view
+        self.slot_index = int(slot_index)
+        self.manager_name = str(manager_name)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if int(interaction.user.id) != self.parent_view.owner_id:
+            await interaction.response.send_message("This confirmation belongs to someone else.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm Remove", style=discord.ButtonStyle.danger, emoji="✅")
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await _safe_defer(interaction)
+        async with self.parent_view.cog.sessionmaker() as session:
             async with session.begin():
                 result = await remove_manager(
                     session,
-                    guild_id=self.view.guild_id,
-                    user_id=self.view.owner_id,
-                    business_key=self.view.business_key,
-                    slot_index=_parse_int(str(self.slot_index.value), 0),
+                    guild_id=self.parent_view.guild_id,
+                    user_id=self.parent_view.owner_id,
+                    business_key=self.parent_view.business_key,
+                    slot_index=self.slot_index,
                 )
-                detail = await get_business_manage_snapshot(session, guild_id=self.view.guild_id, user_id=self.view.owner_id, business_key=self.view.business_key)
-                slots = await get_manager_assignment_slots(session, guild_id=self.view.guild_id, user_id=self.view.owner_id, business_key=self.view.business_key)
+                detail = await get_business_manage_snapshot(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key)
+                slots = await get_manager_assignment_slots(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key)
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
         embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots)
         embed.add_field(name="Action", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        await _safe_edit_panel(interaction, embed=embed, view=self.view, message_id=self.view.panel_message_id)
+        await _safe_edit_panel(interaction, embed=embed, view=self.parent_view, message_id=self.parent_view.panel_message_id)
+        await interaction.edit_original_response(content="Removal confirmed.", embed=None, view=None)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await interaction.response.edit_message(content="Manager removal cancelled.", embed=None, view=None)
 
 
 class AutoHireWorkersModal(discord.ui.Modal, title="Auto-Hire Workers"):
