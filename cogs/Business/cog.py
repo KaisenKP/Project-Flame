@@ -1520,7 +1520,7 @@ class BusinessHubView(BusinessBaseView):
         if panel_message_id is None:
             await interaction.followup.send("This business panel expired. Please run `/business` again.", ephemeral=True)
             return
-        view = WorkerAssignmentsView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=detail.key, panel_message_id=panel_message_id)
+        view = WorkerAssignmentsView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=detail.key, panel_message_id=panel_message_id, requester=interaction.user)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="View Managers", style=discord.ButtonStyle.secondary, emoji="🧑‍💼", row=2)
@@ -1539,7 +1539,7 @@ class BusinessHubView(BusinessBaseView):
         if panel_message_id is None:
             await interaction.followup.send("This business panel expired. Please run `/business` again.", ephemeral=True)
             return
-        view = ManagerAssignmentsView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=detail.key, panel_message_id=panel_message_id)
+        view = ManagerAssignmentsView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=detail.key, panel_message_id=panel_message_id, requester=interaction.user)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="Upgrade Business", style=discord.ButtonStyle.primary, emoji="⬆️", row=2)
@@ -1894,7 +1894,7 @@ class BusinessDetailView(BusinessBaseView):
         if panel_message_id is None:
             await interaction.followup.send("This business panel expired. Please run `/business` again.", ephemeral=True)
             return
-        view = WorkerAssignmentsView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, panel_message_id=panel_message_id)
+        view = WorkerAssignmentsView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, panel_message_id=panel_message_id, requester=interaction.user)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="View Managers", style=discord.ButtonStyle.secondary, emoji="🧑‍💼", row=1, disabled=True)
@@ -1913,7 +1913,7 @@ class BusinessDetailView(BusinessBaseView):
         if panel_message_id is None:
             await interaction.followup.send("This business panel expired. Please run `/business` again.", ephemeral=True)
             return
-        view = ManagerAssignmentsView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, panel_message_id=panel_message_id)
+        view = ManagerAssignmentsView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, panel_message_id=panel_message_id, requester=interaction.user)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="Back to Business Hub", style=discord.ButtonStyle.secondary, emoji="⬅️", row=2)
@@ -2202,13 +2202,17 @@ class WorkerAssignmentsView(BusinessBaseView):
         guild_id: int,
         business_key: str,
         panel_message_id: int,
+        requester: Optional[discord.abc.User] = None,
     ):
         super().__init__(cog=cog, owner_id=owner_id, guild_id=guild_id)
         self.business_key = business_key
         self.panel_message_id = int(panel_message_id)
         self.current_candidate: Optional[WorkerCandidateSnapshot] = None
-        guild = self.cog.bot.get_guild(self.guild_id)
-        member = guild.get_member(self.owner_id) if guild is not None else None
+        member: Optional[discord.Member] = requester if isinstance(requester, discord.Member) else None
+        if member is None:
+            guild = self.cog.bot.get_guild(self.guild_id)
+            if guild is not None:
+                member = guild.get_member(self.owner_id)
         self.is_vip = is_vip_member(member)
         self.auto_hire_button.disabled = not self.is_vip
 
@@ -2346,13 +2350,17 @@ class ManagerAssignmentsView(BusinessBaseView):
         guild_id: int,
         business_key: str,
         panel_message_id: int,
+        requester: Optional[discord.abc.User] = None,
     ):
         super().__init__(cog=cog, owner_id=owner_id, guild_id=guild_id)
         self.business_key = business_key
         self.panel_message_id = int(panel_message_id)
         self.current_candidate: Optional[ManagerCandidateSnapshot] = None
-        guild = self.cog.bot.get_guild(self.guild_id)
-        member = guild.get_member(self.owner_id) if guild is not None else None
+        member: Optional[discord.Member] = requester if isinstance(requester, discord.Member) else None
+        if member is None:
+            guild = self.cog.bot.get_guild(self.guild_id)
+            if guild is not None:
+                member = guild.get_member(self.owner_id)
         self.is_vip = is_vip_member(member)
         self.auto_hire_button.disabled = not self.is_vip
 
