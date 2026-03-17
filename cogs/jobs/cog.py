@@ -71,9 +71,40 @@ class JobsCog(commands.Cog):
         else:
             await interaction.followup.send(f"✅ Cleared /work image for **{d.name}**.", ephemeral=True)
 
-    @app_commands.command(name="job", description="Open jobs panel or equip one or more jobs.")
-    @app_commands.describe(jobs="Optional comma-separated job keys (up to 3). Example: miner,fisherman,blacksmith")
-    async def job_cmd(self, interaction: discord.Interaction, jobs: Optional[str] = None):
+    async def _job_key_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        vip = is_vip_member(interaction.user)  # type: ignore[arg-type]
+        needle = (current or "").strip().lower()
+
+        choices: list[app_commands.Choice[str]] = []
+        for d in JOB_MODULES:
+            if d.vip_only and not vip:
+                continue
+            hay = f"{d.key} {d.name}".lower()
+            if needle and needle not in hay:
+                continue
+            choices.append(app_commands.Choice(name=f"{d.name} ({d.key})", value=d.key))
+            if len(choices) >= 25:
+                break
+        return choices
+
+    @app_commands.command(name="job", description="Open jobs panel or equip up to 3 jobs.")
+    @app_commands.describe(
+        job_1="First job key to equip",
+        job_2="Second job key to equip",
+        job_3="Third job key to equip",
+    )
+    @app_commands.autocomplete(job_1=_job_key_autocomplete, job_2=_job_key_autocomplete, job_3=_job_key_autocomplete)
+    async def job_cmd(
+        self,
+        interaction: discord.Interaction,
+        job_1: Optional[str] = None,
+        job_2: Optional[str] = None,
+        job_3: Optional[str] = None,
+    ):
         if interaction.guild is None:
             await interaction.response.send_message("This only works in a server.", ephemeral=True)
             return
@@ -82,13 +113,15 @@ class JobsCog(commands.Cog):
         user_id = interaction.user.id
         vip = is_vip_member(interaction.user)  # type: ignore[arg-type]
 
-        if jobs is not None and str(jobs).strip():
-            requested = []
-            for raw in str(jobs).split(","):
-                key = raw.strip().lower()
-                if key and key not in requested:
-                    requested.append(key)
-            requested = requested[:3]
+        requested = []
+        for raw in (job_1, job_2, job_3):
+            key = (raw or "").strip().lower()
+            if key and key not in requested:
+                requested.append(key)
+
+        if requested:
+            if len(requested) > 3:
+                requested = requested[:3]
 
             if not requested:
                 await interaction.response.send_message("Provide at least one valid job key.", ephemeral=True)
@@ -98,7 +131,7 @@ class JobsCog(commands.Cog):
                 d = get_job_def(key)
                 if d is None:
                     await interaction.response.send_message(
-                        f"Unknown job key `{key}`. Use `/job` to open the panel.",
+                        f"Unknown job key `{key}`. Use `/job` and select from autocomplete or panel.",
                         ephemeral=True,
                     )
                     return
