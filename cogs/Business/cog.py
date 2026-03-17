@@ -2398,6 +2398,24 @@ class WorkerAssignmentsView(BusinessBaseView):
         self.is_vip = is_vip_member(member)
         self.auto_hire_button.disabled = not self.is_vip
 
+    async def _send_auto_hire_reply(self, interaction: discord.Interaction) -> None:
+        rerolls = 15
+        allowed_rarities = set(AUTO_HIRE_ALLOWED_RARITIES)
+        total_cost = rerolls * WORKER_CANDIDATE_REROLL_COST
+        embed = discord.Embed(
+            title="Confirm Worker Auto-Hire",
+            description=f"Auto-Hire can spend up to **{_fmt_int(total_cost)} Silver** for **{_fmt_int(rerolls)} rerolls**.",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(name="Allowed rarities", value=f"`{', '.join(sorted(allowed_rarities))}`", inline=False)
+        embed.add_field(name="Flow", value="Auto-Hire keeps rolling and hires matches until slots are full or budget is spent.", inline=False)
+        await interaction.response.send_message(
+            "VIP Auto-Reroll started with default settings (all rarities, 15 rerolls).",
+            embed=embed,
+            view=ConfirmWorkerAutoHireView(parent_view=self, rerolls=rerolls, allowed_rarities=allowed_rarities),
+            ephemeral=True,
+        )
+
     async def _refresh_assignments_embed(self, interaction: discord.Interaction) -> Optional[tuple[BusinessManageSnapshot, Sequence[WorkerAssignmentSlotSnapshot], discord.Embed]]:
         async with self.cog.sessionmaker() as session:
             async with session.begin():
@@ -2505,7 +2523,7 @@ class WorkerAssignmentsView(BusinessBaseView):
         if not self.is_vip:
             await interaction.response.send_message("Auto-Hire is a VIP feature.", ephemeral=True)
             return
-        await interaction.response.send_modal(AutoHireWorkersModal(self))
+        await self._send_auto_hire_reply(interaction)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="⬅️", row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -2545,6 +2563,24 @@ class ManagerAssignmentsView(BusinessBaseView):
                 member = guild.get_member(self.owner_id)
         self.is_vip = is_vip_member(member)
         self.auto_hire_button.disabled = not self.is_vip
+
+    async def _send_auto_hire_reply(self, interaction: discord.Interaction) -> None:
+        rerolls = 15
+        allowed_rarities = set(AUTO_HIRE_ALLOWED_RARITIES)
+        total_cost = rerolls * MANAGER_CANDIDATE_REROLL_COST
+        embed = discord.Embed(
+            title="Confirm Manager Auto-Hire",
+            description=f"Auto-Hire can spend up to **{_fmt_int(total_cost)} Silver** for **{_fmt_int(rerolls)} rerolls**.",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(name="Allowed rarities", value=f"`{', '.join(sorted(allowed_rarities))}`", inline=False)
+        embed.add_field(name="Flow", value="Auto-Hire keeps rolling and hires matches until slots are full or budget is spent.", inline=False)
+        await interaction.response.send_message(
+            "VIP Auto-Reroll started with default settings (all rarities, 15 rerolls).",
+            embed=embed,
+            view=ConfirmManagerAutoHireView(parent_view=self, rerolls=rerolls, allowed_rarities=allowed_rarities),
+            ephemeral=True,
+        )
 
     async def _refresh_assignments_embed(self, interaction: discord.Interaction) -> Optional[tuple[BusinessManageSnapshot, Sequence[ManagerAssignmentSlotSnapshot], discord.Embed]]:
         async with self.cog.sessionmaker() as session:
@@ -2653,7 +2689,7 @@ class ManagerAssignmentsView(BusinessBaseView):
         if not self.is_vip:
             await interaction.response.send_message("Auto-Hire is a VIP feature.", ephemeral=True)
             return
-        await interaction.response.send_modal(AutoHireManagersModal(self))
+        await self._send_auto_hire_reply(interaction)
 
     @discord.ui.button(label="Remove Manager", style=discord.ButtonStyle.danger, emoji="➖", row=1)
     async def remove_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
