@@ -1995,16 +1995,16 @@ class BusinessDetailView(BusinessBaseView):
 class RemoveWorkerModal(discord.ui.Modal, title="Remove Worker"):
     def __init__(self, view: "WorkerAssignmentsView"):
         super().__init__()
-        self.view = view
+        self.parent_view = view
         self.slot_index = discord.ui.TextInput(label="Reply with worker slot #", placeholder="1", max_length=4)
         self.add_item(self.slot_index)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         requested_slot = _parse_int(str(self.slot_index.value), 0)
-        async with self.view.cog.sessionmaker() as session:
+        async with self.parent_view.cog.sessionmaker() as session:
             async with session.begin():
-                detail = await get_business_manage_snapshot(session, guild_id=self.view.guild_id, user_id=self.view.owner_id, business_key=self.view.business_key)
-                slots = await get_worker_assignment_slots(session, guild_id=self.view.guild_id, user_id=self.view.owner_id, business_key=self.view.business_key)
+                detail = await get_business_manage_snapshot(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key)
+                slots = await get_worker_assignment_slots(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key)
         if detail is None:
             await interaction.response.send_message("That business could not be found.", ephemeral=True)
             return
@@ -2013,7 +2013,7 @@ class RemoveWorkerModal(discord.ui.Modal, title="Remove Worker"):
             await _safe_defer(interaction)
             embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots)
             embed.add_field(name="Action", value=f"❌ No active worker found in slot **#{_fmt_int(requested_slot)}**.", inline=False)
-            await _safe_edit_panel(interaction, embed=embed, view=self.view, message_id=self.view.panel_message_id)
+            await _safe_edit_panel(interaction, embed=embed, view=self.parent_view, message_id=self.parent_view.panel_message_id)
             return
 
         worker_name = _safe_str(getattr(selected_slot, "worker_name", None), "Worker")
@@ -2033,7 +2033,7 @@ class RemoveWorkerModal(discord.ui.Modal, title="Remove Worker"):
         await interaction.response.send_message(
             embed=embed,
             ephemeral=True,
-            view=ConfirmWorkerRemovalView(parent_view=self.view, slot_index=int(requested_slot), worker_name=worker_name),
+            view=ConfirmWorkerRemovalView(parent_view=self.parent_view, slot_index=int(requested_slot), worker_name=worker_name),
         )
 
 
@@ -2082,16 +2082,16 @@ class ConfirmWorkerRemovalView(discord.ui.View):
 class RemoveManagerModal(discord.ui.Modal, title="Remove Manager"):
     def __init__(self, view: "ManagerAssignmentsView"):
         super().__init__()
-        self.view = view
+        self.parent_view = view
         self.slot_index = discord.ui.TextInput(label="Reply with manager slot #", placeholder="1", max_length=4)
         self.add_item(self.slot_index)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         requested_slot = _parse_int(str(self.slot_index.value), 0)
-        async with self.view.cog.sessionmaker() as session:
+        async with self.parent_view.cog.sessionmaker() as session:
             async with session.begin():
-                detail = await get_business_manage_snapshot(session, guild_id=self.view.guild_id, user_id=self.view.owner_id, business_key=self.view.business_key)
-                slots = await get_manager_assignment_slots(session, guild_id=self.view.guild_id, user_id=self.view.owner_id, business_key=self.view.business_key)
+                detail = await get_business_manage_snapshot(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key)
+                slots = await get_manager_assignment_slots(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key)
         if detail is None:
             await interaction.response.send_message("That business could not be found.", ephemeral=True)
             return
@@ -2100,7 +2100,7 @@ class RemoveManagerModal(discord.ui.Modal, title="Remove Manager"):
             await _safe_defer(interaction)
             embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots)
             embed.add_field(name="Action", value=f"❌ No active manager found in slot **#{_fmt_int(requested_slot)}**.", inline=False)
-            await _safe_edit_panel(interaction, embed=embed, view=self.view, message_id=self.view.panel_message_id)
+            await _safe_edit_panel(interaction, embed=embed, view=self.parent_view, message_id=self.parent_view.panel_message_id)
             return
 
         manager_name = _safe_str(getattr(selected_slot, "manager_name", None), "Manager")
@@ -2121,7 +2121,7 @@ class RemoveManagerModal(discord.ui.Modal, title="Remove Manager"):
         await interaction.response.send_message(
             embed=embed,
             ephemeral=True,
-            view=ConfirmManagerRemovalView(parent_view=self.view, slot_index=int(requested_slot), manager_name=manager_name),
+            view=ConfirmManagerRemovalView(parent_view=self.parent_view, slot_index=int(requested_slot), manager_name=manager_name),
         )
 
 
@@ -2170,7 +2170,7 @@ class ConfirmManagerRemovalView(discord.ui.View):
 class AutoHireWorkersModal(discord.ui.Modal, title="Auto-Hire Workers"):
     def __init__(self, view: "WorkerAssignmentsView"):
         super().__init__()
-        self.view = view
+        self.parent_view = view
         self.rarity_filter = discord.ui.TextInput(label="Allowed rarities", placeholder="rare, epic, mythic (or all)", default="all", max_length=64)
         self.reroll_count = discord.ui.TextInput(label="Max rerolls budget", placeholder="15", default="15", max_length=4)
         self.add_item(self.rarity_filter)
@@ -2200,7 +2200,7 @@ class AutoHireWorkersModal(discord.ui.Modal, title="Auto-Hire Workers"):
         embed.add_field(name="Flow", value="Auto-Hire keeps rolling and hires matches until slots are full or budget is spent.", inline=False)
         await interaction.response.send_message(
             embed=embed,
-            view=ConfirmWorkerAutoHireView(parent_view=self.view, rerolls=rerolls, allowed_rarities=allowed_rarities),
+            view=ConfirmWorkerAutoHireView(parent_view=self.parent_view, rerolls=rerolls, allowed_rarities=allowed_rarities),
             ephemeral=True,
         )
 
@@ -2208,7 +2208,7 @@ class AutoHireWorkersModal(discord.ui.Modal, title="Auto-Hire Workers"):
 class AutoHireManagersModal(discord.ui.Modal, title="Auto-Hire Managers"):
     def __init__(self, view: "ManagerAssignmentsView"):
         super().__init__()
-        self.view = view
+        self.parent_view = view
         self.rarity_filter = discord.ui.TextInput(label="Allowed rarities", placeholder="rare, epic, mythic (or all)", default="all", max_length=64)
         self.reroll_count = discord.ui.TextInput(label="Max rerolls budget", placeholder="15", default="15", max_length=4)
         self.add_item(self.rarity_filter)
@@ -2238,7 +2238,7 @@ class AutoHireManagersModal(discord.ui.Modal, title="Auto-Hire Managers"):
         embed.add_field(name="Flow", value="Auto-Hire keeps rolling and hires matches until slots are full or budget is spent.", inline=False)
         await interaction.response.send_message(
             embed=embed,
-            view=ConfirmManagerAutoHireView(parent_view=self.view, rerolls=rerolls, allowed_rarities=allowed_rarities),
+            view=ConfirmManagerAutoHireView(parent_view=self.parent_view, rerolls=rerolls, allowed_rarities=allowed_rarities),
             ephemeral=True,
         )
 
