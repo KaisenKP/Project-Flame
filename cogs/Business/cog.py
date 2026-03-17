@@ -614,6 +614,21 @@ def _interaction_message_id(interaction: discord.Interaction) -> Optional[int]:
     return int(mid) if mid is not None else None
 
 
+async def _resolve_panel_message_id(interaction: discord.Interaction) -> Optional[int]:
+    """Best-effort resolver for the panel message ID across interaction types."""
+    panel_message_id = _interaction_message_id(interaction)
+    if panel_message_id is not None:
+        return panel_message_id
+
+    try:
+        original = await interaction.original_response()
+    except (discord.NotFound, discord.HTTPException, AttributeError):
+        return None
+
+    oid = getattr(original, "id", None)
+    return int(oid) if oid is not None else None
+
+
 async def _safe_defer(interaction: discord.Interaction, *, thinking: bool = False) -> None:
     try:
         if not interaction.response.is_done():
@@ -1516,7 +1531,7 @@ class BusinessHubView(BusinessBaseView):
             async with session.begin():
                 slots = await get_worker_assignment_slots(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=detail.key)
         embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots)
-        panel_message_id = _interaction_message_id(interaction)
+        panel_message_id = await _resolve_panel_message_id(interaction)
         if panel_message_id is None:
             await interaction.followup.send("This business panel expired. Please run `/business` again.", ephemeral=True)
             return
@@ -1535,7 +1550,7 @@ class BusinessHubView(BusinessBaseView):
             async with session.begin():
                 slots = await get_manager_assignment_slots(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=detail.key)
         embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots)
-        panel_message_id = _interaction_message_id(interaction)
+        panel_message_id = await _resolve_panel_message_id(interaction)
         if panel_message_id is None:
             await interaction.followup.send("This business panel expired. Please run `/business` again.", ephemeral=True)
             return
@@ -1890,7 +1905,7 @@ class BusinessDetailView(BusinessBaseView):
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
         embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots)
-        panel_message_id = _interaction_message_id(interaction)
+        panel_message_id = await _resolve_panel_message_id(interaction)
         if panel_message_id is None:
             await interaction.followup.send("This business panel expired. Please run `/business` again.", ephemeral=True)
             return
@@ -1909,7 +1924,7 @@ class BusinessDetailView(BusinessBaseView):
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
         embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots)
-        panel_message_id = _interaction_message_id(interaction)
+        panel_message_id = await _resolve_panel_message_id(interaction)
         if panel_message_id is None:
             await interaction.followup.send("This business panel expired. Please run `/business` again.", ephemeral=True)
             return
