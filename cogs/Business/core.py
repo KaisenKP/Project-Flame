@@ -2221,6 +2221,7 @@ async def hire_manager_manual(
     runtime_bonus_hours: int,
     profit_bonus_bp: int,
     auto_restart_charges: int,
+    charge_silver: bool = True,
 ) -> BusinessActionResult:
     defn = _def_for_key(business_key)
     if defn is None:
@@ -2245,7 +2246,7 @@ async def hire_manager_manual(
     hire_cost = _manager_hire_cost(rarity=norm_rarity, runtime_bonus_hours=runtime_bonus, profit_bonus_bp=profit_bp, auto_restart_charges=auto_restart)
 
     wallet = await _get_wallet(session, guild_id=guild_id, user_id=user_id)
-    if int(wallet.silver or 0) < hire_cost:
+    if charge_silver and int(wallet.silver or 0) < hire_cost:
         short = hire_cost - int(wallet.silver or 0)
         hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
         manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
@@ -2265,9 +2266,10 @@ async def hire_manager_manual(
         manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
         return BusinessActionResult(ok=False, message="That manager slot was taken by another action. Please try again.", snapshot=hub, manage_snapshot=manage)
 
-    wallet.silver -= hire_cost
-    if hasattr(wallet, "silver_spent"):
-        wallet.silver_spent += hire_cost
+    if charge_silver:
+        wallet.silver -= hire_cost
+        if hasattr(wallet, "silver_spent"):
+            wallet.silver_spent += hire_cost
 
     hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
     manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
