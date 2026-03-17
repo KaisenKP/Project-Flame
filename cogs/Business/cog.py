@@ -571,6 +571,34 @@ def _trim(s: str, limit: int) -> str:
     return s[: limit - 3] + "..."
 
 
+def _chunk_field_lines(lines: Sequence[str], *, max_chars: int = 1024) -> list[str]:
+    """Split line items into embed-safe field chunks."""
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    for line in lines:
+        text = str(line)
+        if len(text) > max_chars:
+            text = _trim(text, max_chars)
+
+        sep_len = 2 if current else 0  # separator for "\n\n"
+        if current and (current_len + sep_len + len(text)) > max_chars:
+            chunks.append("\n\n".join(current))
+            current = [text]
+            current_len = len(text)
+            continue
+
+        if current:
+            current_len += sep_len
+        current.append(text)
+        current_len += len(text)
+
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks
+
+
 def _showcase_image_from_cards(cards: Sequence[BusinessCard]) -> Optional[str]:
     running_owned = [c for c in cards if c.owned and c.running and c.image_url]
     if running_owned:
@@ -666,6 +694,12 @@ async def _safe_edit_panel(
         await interaction.followup.edit_message(**kwargs)
         return True
     except (discord.NotFound, discord.HTTPException, AttributeError):
+        log.exception(
+            "Failed to edit business panel message | guild_id=%s user_id=%s message_id=%s",
+            getattr(getattr(interaction, "guild", None), "id", None),
+            getattr(getattr(interaction, "user", None), "id", None),
+            panel_message_id,
+        )
         await interaction.followup.send(
             "I couldn't update that panel. Please run `/business` again.",
             ephemeral=True,
@@ -922,7 +956,14 @@ def _build_worker_assignments_embed(
             lines.append(f"`#{slot_index}` *(empty)*")
 
     empty_text = "No workers assigned yet." if getattr(detail, 'worker_slots_total', 0) else "No worker slots unlocked."
-    e.add_field(name="Slots", value="\n\n".join(lines) if lines else empty_text, inline=False)
+    if not lines:
+        e.add_field(name="Slots", value=empty_text, inline=False)
+        return e
+
+    chunks = _chunk_field_lines(lines)
+    for idx, chunk in enumerate(chunks, start=1):
+        field_name = "Slots" if len(chunks) == 1 else f"Slots ({idx}/{len(chunks)})"
+        e.add_field(name=field_name, value=chunk, inline=False)
     return e
 
 
@@ -953,7 +994,14 @@ def _build_manager_assignments_embed(
             lines.append(f"`#{slot_index}` *(empty)*")
 
     empty_text = "No managers assigned yet." if getattr(detail, 'manager_slots_total', 0) else "No manager slots unlocked."
-    e.add_field(name="Slots", value="\n\n".join(lines) if lines else empty_text, inline=False)
+    if not lines:
+        e.add_field(name="Slots", value=empty_text, inline=False)
+        return e
+
+    chunks = _chunk_field_lines(lines)
+    for idx, chunk in enumerate(chunks, start=1):
+        field_name = "Slots" if len(chunks) == 1 else f"Slots ({idx}/{len(chunks)})"
+        e.add_field(name=field_name, value=chunk, inline=False)
     return e
 
 
