@@ -126,6 +126,7 @@ class TutorialWizardView(discord.ui.View):
         super().__init__(timeout=900)
         self.owner_id = int(owner_id)
         self.step_index = max(0, min(step_index, len(TUTORIAL_STEPS) - 1))
+        self.is_finished = False
         self._sync_buttons()
 
     def _build_embed(self) -> discord.Embed:
@@ -135,8 +136,26 @@ class TutorialWizardView(discord.ui.View):
         return embed
 
     def _sync_buttons(self) -> None:
-        self.prev_btn.disabled = self.step_index == 0
-        self.next_btn.disabled = self.step_index >= len(TUTORIAL_STEPS) - 1
+        self.prev_btn.disabled = self.is_finished or self.step_index == 0
+        self.next_btn.disabled = self.is_finished or self.step_index >= len(TUTORIAL_STEPS) - 1
+        self.finish_btn.disabled = self.is_finished
+
+    async def _finish_onboarding(self, interaction: discord.Interaction, *, manual: bool) -> None:
+        self.is_finished = True
+        self._sync_buttons()
+
+        reason = "You ended the onboarding flow early. You can start again from the main onboarding panel anytime."
+        if not manual:
+            reason = "Onboarding complete. You reached the final tutorial step automatically."
+
+        done_embed = discord.Embed(
+            title="🎉 Onboarding finished",
+            description=reason,
+            color=discord.Color.brand_green(),
+        )
+        done_embed.set_footer(text="Tutorial controls are now locked for this session")
+        await interaction.response.edit_message(embed=done_embed, view=self)
+        self.stop()
 
     async def _reject_non_owner(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.owner_id:
@@ -160,8 +179,17 @@ class TutorialWizardView(discord.ui.View):
         if await self._reject_non_owner(interaction):
             return
         self.step_index = min(len(TUTORIAL_STEPS) - 1, self.step_index + 1)
+        if self.step_index >= len(TUTORIAL_STEPS) - 1:
+            await self._finish_onboarding(interaction, manual=False)
+            return
         self._sync_buttons()
         await interaction.response.edit_message(embed=self._build_embed(), view=self)
+
+    @discord.ui.button(label="End onboarding", style=discord.ButtonStyle.danger)
+    async def finish_btn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self._reject_non_owner(interaction):
+            return
+        await self._finish_onboarding(interaction, manual=True)
 
 
 class TutorialLauncherView(discord.ui.View):
