@@ -64,9 +64,13 @@ from db.models import BusinessOwnershipRow, WalletRow
 from services.db import sessions
 from services.achievements import check_and_grant_achievements, queue_achievement_announcements
 from services.users import ensure_user_rows
+from services.vip import is_vip_member
 from .runtime import BusinessRuntimeEngine, CompletedRunNotice
 
 log = logging.getLogger(__name__)
+
+AUTO_HIRE_MAX_REROLLS = 250
+AUTO_HIRE_ALLOWED_RARITIES = {"common", "uncommon", "rare", "epic", "mythic"}
 
 _BUSINESS_RUNTIME_STATE_PATH = Path("data/business_runtime_state.json")
 
@@ -1981,6 +1985,214 @@ class RemoveManagerModal(discord.ui.Modal, title="Remove Manager"):
         await _safe_edit_panel(interaction, embed=embed, view=self.view, message_id=self.view.panel_message_id)
 
 
+class AutoHireWorkersModal(discord.ui.Modal, title="Auto-Hire Workers"):
+    def __init__(self, view: "WorkerAssignmentsView"):
+        super().__init__()
+        self.view = view
+        self.rarity_filter = discord.ui.TextInput(label="Allowed rarities", placeholder="rare, epic, mythic (or all)", default="all", max_length=64)
+        self.reroll_count = discord.ui.TextInput(label="Max rerolls budget", placeholder="15", default="15", max_length=4)
+        self.add_item(self.rarity_filter)
+        self.add_item(self.reroll_count)
+
+    def _parse_allowed_rarities(self) -> set[str]:
+        raw = str(self.rarity_filter.value or "all").strip().lower()
+        if raw in {"", "all", "any", "*"}:
+            return set(AUTO_HIRE_ALLOWED_RARITIES)
+        allowed = {part.strip() for part in raw.replace("|", ",").split(",") if part.strip()}
+        return {r for r in allowed if r in AUTO_HIRE_ALLOWED_RARITIES}
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        rerolls = _clamp_int(_parse_int(str(self.reroll_count.value), 0), 1, AUTO_HIRE_MAX_REROLLS)
+        allowed_rarities = self._parse_allowed_rarities()
+        if not allowed_rarities:
+            await interaction.response.send_message("Please enter valid rarity filters: common, uncommon, rare, epic, mythic.", ephemeral=True)
+            return
+
+        total_cost = rerolls * WORKER_CANDIDATE_REROLL_COST
+        embed = discord.Embed(
+            title="Confirm Worker Auto-Hire",
+            description=f"Auto-Hire can spend up to **{_fmt_int(total_cost)} Silver** for **{_fmt_int(rerolls)} rerolls**.",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(name="Allowed rarities", value=f"`{', '.join(sorted(allowed_rarities))}`", inline=False)
+        embed.add_field(name="Flow", value="Auto-Hire keeps rolling and hires matches until slots are full or budget is spent.", inline=False)
+        await interaction.response.send_message(
+            embed=embed,
+            view=ConfirmWorkerAutoHireView(parent_view=self.view, rerolls=rerolls, allowed_rarities=allowed_rarities),
+            ephemeral=True,
+        )
+
+
+class AutoHireManagersModal(discord.ui.Modal, title="Auto-Hire Managers"):
+    def __init__(self, view: "ManagerAssignmentsView"):
+        super().__init__()
+        self.view = view
+        self.rarity_filter = discord.ui.TextInput(label="Allowed rarities", placeholder="rare, epic, mythic (or all)", default="all", max_length=64)
+        self.reroll_count = discord.ui.TextInput(label="Max rerolls budget", placeholder="15", default="15", max_length=4)
+        self.add_item(self.rarity_filter)
+        self.add_item(self.reroll_count)
+
+    def _parse_allowed_rarities(self) -> set[str]:
+        raw = str(self.rarity_filter.value or "all").strip().lower()
+        if raw in {"", "all", "any", "*"}:
+            return set(AUTO_HIRE_ALLOWED_RARITIES)
+        allowed = {part.strip() for part in raw.replace("|", ",").split(",") if part.strip()}
+        return {r for r in allowed if r in AUTO_HIRE_ALLOWED_RARITIES}
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        rerolls = _clamp_int(_parse_int(str(self.reroll_count.value), 0), 1, AUTO_HIRE_MAX_REROLLS)
+        allowed_rarities = self._parse_allowed_rarities()
+        if not allowed_rarities:
+            await interaction.response.send_message("Please enter valid rarity filters: common, uncommon, rare, epic, mythic.", ephemeral=True)
+            return
+
+        total_cost = rerolls * MANAGER_CANDIDATE_REROLL_COST
+        embed = discord.Embed(
+            title="Confirm Manager Auto-Hire",
+            description=f"Auto-Hire can spend up to **{_fmt_int(total_cost)} Silver** for **{_fmt_int(rerolls)} rerolls**.",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(name="Allowed rarities", value=f"`{', '.join(sorted(allowed_rarities))}`", inline=False)
+        embed.add_field(name="Flow", value="Auto-Hire keeps rolling and hires matches until slots are full or budget is spent.", inline=False)
+        await interaction.response.send_message(
+            embed=embed,
+            view=ConfirmManagerAutoHireView(parent_view=self.view, rerolls=rerolls, allowed_rarities=allowed_rarities),
+            ephemeral=True,
+        )
+
+
+class ConfirmWorkerAutoHireView(discord.ui.View):
+    def __init__(self, *, parent_view: "WorkerAssignmentsView", rerolls: int, allowed_rarities: set[str]):
+        super().__init__(timeout=120)
+        self.parent_view = parent_view
+        self.rerolls = int(rerolls)
+        self.allowed_rarities = set(allowed_rarities)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if int(interaction.user.id) != self.parent_view.owner_id:
+            await interaction.response.send_message("This confirmation belongs to someone else.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm Auto-Hire", style=discord.ButtonStyle.success, emoji="✅")
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await interaction.response.defer(ephemeral=True)
+        hires, rerolls_used, slots_full = 0, 0, False
+        last_error = ""
+
+        async with self.parent_view.cog.sessionmaker() as session:
+            async with session.begin():
+                for _ in range(self.rerolls):
+                    roll_result = await roll_worker_candidate(
+                        session,
+                        guild_id=self.parent_view.guild_id,
+                        user_id=self.parent_view.owner_id,
+                        business_key=self.parent_view.business_key,
+                        reroll_cost=WORKER_CANDIDATE_REROLL_COST,
+                    )
+                    if not roll_result.ok or roll_result.worker_candidate is None:
+                        last_error = roll_result.message
+                        break
+                    rerolls_used += 1
+                    c = roll_result.worker_candidate
+                    if str(getattr(c, "rarity", "common")).strip().lower() not in self.allowed_rarities:
+                        continue
+                    hire_result = await hire_worker_manual(
+                        session,
+                        guild_id=self.parent_view.guild_id,
+                        user_id=self.parent_view.owner_id,
+                        business_key=self.parent_view.business_key,
+                        worker_name=str(getattr(c, "worker_name", "Worker")),
+                        worker_type=str(getattr(c, "worker_type", "efficient")),
+                        rarity=str(getattr(c, "rarity", "common")),
+                        flat_profit_bonus=int(getattr(c, "flat_profit_bonus", 0) or 0),
+                        percent_profit_bonus_bp=int(getattr(c, "percent_profit_bonus_bp", 0) or 0),
+                        charge_silver=False,
+                    )
+                    if not hire_result.ok:
+                        last_error = hire_result.message
+                        slots_full = "slots are full" in str(hire_result.message).lower()
+                        break
+                    hires += 1
+
+        self.parent_view.current_candidate = None
+        suffix = " Worker slots are full." if slots_full else (f" {last_error}" if last_error else "")
+        await self.parent_view._show_recruitment_board(interaction, action_message=f"✅ Auto-Hire complete: hired **{_fmt_int(hires)}** workers in **{_fmt_int(rerolls_used)}** rerolls.{suffix}")
+        await interaction.followup.send(f"Auto-Hire finished. Spent **{_fmt_int(rerolls_used * WORKER_CANDIDATE_REROLL_COST)} Silver**.", ephemeral=True)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await interaction.response.send_message("Auto-Hire cancelled.", ephemeral=True)
+
+
+class ConfirmManagerAutoHireView(discord.ui.View):
+    def __init__(self, *, parent_view: "ManagerAssignmentsView", rerolls: int, allowed_rarities: set[str]):
+        super().__init__(timeout=120)
+        self.parent_view = parent_view
+        self.rerolls = int(rerolls)
+        self.allowed_rarities = set(allowed_rarities)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if int(interaction.user.id) != self.parent_view.owner_id:
+            await interaction.response.send_message("This confirmation belongs to someone else.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm Auto-Hire", style=discord.ButtonStyle.success, emoji="✅")
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await interaction.response.defer(ephemeral=True)
+        hires, rerolls_used, slots_full = 0, 0, False
+        last_error = ""
+
+        async with self.parent_view.cog.sessionmaker() as session:
+            async with session.begin():
+                for _ in range(self.rerolls):
+                    roll_result = await roll_manager_candidate(
+                        session,
+                        guild_id=self.parent_view.guild_id,
+                        user_id=self.parent_view.owner_id,
+                        business_key=self.parent_view.business_key,
+                        reroll_cost=MANAGER_CANDIDATE_REROLL_COST,
+                    )
+                    if not roll_result.ok or roll_result.manager_candidate is None:
+                        last_error = roll_result.message
+                        break
+                    rerolls_used += 1
+                    c = roll_result.manager_candidate
+                    if str(getattr(c, "rarity", "common")).strip().lower() not in self.allowed_rarities:
+                        continue
+                    hire_result = await hire_manager_manual(
+                        session,
+                        guild_id=self.parent_view.guild_id,
+                        user_id=self.parent_view.owner_id,
+                        business_key=self.parent_view.business_key,
+                        manager_name=str(getattr(c, "manager_name", "Manager")),
+                        rarity=str(getattr(c, "rarity", "common")),
+                        runtime_bonus_hours=int(getattr(c, "runtime_bonus_hours", 0) or 0),
+                        profit_bonus_bp=int(getattr(c, "profit_bonus_bp", 0) or 0),
+                        auto_restart_charges=int(getattr(c, "auto_restart_charges", 0) or 0),
+                        charge_silver=False,
+                    )
+                    if not hire_result.ok:
+                        last_error = hire_result.message
+                        slots_full = "slots are full" in str(hire_result.message).lower()
+                        break
+                    hires += 1
+
+        self.parent_view.current_candidate = None
+        suffix = " Manager slots are full." if slots_full else (f" {last_error}" if last_error else "")
+        await self.parent_view._show_recruitment_board(interaction, action_message=f"✅ Auto-Hire complete: hired **{_fmt_int(hires)}** managers in **{_fmt_int(rerolls_used)}** rerolls.{suffix}")
+        await interaction.followup.send(f"Auto-Hire finished. Spent **{_fmt_int(rerolls_used * MANAGER_CANDIDATE_REROLL_COST)} Silver**.", ephemeral=True)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await interaction.response.send_message("Auto-Hire cancelled.", ephemeral=True)
+
+
 class WorkerAssignmentsView(BusinessBaseView):
     def __init__(
         self,
@@ -1995,6 +2207,10 @@ class WorkerAssignmentsView(BusinessBaseView):
         self.business_key = business_key
         self.panel_message_id = int(panel_message_id)
         self.current_candidate: Optional[WorkerCandidateSnapshot] = None
+        guild = self.cog.bot.get_guild(self.guild_id)
+        member = guild.get_member(self.owner_id) if guild is not None else None
+        self.is_vip = is_vip_member(member)
+        self.auto_hire_button.disabled = not self.is_vip
 
     async def _refresh_assignments_embed(self, interaction: discord.Interaction) -> Optional[tuple[BusinessManageSnapshot, Sequence[WorkerAssignmentSlotSnapshot], discord.Embed]]:
         async with self.cog.sessionmaker() as session:
@@ -2097,6 +2313,14 @@ class WorkerAssignmentsView(BusinessBaseView):
         self.current_candidate = result.worker_candidate
         await self._show_recruitment_board(interaction, action_message="✅ Candidate rerolled.")
 
+    @discord.ui.button(label="Auto-Hire (VIP)", style=discord.ButtonStyle.secondary, emoji="⭐", row=1)
+    async def auto_hire_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        if not self.is_vip:
+            await interaction.response.send_message("Auto-Hire is a VIP feature.", ephemeral=True)
+            return
+        await interaction.response.send_modal(AutoHireWorkersModal(self))
+
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="⬅️", row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
@@ -2127,6 +2351,10 @@ class ManagerAssignmentsView(BusinessBaseView):
         self.business_key = business_key
         self.panel_message_id = int(panel_message_id)
         self.current_candidate: Optional[ManagerCandidateSnapshot] = None
+        guild = self.cog.bot.get_guild(self.guild_id)
+        member = guild.get_member(self.owner_id) if guild is not None else None
+        self.is_vip = is_vip_member(member)
+        self.auto_hire_button.disabled = not self.is_vip
 
     async def _refresh_assignments_embed(self, interaction: discord.Interaction) -> Optional[tuple[BusinessManageSnapshot, Sequence[ManagerAssignmentSlotSnapshot], discord.Embed]]:
         async with self.cog.sessionmaker() as session:
@@ -2228,6 +2456,14 @@ class ManagerAssignmentsView(BusinessBaseView):
             return
         self.current_candidate = result.manager_candidate
         await self._show_recruitment_board(interaction, action_message="✅ Candidate rerolled.")
+
+    @discord.ui.button(label="Auto-Hire (VIP)", style=discord.ButtonStyle.secondary, emoji="⭐", row=1)
+    async def auto_hire_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        if not self.is_vip:
+            await interaction.response.send_message("Auto-Hire is a VIP feature.", ephemeral=True)
+            return
+        await interaction.response.send_modal(AutoHireManagersModal(self))
 
     @discord.ui.button(label="Remove Manager", style=discord.ButtonStyle.danger, emoji="➖", row=1)
     async def remove_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
