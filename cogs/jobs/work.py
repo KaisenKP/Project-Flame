@@ -50,7 +50,15 @@ from services.jobs_core import (
     roll_bp,
     sub_bp,
     tier_for_category,
-    award_job_xp,
+)
+from services.job_hub import (
+    award_slot_job_xp,
+    event_defs_for,
+    get_active_slot,
+    get_slot_snapshot,
+    tool_bonus_snapshot,
+    unlocked_perks,
+    xp_needed,
 )
 from .jobs import get_job_def
 from services.job_upgrades import apply_income_upgrade, get_upgrade_level, upgrade_once
@@ -415,11 +423,11 @@ class WorkCog(commands.Cog):
             async with session.begin():
                 await ensure_user_rows(session, guild_id=guild_id, user_id=user_id)
 
-                equipped_keys = await get_equipped_keys(session, guild_id=guild_id, user_id=user_id)
-                key = equipped_keys[0] if equipped_keys else None
+                active_slot = await get_active_slot(session, guild_id=guild_id, user_id=user_id, vip=vip)
+                key = active_slot.job_key
                 if not key:
                     await interaction.followup.send(
-                        "You don’t have any jobs equipped yet.\nUse **/job** to set up your 3 job slots.",
+                        "You don’t have a job assigned to your active Job Hub slot yet.\nUse **/job** to configure it.",
                         ephemeral=True,
                     )
                     return
@@ -460,17 +468,11 @@ class WorkCog(commands.Cog):
                     await interaction.followup.send("This job has no actions configured.", ephemeral=True)
                     return
 
-                tier = tier_for_category(d.category)
-
-                snap_before = await get_job_snapshot(
-                    session,
-                    guild_id=guild_id,
-                    user_id=user_id,
-                    job_id=int(getattr(job_row, "id")),
-                    job_key=key,
-                    tier=tier,
-                    extras=None,
-                )
+                slot_snap = await get_slot_snapshot(session, guild_id=guild_id, user_id=user_id, vip=vip, slot_index=int(active_slot.slot_index))
+                snap_before = slot_snap.progress
+                if snap_before is None:
+                    await interaction.followup.send("This slot has no progression state yet. Reopen `/job` and try again.", ephemeral=True)
+                    return
                 effective_cd = _effective_work_cooldown_seconds(
                     base_seconds=float(d.cooldown_seconds),
                     work_level=int(snap_before.level),
@@ -483,16 +485,18 @@ class WorkCog(commands.Cog):
                     await interaction.followup.send(f"Cooldown. Try again in **{fmt_int(left)}s**.", ephemeral=True)
                     return
 
-                job_effects = await compute_effects_from_upgrades_and_items(
-                    session,
-                    guild_id=guild_id,
-                    user_id=user_id,
-                    job_id=int(getattr(job_row, "id")),
-                    prestige=int(snap_before.prestige),
-                    level=int(snap_before.level),
-                    inv=NoopInventoryAdapter(),
+                income_tool_bp, xp_tool_bp, stamina_tool_bp, selected_tool_name = tool_bonus_snapshot(
+                    key,
+                    slot_snap.selected_tool_key,
+                    slot_snap.tool_levels,
                 )
-                job_effects = job_effects.clamp()
+                job_effects = JobEffects(
+                    payout_bonus_bp=income_tool_bp,
+                    fail_reduction_bp=0,
+                    stamina_discount_bp=stamina_tool_bp,
+                    job_xp_bonus_bp=xp_tool_bp,
+                    user_xp_bonus_bp=0,
+                ).clamp()
 
                 item_mods = await _get_item_mods(session, guild_id=guild_id, user_id=user_id)
 
@@ -593,14 +597,20 @@ class WorkCog(commands.Cog):
                     p1 = _roll_payout_once()
                     payout = max(p1, _roll_payout_once()) if extra_roll else p1
 
-                    upgrade_level = await get_upgrade_level(
-                        session,
-                        guild_id=guild_id,
-                        user_id=user_id,
-                        job_id=int(getattr(job_row, "id")),
-                    )
-                    payout = apply_income_upgrade(payout, upgrade_level)
-                    upgrade_bonus_pct = max(int(upgrade_level) * 25, 0)
+                    upgrade_level = int(slot_snap.tool_levels.get(slot_snap.selected_tool_key or "", 0))
+                    upgrade_bonus_pct = income_tool_bp // 100
+
+                    perk_unlocked, _ = unlocked_perks(key, job_level_now)
+                    for event in event_defs_for(key):
+                        chance_bp = int(event.chance_bp)
+                        chance_bp += sum(int(perk.event_weight_bonus_bp) for perk in perk_unlocked)
+                        if roll_bp(chance_bp):
+                            payout = max((payout * (10_000 + int(event.payout_multiplier_bp))) // 10_000, 0) + int(event.bonus_silver_flat)
+                            stamina_cost = clamp_int(stamina_cost + int(event.stamina_delta), 1, 10)
+                            action_text += f"\n🎲 **{event.name}:** {event.description}"
+                            if event.fail_override is False:
+                                failed = False
+                            break
 
                     if int(item_mods.double_payout_chance_bp) > 0 and roll_bp(int(item_mods.double_payout_chance_bp)):
                         did_double = True
@@ -633,31 +643,18 @@ class WorkCog(commands.Cog):
                     prestige=job_prestige_now,
                     category=d.category,
                 )
-                award_res = await award_job_xp(
+                progress_after, leveled_up = await award_slot_job_xp(
                     session,
                     guild_id=guild_id,
                     user_id=user_id,
-                    job_id=int(getattr(job_row, "id")),
+                    slot_index=int(active_slot.slot_index),
                     job_key=key,
-                    tier=tier,
-                    base_xp=int(base_job_xp),
-                    extras=_WorkEffectsAdapter(effects=merged_effects),
-                    available_silver=int(wallet.silver),
+                    amount=int(apply_bp(base_job_xp, int(merged_effects.job_xp_bonus_bp))),
                 )
-
-                snap_after = award_res.snapshot
-                delta = award_res.delta
-
-                if int(delta.prestige_cost_paid) > 0:
-                    wallet.silver -= int(delta.prestige_cost_paid)
+                delta_job_xp = int(apply_bp(base_job_xp, int(merged_effects.job_xp_bonus_bp)))
 
                 work_image_url = job_row_image_get(job_row)
-
-                rotated_keys = await rotate_equipped_jobs(session, guild_id=guild_id, user_id=user_id)
-                if rotated_keys:
-                    next_key = rotated_keys[0]
-                    next_def = get_job_def(next_key)
-                    next_job_name = next_def.name if next_def is not None else next_key
+                next_job_name = d.name
 
                 embed = _build_work_embed(
                     user=interaction.user,
@@ -667,20 +664,20 @@ class WorkCog(commands.Cog):
                     payout=payout,
                     stamina_cost=stamina_cost,
                     user_xp=int(user_xp_gain),
-                    job_xp=int(delta.xp_gained),
-                    job_title=str(snap_after.title),
-                    job_level=int(snap_after.level),
-                    job_prestige=int(snap_after.prestige),
-                    job_xp_into=int(snap_after.xp_into_level),
-                    job_xp_need=int(snap_after.xp_needed),
+                    job_xp=delta_job_xp,
+                    job_title=f"{d.name} Specialist",
+                    job_level=int(progress_after.level),
+                    job_prestige=int(progress_after.prestige),
+                    job_xp_into=int(progress_after.xp),
+                    job_xp_need=int(xp_needed(key, int(progress_after.level), int(progress_after.prestige))),
                     effects=merged_effects,
                     item_mods=item_mods,
                     did_double=did_double,
                     upgrade_level=upgrade_level,
                     upgrade_bonus_pct=upgrade_bonus_pct,
                     work_image_url=work_image_url,
-                    leveled_up=bool(delta.leveled_up),
-                    prestiged=bool(delta.prestiged),
+                    leveled_up=bool(leveled_up),
+                    prestiged=False,
                     next_job_name=next_job_name,
                 )
                 used_cooldown_seconds = effective_cd
@@ -818,75 +815,7 @@ class _UpgradeConfirmView(discord.ui.View):
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger, emoji="✅")
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.guild is None or interaction.guild.id != self.guild_id:
-            await interaction.response.send_message("This button only works in the original server.", ephemeral=True)
-            return
-
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Only the user who ran /work can use this button.", ephemeral=True)
-            return
-
-        self.source_view.upgrade_tool.disabled = True
-        if self.source_view._message is not None:
-            try:
-                await self.source_view._message.edit(view=self.source_view)
-            except Exception:
-                pass
-
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
-        async with self.sessionmaker() as session:
-            async with session.begin():
-                await ensure_user_rows(session, guild_id=self.guild_id, user_id=self.user_id)
-                key = await get_equipped_key(session, guild_id=self.guild_id, user_id=self.user_id)
-                if not key:
-                    await interaction.followup.send("You don’t have a job equipped. Use **/job** first.", ephemeral=True)
-                    return
-
-                d = get_job_def(key)
-                if d is None:
-                    await interaction.followup.send(
-                        "Your equipped job no longer exists. Re-equip with **/job**.",
-                        ephemeral=True,
-                    )
-                    return
-
-                if d.vip_only and not is_vip_member(interaction.user):
-                    await interaction.followup.send(
-                        "Your current slot is VIP-locked and you’re not VIP. Pick another with **/job**.",
-                        ephemeral=True,
-                    )
-                    return
-
-                job_row = await get_or_create_job_row(session, job_key=key, name=d.name)
-                if not bool(getattr(job_row, "enabled", True)):
-                    await interaction.followup.send(f"Job `{key}` is disabled in DB.", ephemeral=True)
-                    return
-
-                ok, result_text, snap = await upgrade_once(
-                    session,
-                    guild_id=self.guild_id,
-                    user_id=self.user_id,
-                    job_row=job_row,
-                    job_def=d,
-                )
-
-        if not ok:
-            self.source_view.upgrade_tool.disabled = False
-            if self.source_view._message is not None:
-                try:
-                    await self.source_view._message.edit(view=self.source_view)
-                except Exception:
-                    pass
-            await interaction.followup.send(f"❌ {result_text}", ephemeral=True)
-            return
-
-        await interaction.followup.send(
-            "✅ "
-            f"{result_text}\n"
-            f"Next upgrade cost: **{fmt_int(snap.next_cost)}** silver.",
-            ephemeral=True,
-        )
+        await interaction.response.send_message("Use **/job** → **Tools & Upgrades** to manage slot-based tools in the new Job Hub.", ephemeral=True)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
