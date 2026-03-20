@@ -14,6 +14,8 @@ BULK_UNLOCK_X10_PRESTIGE = 10
 class PrestigeConfig:
     base_cost: int
     growth_rate: str
+    revenue_per_hour: int = 0
+    revenue_hours_multiplier: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +64,10 @@ def prestige_multiplier_display(prestige: int) -> str:
 
 def prestige_cost(*, config: PrestigeConfig, current_prestige: int) -> int:
     p = clamp_prestige(current_prestige)
+    revenue_per_hour = max(int(config.revenue_per_hour), 0)
+    revenue_hours_multiplier = max(int(config.revenue_hours_multiplier), 0)
+    if revenue_per_hour > 0 and revenue_hours_multiplier > 0:
+        return max(revenue_per_hour * revenue_hours_multiplier, 1)
     cost = Decimal(int(config.base_cost)) * (Decimal(str(config.growth_rate)) ** Decimal(p))
     return max(int(cost.to_integral_value(rounding=ROUND_HALF_UP)), 1)
 
