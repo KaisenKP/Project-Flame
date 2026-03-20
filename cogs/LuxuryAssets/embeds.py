@@ -61,7 +61,7 @@ def build_assets_embed(*, user: discord.abc.User, assets: list[OwnedAssetView], 
         lines.append(f"`#{a.id}` {d.emoji} **{d.name}** ({fmt_int(d.value)}){showcase}{seized}")
 
     em.add_field(name="Owned Assets", value="\n".join(lines[:20]), inline=False)
-    em.add_field(name="Asset Value", value=f"📈 {fmt_int(total_value)}", inline=True)
+    em.add_field(name="Total Asset Value", value=f"📈 {fmt_int(total_value)}", inline=True)
     em.add_field(name="Net Worth", value=f"👑 {fmt_int(net_worth)}", inline=True)
     return em
 
@@ -89,10 +89,11 @@ def build_loan_capacity_embed(*, user: discord.abc.User, snap: LoanCapacitySnaps
     em = discord.Embed(title="🏦 Loan Capacity", color=discord.Color.teal())
     em.set_author(name=str(user))
     em.add_field(name="Collateral Ratio", value=fmt_percent(snap.collateral_ratio), inline=True)
-    em.add_field(name="Asset Value", value=f"📈 {fmt_int(snap.total_asset_value)}", inline=True)
+    em.add_field(name="Total Asset Value", value=f"📈 {fmt_int(snap.total_asset_value)}", inline=True)
     em.add_field(name="Borrow Limit", value=f"💳 {fmt_int(snap.borrow_limit)}", inline=True)
     em.add_field(name="Active Balance", value=f"🧾 {fmt_int(snap.active_loan_balance)}", inline=True)
     em.add_field(name="Available", value=f"✅ {fmt_int(snap.available_to_borrow)}", inline=True)
+    em.set_footer(text="Business ownership value now counts toward asset-backed borrowing.")
     return em
 
 
