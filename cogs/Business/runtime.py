@@ -295,6 +295,37 @@ def _build_run_report_json(run: BusinessRunRow, *, completed_at: datetime) -> di
     }
 
 
+def _spawn_auto_restart_run(session, *, run: BusinessRunRow) -> BusinessRunRow:
+    restart_at = _as_utc(run.ends_at)
+    runtime_hours = max(int(run.runtime_hours_snapshot or 0), 1)
+    restarted = BusinessRunRow(
+        ownership_id=int(run.ownership_id),
+        guild_id=int(run.guild_id),
+        user_id=int(run.user_id),
+        business_key=str(run.business_key),
+        status=RUN_STATUS_RUNNING,
+        started_at=restart_at,
+        ends_at=restart_at + timedelta(hours=runtime_hours),
+        last_payout_at=restart_at,
+        completed_at=None,
+        runtime_hours_snapshot=runtime_hours,
+        hourly_profit_snapshot=max(int(run.hourly_profit_snapshot or 0), 0),
+        auto_restart_remaining=max(int(run.auto_restart_remaining or 0) - 1, 0),
+        snapshot_json={
+            **dict(run.snapshot_json or {}),
+            "auto_restarted_from_run_id": int(run.id),
+            "auto_restart_remaining": max(int(run.auto_restart_remaining or 0) - 1, 0),
+            "started_at_iso": restart_at.isoformat(),
+            "ends_at_iso": (restart_at + timedelta(hours=runtime_hours)).isoformat(),
+        },
+        report_json=None,
+        silver_paid_total=0,
+        hours_paid_total=0,
+    )
+    session.add(restarted)
+    return restarted
+
+
 def _event_pool_for_business_key(business_key: str) -> tuple[BusinessEventDef, ...]:
     return _BUSINESS_EVENT_POOLS.get(str(business_key).strip().lower(), _DEFAULT_EVENT_POOL)
 
@@ -440,12 +471,22 @@ async def process_single_run(
     completed = False
 
     # If the run has ended and there are no remaining whole unpaid hours,
-    # finalize it cleanly.
+    # finalize it cleanly or consume one auto-restart charge.
     if _run_has_ended(run, now=now):
         post_anchor = _safe_run_anchor(run)
         remaining_due_after_payment = _whole_hours_between(post_anchor, run.ends_at)
 
         if remaining_due_after_payment <= 0:
+            auto_restart_remaining = max(int(run.auto_restart_remaining or 0), 0)
+            if auto_restart_remaining > 0:
+                restarted = _spawn_auto_restart_run(session, run=run)
+                await session.flush()
+                run_report = dict(run.report_json or {})
+                run_report["auto_restarted"] = True
+                run_report["auto_restart_spawned_run_id"] = int(restarted.id)
+                run_report["auto_restart_charges_before_completion"] = auto_restart_remaining
+                run_report["auto_restart_charges_after_completion"] = int(restarted.auto_restart_remaining or 0)
+                run.report_json = run_report
             _finalize_run_in_place(run, now=now)
             completed = True
 
