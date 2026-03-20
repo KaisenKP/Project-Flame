@@ -110,6 +110,7 @@ try:
         start_business_run,
         stop_business_run,
         upgrade_business,
+        prestige_business,
     )
 except Exception:
     @dataclass(slots=True)
@@ -133,6 +134,8 @@ except Exception:
         owned: bool
         running: bool
         level: int
+        visible_level: int
+        max_level: int
         prestige: int
         hourly_profit: int
         runtime_remaining_hours: int
@@ -162,10 +165,18 @@ except Exception:
         owned: bool
         running: bool
         level: int
+        visible_level: int
+        max_level: int
         prestige: int
         hourly_profit: int
         base_hourly_income: int
         upgrade_cost: Optional[int]
+        prestige_cost: Optional[int]
+        can_prestige: bool
+        prestige_multiplier: int
+        bulk_upgrade_1_unlocked: bool
+        bulk_upgrade_5_unlocked: bool
+        bulk_upgrade_10_unlocked: bool
         runtime_remaining_hours: int
         total_runtime_hours: int
         worker_slots_used: int
@@ -255,6 +266,8 @@ except Exception:
                 cost_silver=100_000,
                 base_hourly_income=1_000,
                 base_upgrade_cost=25_000,
+                prestige_base_cost=100_000,
+                prestige_growth_rate="2.5",
                 flavor="Your first proper business. Classy, simple, and steady.",
             ),
             BusinessDef(
@@ -465,11 +478,25 @@ except Exception:
         guild_id: int,
         user_id: int,
         business_key: str,
+        quantity: int = 1,
     ) -> BusinessActionResult:
         _ = session, guild_id, user_id, business_key
         return BusinessActionResult(
             ok=False,
             message="Business services are not wired yet. Build upgrade_business(...) in cogs/Business/core.py.",
+        )
+
+
+    async def prestige_business(
+        session,
+        *,
+        guild_id: int,
+        user_id: int,
+        business_key: str,
+    ) -> BusinessActionResult:
+        return BusinessActionResult(
+            ok=False,
+            message="Business services are not wired yet. Build prestige_business(...) in cogs/Business/core.py.",
         )
 
 
@@ -868,7 +895,7 @@ def _build_manage_menu_embed(
     for c in owned[:25]:
         lines.append(
             f"{c.emoji} **{c.name}**\n"
-            f"└ Level `{_fmt_int(c.level)}` • Prestige `{_fmt_int(c.prestige)}`\n"
+            f"└ Level `{_fmt_int(c.visible_level)}/{_fmt_int(c.max_level)}` • Prestige `{_fmt_int(c.prestige)}`\n"
             f"└ Workers `{_slot_text(c.worker_slots_used, c.worker_slots_total)}` • Managers `{_slot_text(c.manager_slots_used, c.manager_slots_total)}`"
         )
 
@@ -887,7 +914,7 @@ def _build_business_detail_embed(
 
     e = _base_embed(
         title=f"📊 {snap.emoji} {snap.name}",
-        description=f"`Status` {status} • `Level` `{_fmt_int(snap.level)}` • `Prestige` `{_fmt_int(snap.prestige)}`",
+        description=f"`Status` {status} • `Level` `{_fmt_int(snap.visible_level)}/{_fmt_int(snap.max_level)}` • `Prestige` `{_fmt_int(snap.prestige)}`",
     )
     e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
 
@@ -905,7 +932,9 @@ def _build_business_detail_embed(
         value=(
             f"Current Profit: `{_fmt_int(snap.hourly_profit)}/hr`\n"
             f"Base Profit: `{_fmt_int(snap.base_hourly_income)}/hr`\n"
-            f"Upgrade Cost: `{_fmt_int(snap.upgrade_cost or 0)} Silver`"
+            f"Upgrade Cost: `{_fmt_int(snap.upgrade_cost or 0)} Silver`\n"
+            f"Prestige Cost: `{_fmt_int(snap.prestige_cost or 0)} Silver`\n"
+            f"Output Multiplier: `x{_fmt_int(snap.prestige_multiplier)}`"
         ),
         inline=True,
     )
@@ -917,6 +946,17 @@ def _build_business_detail_embed(
         ),
         inline=False,
     )
+
+    progression_lines = [
+        f"Bulk x1: {'Unlocked' if snap.bulk_upgrade_1_unlocked else 'Locked'}",
+        f"Bulk x5: {'Unlocked' if snap.bulk_upgrade_5_unlocked else 'Locked'}",
+        f"Bulk x10: {'Unlocked' if snap.bulk_upgrade_10_unlocked else 'Locked'}",
+    ]
+    if snap.can_prestige:
+        progression_lines.append("Prestige available now.")
+    else:
+        progression_lines.append(f"Prestige unlocks at Level {snap.max_level}.")
+    e.add_field(name="Progression", value="\n".join(f"• {x}" for x in progression_lines), inline=False)
 
     if snap.notes:
         e.add_field(name="Active Bonuses", value="\n".join(f"• {x}" for x in snap.notes[:6]), inline=False)
@@ -1497,13 +1537,15 @@ class BusinessHubView(BusinessBaseView):
     def _configure_buttons(self) -> None:
         owns_all = self.hub_snapshot.total_count > 0 and self.hub_snapshot.owned_count >= self.hub_snapshot.total_count
         has_selected = bool(self.selected_business_key)
+        selected_card = next((c for c in self.hub_snapshot.cards if c.key == self.selected_business_key), None)
+        at_cap = bool(selected_card is not None and selected_card.visible_level >= selected_card.max_level)
         self.buy_button.disabled = owns_all
         self.manage_button.disabled = not has_selected
         self.run_button.disabled = not has_selected
         self.stop_button.disabled = not has_selected
         self.workers_button.disabled = not has_selected
         self.managers_button.disabled = not has_selected
-        self.upgrade_button.disabled = not has_selected
+        self.upgrade_button.disabled = (not has_selected) or at_cap
 
     async def _load_selected_detail(self):
         if not self.selected_business_key:
@@ -1526,7 +1568,7 @@ class BusinessHubView(BusinessBaseView):
             await interaction.followup.send("Select an owned business first.", ephemeral=True)
             return
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=detail.key, owned=detail.owned)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=detail.key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="Run Business", style=discord.ButtonStyle.success, emoji="▶️", row=1)
@@ -1545,7 +1587,7 @@ class BusinessHubView(BusinessBaseView):
             return
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
         embed.add_field(name="Run Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.selected_business_key, owned=detail.owned)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.selected_business_key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="Stop Business", style=discord.ButtonStyle.danger, emoji="⏹️", row=1)
@@ -1564,7 +1606,7 @@ class BusinessHubView(BusinessBaseView):
             return
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
         embed.add_field(name="Stop Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.selected_business_key, owned=detail.owned)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.selected_business_key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="View Workers", style=discord.ButtonStyle.secondary, emoji="👷", row=2)
@@ -1622,7 +1664,7 @@ class BusinessHubView(BusinessBaseView):
             return
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
         embed.add_field(name="Upgrade Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.selected_business_key, owned=detail.owned)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.selected_business_key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="Buy", style=discord.ButtonStyle.success, emoji="🛒", row=3)
@@ -1859,11 +1901,17 @@ class BusinessDetailView(BusinessBaseView):
         business_key: str,
         owned: Optional[bool] = None,
         upgrade_enabled: Optional[bool] = None,
+        detail: Optional[BusinessManageSnapshot] = None,
     ):
         super().__init__(cog=cog, owner_id=owner_id, guild_id=guild_id)
         self.business_key = business_key
         is_enabled = bool(upgrade_enabled) if upgrade_enabled is not None else bool(owned)
-        self.upgrade_button.disabled = not is_enabled
+        self.upgrade_button.disabled = (not is_enabled) or bool(getattr(detail, "upgrade_cost", None) is None)
+        self.upgrade_5_button.disabled = (not is_enabled) or (not bool(getattr(detail, "bulk_upgrade_5_unlocked", False))) or bool(getattr(detail, "upgrade_cost", None) is None)
+        self.upgrade_10_button.disabled = (not is_enabled) or (not bool(getattr(detail, "bulk_upgrade_10_unlocked", False))) or bool(getattr(detail, "upgrade_cost", None) is None)
+        self.prestige_button.disabled = (not is_enabled) or (not bool(getattr(detail, "can_prestige", False)))
+        if detail is not None and not bool(getattr(detail, "can_prestige", False)):
+            self.remove_item(self.prestige_button)
         self.workers_button.disabled = not is_enabled
         self.managers_button.disabled = not is_enabled
         self.run_button.disabled = not is_enabled
@@ -1892,7 +1940,7 @@ class BusinessDetailView(BusinessBaseView):
             return
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
         embed.add_field(name="Run Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="Stop Business", style=discord.ButtonStyle.danger, emoji="⏹️", row=0)
@@ -1908,7 +1956,7 @@ class BusinessDetailView(BusinessBaseView):
             return
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
         embed.add_field(name="Stop Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="Status", style=discord.ButtonStyle.secondary, emoji="📡", row=0)
@@ -1921,7 +1969,7 @@ class BusinessDetailView(BusinessBaseView):
             return
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
         embed.add_field(name="Status", value="Current runtime, bonuses, and staffing shown above.", inline=False)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="Upgrade Business", style=discord.ButtonStyle.primary, emoji="⬆️", row=1)
@@ -1938,10 +1986,61 @@ class BusinessDetailView(BusinessBaseView):
             return
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
         embed.add_field(name="Upgrade Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
-    @discord.ui.button(label="View Workers", style=discord.ButtonStyle.secondary, emoji="👷", row=1, disabled=True)
+    @discord.ui.button(label="Upgrade x5", style=discord.ButtonStyle.primary, emoji="5️⃣", row=1)
+    async def upgrade_5_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await _safe_defer(interaction)
+        async with self.cog.sessionmaker() as session:
+            async with session.begin():
+                await ensure_user_rows(session, guild_id=self.guild_id, user_id=self.owner_id)
+                result = await upgrade_business(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key, quantity=5)
+                detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+        if detail is None:
+            await interaction.followup.send("That business could not be found.", ephemeral=True)
+            return
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        embed.add_field(name="Upgrade x5", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
+        await _safe_edit_panel(interaction, embed=embed, view=view)
+
+    @discord.ui.button(label="Upgrade x10", style=discord.ButtonStyle.primary, emoji="🔟", row=1)
+    async def upgrade_10_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await _safe_defer(interaction)
+        async with self.cog.sessionmaker() as session:
+            async with session.begin():
+                await ensure_user_rows(session, guild_id=self.guild_id, user_id=self.owner_id)
+                result = await upgrade_business(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key, quantity=10)
+                detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+        if detail is None:
+            await interaction.followup.send("That business could not be found.", ephemeral=True)
+            return
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        embed.add_field(name="Upgrade x10", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
+        await _safe_edit_panel(interaction, embed=embed, view=view)
+
+    @discord.ui.button(label="Prestige Business", style=discord.ButtonStyle.success, emoji="🌟", row=2)
+    async def prestige_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await _safe_defer(interaction)
+        async with self.cog.sessionmaker() as session:
+            async with session.begin():
+                await ensure_user_rows(session, guild_id=self.guild_id, user_id=self.owner_id)
+                result = await prestige_business(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+                detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+        if detail is None:
+            await interaction.followup.send("That business could not be found.", ephemeral=True)
+            return
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        embed.add_field(name="Prestige Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
+        await _safe_edit_panel(interaction, embed=embed, view=view)
+
+    @discord.ui.button(label="View Workers", style=discord.ButtonStyle.secondary, emoji="👷", row=3, disabled=True)
     async def workers_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await _safe_defer(interaction)
@@ -1960,7 +2059,7 @@ class BusinessDetailView(BusinessBaseView):
         view = WorkerAssignmentsView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, panel_message_id=panel_message_id, requester=interaction.user)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
-    @discord.ui.button(label="View Managers", style=discord.ButtonStyle.secondary, emoji="🧑‍💼", row=1, disabled=True)
+    @discord.ui.button(label="View Managers", style=discord.ButtonStyle.secondary, emoji="🧑‍💼", row=3, disabled=True)
     async def managers_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await _safe_defer(interaction)
@@ -1979,7 +2078,7 @@ class BusinessDetailView(BusinessBaseView):
         view = ManagerAssignmentsView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, panel_message_id=panel_message_id, requester=interaction.user)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
-    @discord.ui.button(label="Back to Business Hub", style=discord.ButtonStyle.secondary, emoji="⬅️", row=2)
+    @discord.ui.button(label="Back to Business Hub", style=discord.ButtonStyle.secondary, emoji="⬅️", row=4)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await _safe_defer(interaction)
@@ -2537,7 +2636,7 @@ class WorkerAssignmentsView(BusinessBaseView):
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view, message_id=self.panel_message_id)
 
 
@@ -2708,7 +2807,7 @@ class ManagerAssignmentsView(BusinessBaseView):
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view, message_id=self.panel_message_id)
 
 
@@ -2935,7 +3034,18 @@ class BusinessCog(commands.Cog):
                 return
         self._push_pending_summary(guild_id=int(notice.guild_id), user_id=int(notice.user_id), summary=summary)
 
+    async def _ensure_business_prestige_merge(self) -> None:
+        state = self._load_runtime_state()
+        merge_state = dict(state.get("business_prestige_system", {}))
+        if bool(merge_state.get("merged", False)):
+            return
+        merge_state["merged"] = True
+        state["business_prestige_system"] = merge_state
+        self._save_runtime_state(state)
+        log.info("Business prestige system merge flag written.")
+
     async def cog_load(self) -> None:
+        await self._ensure_business_prestige_merge()
         await self._run_one_time_upgrade_refund()
         log.info(
             "Business runtime start requested | cog=%s running=%s",
