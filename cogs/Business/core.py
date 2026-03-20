@@ -512,6 +512,34 @@ def _normalize_business_progress(*, level: int, prestige: int) -> tuple[int, int
     return normalized_level, normalized_prestige
 
 
+def _minimum_level_for_worker_count(business_key: str, worker_count: int) -> int:
+    base_slots = HOTEL_STARTING_WORKER_SLOTS if business_key == "hotel" else BASE_WORKER_SLOTS
+    required_workers = max(int(worker_count), 0)
+    if required_workers <= base_slots:
+        return 0
+    return (required_workers - base_slots) * 2
+
+
+async def _resolve_effective_business_progress(session, *, ownership: BusinessOwnershipRow) -> tuple[int, int]:
+    normalized_level, normalized_prestige = _normalize_business_progress(
+        level=int(ownership.level or 0),
+        prestige=int(ownership.prestige or 0),
+    )
+    active_worker_count = await _count_active_workers_for_ownership(session, ownership_id=int(ownership.id))
+    inferred_level = _minimum_level_for_worker_count(str(ownership.business_key), active_worker_count)
+    if inferred_level <= normalized_level:
+        return normalized_level, normalized_prestige
+
+    repaired_level, repaired_prestige = _normalize_business_progress(
+        level=inferred_level,
+        prestige=normalized_prestige,
+    )
+    ownership.level = repaired_level
+    ownership.prestige = repaired_prestige
+    await session.flush()
+    return repaired_level, repaired_prestige
+
+
 def _effective_base_income(defn: BusinessDef, *, level: int, prestige: int) -> int:
     level, prestige = _normalize_business_progress(level=level, prestige=prestige)
     value = int(defn.base_hourly_income)
@@ -1010,10 +1038,7 @@ async def _calc_display_hourly_profit_for_owned_business(
     We are not doing deep worker synergies yet.
     That comes later when the staffing layer gets spicy.
     """
-    level, prestige = _normalize_business_progress(
-        level=int(ownership.level or 0),
-        prestige=int(ownership.prestige or 0),
-    )
+    level, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
 
     base_after_scaling = _effective_base_income(defn, level=level, prestige=prestige)
 
@@ -1084,10 +1109,7 @@ async def _build_business_card_for_user(
             image_url=defn.image_url,
         )
 
-    level, prestige = _normalize_business_progress(
-        level=int(owned_row.level or 0),
-        prestige=int(owned_row.prestige or 0),
-    )
+    level, prestige = await _resolve_effective_business_progress(session, ownership=owned_row)
 
     running_row = running_map.get(defn.key)
     running = running_row is not None
@@ -1244,10 +1266,7 @@ async def get_business_manage_snapshot(
             notes=notes,
         )
 
-    level, prestige = _normalize_business_progress(
-        level=int(ownership.level or 0),
-        prestige=int(ownership.prestige or 0),
-    )
+    level, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
 
     worker_used = await _count_active_workers_for_ownership(
         session,
@@ -1497,6 +1516,8 @@ async def start_business_run(
         ownership_id=int(ownership.id),
     )
 
+    level, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
+
     run = BusinessRunRow(
         ownership_id=int(ownership.id),
         guild_id=int(guild_id),
@@ -1515,8 +1536,8 @@ async def start_business_run(
             "business_name": defn.name,
             "hourly_profit_snapshot": int(hourly_profit),
             "runtime_hours_snapshot": int(total_runtime_hours),
-            "ownership_level": int(_normalize_business_progress(level=int(ownership.level or 0), prestige=int(ownership.prestige or 0))[0]),
-            "ownership_prestige": int(_normalize_business_progress(level=int(ownership.level or 0), prestige=int(ownership.prestige or 0))[1]),
+            "ownership_level": int(level),
+            "ownership_prestige": int(prestige),
             "auto_restart_remaining": int(auto_restart_remaining),
             "started_at_iso": now.isoformat(),
             "ends_at_iso": ends_at.isoformat(),
@@ -1662,10 +1683,7 @@ async def upgrade_business(
         return BusinessActionResult(ok=False, message=f"You do not own **{defn.name}** yet.", snapshot=hub)
 
     requested_quantity = max(int(quantity), 1)
-    old_level, old_prestige = _normalize_business_progress(
-        level=int(ownership.level or 0),
-        prestige=int(ownership.prestige or 0),
-    )
+    old_level, old_prestige = await _resolve_effective_business_progress(session, ownership=ownership)
     old_visible_level = visible_level_for(old_level)
 
     if at_level_cap(stored_level=old_level, prestige=old_prestige):
@@ -1723,10 +1741,7 @@ async def upgrade_business(
     hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
     manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
 
-    new_level, new_prestige = _normalize_business_progress(
-        level=int(ownership.level or 0),
-        prestige=int(ownership.prestige or 0),
-    )
+    new_level, new_prestige = await _resolve_effective_business_progress(session, ownership=ownership)
     new_visible_level = visible_level_for(new_level)
     new_hourly = int(manage.hourly_profit) if manage is not None else old_hourly
     new_runtime_hours = int(manage.total_runtime_hours) if manage is not None else old_runtime_hours
@@ -1765,10 +1780,7 @@ async def prestige_business(
         hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
         return BusinessActionResult(ok=False, message=f"You do not own **{defn.name}** yet.", snapshot=hub)
 
-    current_level, current_prestige = _normalize_business_progress(
-        level=int(ownership.level or 0),
-        prestige=int(ownership.prestige or 0),
-    )
+    current_level, current_prestige = await _resolve_effective_business_progress(session, ownership=ownership)
     current_visible_level = visible_level_for(current_level)
     current_max_level = max_visible_level_for_prestige(current_prestige)
     if not at_level_cap(stored_level=current_level, prestige=current_prestige):
@@ -1836,9 +1848,10 @@ async def get_worker_assignment_slots(
     if ownership is None:
         return []
 
+    level, _ = await _resolve_effective_business_progress(session, ownership=ownership)
     total_slots = _worker_slots_for_business_key_and_level(
         str(business_key),
-        int(ownership.level or 0),
+        level,
     )
     rows = await session.scalars(
         select(BusinessWorkerAssignmentRow)
@@ -1886,7 +1899,8 @@ async def get_manager_assignment_slots(
     if ownership is None:
         return []
 
-    total_slots = _manager_slots_for_level(int(ownership.level or 0))
+    level, _ = await _resolve_effective_business_progress(session, ownership=ownership)
+    total_slots = _manager_slots_for_level(level)
     rows = await session.scalars(
         select(BusinessManagerAssignmentRow)
         .where(
@@ -2185,7 +2199,8 @@ async def remove_worker(
         return BusinessActionResult(ok=False, message=f"You do not own **{defn.name}** yet.", snapshot=hub)
 
     normalized_slot = _normalize_slot_index(slot_index)
-    max_slot = _worker_slots_for_business_key_and_level(str(business_key), int(ownership.level or 0))
+    level, _ = await _resolve_effective_business_progress(session, ownership=ownership)
+    max_slot = _worker_slots_for_business_key_and_level(str(business_key), level)
     if normalized_slot <= 0 or normalized_slot > max_slot:
         hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
         manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
@@ -2537,7 +2552,8 @@ async def remove_manager(
         return BusinessActionResult(ok=False, message=f"You do not own **{defn.name}** yet.", snapshot=hub)
 
     normalized_slot = _normalize_slot_index(slot_index)
-    max_slot = _manager_slots_for_level(int(ownership.level or 0))
+    level, _ = await _resolve_effective_business_progress(session, ownership=ownership)
+    max_slot = _manager_slots_for_level(level)
     if normalized_slot <= 0 or normalized_slot > max_slot:
         hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
         manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
