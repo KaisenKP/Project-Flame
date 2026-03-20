@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Iterable, List, Optional, Protocol, Tuple
 
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -55,6 +56,7 @@ class JobProgressDelta:
 
     leveled_up: bool
     prestiged: bool
+    prestige_cost_paid: int
 
 
 @dataclass(frozen=True)
@@ -102,6 +104,13 @@ PRESTIGE_CAPS: Dict[int, int] = {
     1: 30,
     2: 50,
 }
+
+MAX_JOB_PRESTIGE = 100
+
+
+def prestige_cost_for_job(current_prestige: int) -> int:
+    p = max(int(current_prestige), 0)
+    return (p + 1) * 1000
 
 
 def level_cap_for(prestige: int) -> int:
@@ -572,7 +581,8 @@ def _advance_levels(
     level: int,
     xp_into: int,
     add_xp: int,
-) -> Tuple[_ProgressState, bool, bool]:
+    available_silver: Optional[int] = None,
+) -> Tuple[_ProgressState, bool, bool, int]:
     p = max(int(prestige), 0)
     lvl = max(int(level), 1)
     into = max(int(xp_into), 0)
@@ -580,6 +590,7 @@ def _advance_levels(
 
     leveled = False
     prestiged = False
+    prestige_cost_paid = 0
 
     into += gained
 
@@ -595,13 +606,27 @@ def _advance_levels(
         leveled = True
 
         if lvl > cap:
+            if p >= MAX_JOB_PRESTIGE:
+                lvl = cap
+                into = min(into, needed - 1)
+                break
+
+            cost = prestige_cost_for_job(p)
+            if available_silver is not None and available_silver < cost:
+                lvl = cap
+                into = min(into, needed - 1)
+                break
+
             prestiged = True
             p += 1
             lvl = 1
             into = 0
             title = title_for(job_key, p)
+            prestige_cost_paid += cost
+            if available_silver is not None:
+                available_silver -= cost
 
-    return _ProgressState(prestige=p, title=title, level=lvl, xp_into=into), leveled, prestiged
+    return _ProgressState(prestige=p, title=title, level=lvl, xp_into=into), leveled, prestiged, prestige_cost_paid
 
 
 # ============================================================
@@ -707,6 +732,7 @@ async def award_job_xp(
     tier: JobTier,
     base_xp: int,
     extras: JobExtrasAdapter | None = None,
+    available_silver: Optional[int] = None,
 ) -> JobAwardResult:
     if extras is None:
         extras = NoopExtrasAdapter()
@@ -737,7 +763,7 @@ async def award_job_xp(
 
     gained = _apply_xp_bonus(base_xp, effects.job_xp_bonus_bp + GLOBAL_JOB_XP_MULT_BP)
 
-    state, leveled, prestiged = _advance_levels(
+    state, leveled, prestiged, prestige_cost_paid = _advance_levels(
         tier=tier,
         job_key=job_key,
         prestige=old_prestige,
@@ -745,6 +771,7 @@ async def award_job_xp(
         level=old_level,
         xp_into=old_xp_into,
         add_xp=gained,
+        available_silver=available_silver,
     )
 
     row.job_level = int(state.level)
@@ -780,6 +807,7 @@ async def award_job_xp(
         xp_gained=gained,
         leveled_up=bool(leveled),
         prestiged=bool(prestiged),
+        prestige_cost_paid=int(prestige_cost_paid),
     )
 
     return JobAwardResult(snapshot=snap, delta=delta, effects=effects)

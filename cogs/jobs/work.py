@@ -20,7 +20,7 @@ from services.users import ensure_user_rows
 from services.vip import is_vip_member
 from services.xp_award import award_xp
 
-from services.jobs_balance import job_xp_for_work, stamina_cost_for_work, user_xp_for_work
+from services.jobs_balance import job_xp_for_work, payout_for_work, prestige_cost, stamina_cost_for_work, user_xp_for_work
 from services.achievements import (
     check_and_grant_achievements,
     increment_counter,
@@ -330,6 +330,7 @@ def _build_work_embed(
     notes: list[str] = []
     if prestiged:
         notes.append("✨ Prestiged, new title unlocked")
+        notes.append(f"💸 Prestige Cost: **{fmt_int(prestige_cost(job_prestige - 1))} Silver**")
     elif leveled_up:
         notes.append("⬆️ Leveled up")
 
@@ -576,6 +577,12 @@ class WorkCog(commands.Cog):
                         if d.bonus_chance_bp > 0 and d.bonus_multiplier > 1.0 and roll_bp(d.bonus_chance_bp):
                             raw = int(round(raw * float(d.bonus_multiplier)))
 
+                        raw = payout_for_work(
+                            base_payout=raw,
+                            job_key=key,
+                            job_level=job_level_now,
+                            prestige=job_prestige_now,
+                        )
                         raw = apply_bp(raw, int(merged_effects.payout_bonus_bp))
                         return max(int(raw), 0)
 
@@ -631,10 +638,14 @@ class WorkCog(commands.Cog):
                     tier=tier,
                     base_xp=int(base_job_xp),
                     extras=_WorkEffectsAdapter(effects=merged_effects),
+                    available_silver=int(wallet.silver),
                 )
 
                 snap_after = award_res.snapshot
                 delta = award_res.delta
+
+                if int(delta.prestige_cost_paid) > 0:
+                    wallet.silver -= int(delta.prestige_cost_paid)
 
                 work_image_url = job_row_image_get(job_row)
 

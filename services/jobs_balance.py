@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_HALF_UP
 
 from services.jobs_core import JobCategory, clamp_int
 
@@ -57,6 +58,41 @@ class BalanceConfig:
 
 
 CFG = BalanceConfig()
+
+
+EARLY_JOB_KEYS: tuple[str, ...] = (
+    "fisherman",
+    "miner",
+    "lumberjack",
+    "messenger",
+    "cook",
+)
+
+
+def prestige_multiplier(prestige: int) -> Decimal:
+    p = max(int(prestige), 0)
+    return Decimal(1 + p)
+
+
+def level_multiplier(level: int) -> Decimal:
+    lvl = max(int(level), 1)
+    return Decimal("1.0") + (Decimal("0.05") * Decimal(lvl - 1))
+
+
+def prestige_cost(current_prestige: int) -> int:
+    p = max(int(current_prestige), 0)
+    return (p + 1) * 1000
+
+
+def payout_for_work(*, base_payout: int, job_key: str, job_level: int, prestige: int) -> int:
+    payout = max(int(base_payout), 0)
+    key = (job_key or "").strip().lower()
+
+    if key in EARLY_JOB_KEYS:
+        payout = max(payout // 10, 1 if payout > 0 else 0)
+
+    scaled = Decimal(payout) * level_multiplier(job_level) * prestige_multiplier(prestige)
+    return max(int(scaled.to_integral_value(rounding=ROUND_HALF_UP)), 0)
 
 
 def user_xp_for_work(*, user_level: int, category: JobCategory) -> int:
