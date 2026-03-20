@@ -94,6 +94,7 @@ class BusinessDef:
     base_upgrade_cost: int
     prestige_base_cost: int
     prestige_growth_rate: str
+    prestige_revenue_hours: int = 72
     flavor: str = ""
     image_url: Optional[str] = None
     banner_url: Optional[str] = None
@@ -556,7 +557,18 @@ def _prestige_config_for(defn: BusinessDef) -> PrestigeConfig:
 
 
 def _prestige_cost(defn: BusinessDef, prestige: int) -> int:
-    return prestige_cost(config=_prestige_config_for(defn), current_prestige=prestige)
+    capped_level = max_stored_level_for_prestige(prestige)
+    capped_hourly_income = _effective_base_income(defn, level=capped_level, prestige=prestige)
+    config = _prestige_config_for(defn)
+    return prestige_cost(
+        config=PrestigeConfig(
+            base_cost=config.base_cost,
+            growth_rate=config.growth_rate,
+            revenue_per_hour=int(capped_hourly_income),
+            revenue_hours_multiplier=int(defn.prestige_revenue_hours),
+        ),
+        current_prestige=prestige,
+    )
 
 
 def _upgrade_cost(defn: BusinessDef, level: int) -> int:
