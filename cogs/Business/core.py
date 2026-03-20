@@ -2098,37 +2098,56 @@ async def hire_manager(
             manage_snapshot=manage,
         )
 
-    row = BusinessManagerAssignmentRow(
-        ownership_id=int(ownership.id),
-        guild_id=int(guild_id),
-        user_id=int(user_id),
-        business_key=str(business_key),
-        slot_index=int(free_slot),
-        manager_name=(str(manager_name).strip() or "Manager")[:64],
-        rarity=norm_rarity,
-        runtime_bonus_hours=runtime_bonus,
-        auto_restart_charges=auto_restart,
-        profit_bonus_bp=profit_bp,
-        special_json={},
-        is_active=True,
-    )
-    conflict = False
-    try:
-        async with session.begin_nested():
-            session.add(row)
-            await session.flush()
-    except IntegrityError:
-        conflict = True
-
-    if conflict:
-        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
-        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
-        return BusinessActionResult(
-            ok=False,
-            message="That manager slot was taken by another action. Please try again.",
-            snapshot=hub,
-            manage_snapshot=manage,
+    row = await session.scalar(
+        select(BusinessManagerAssignmentRow).where(
+            BusinessManagerAssignmentRow.ownership_id == int(ownership.id),
+            BusinessManagerAssignmentRow.slot_index == int(free_slot),
         )
+    )
+    if row is None:
+        row = BusinessManagerAssignmentRow(
+            ownership_id=int(ownership.id),
+            guild_id=int(guild_id),
+            user_id=int(user_id),
+            business_key=str(business_key),
+            slot_index=int(free_slot),
+            manager_name=(str(manager_name).strip() or "Manager")[:64],
+            rarity=norm_rarity,
+            runtime_bonus_hours=runtime_bonus,
+            auto_restart_charges=auto_restart,
+            profit_bonus_bp=profit_bp,
+            special_json={},
+            is_active=True,
+        )
+        conflict = False
+        try:
+            async with session.begin_nested():
+                session.add(row)
+                await session.flush()
+        except IntegrityError:
+            conflict = True
+
+        if conflict:
+            hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+            manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+            return BusinessActionResult(
+                ok=False,
+                message="That manager slot was taken by another action. Please try again.",
+                snapshot=hub,
+                manage_snapshot=manage,
+            )
+    else:
+        row.guild_id = int(guild_id)
+        row.user_id = int(user_id)
+        row.business_key = str(business_key)
+        row.manager_name = (str(manager_name).strip() or "Manager")[:64]
+        row.rarity = norm_rarity
+        row.runtime_bonus_hours = runtime_bonus
+        row.auto_restart_charges = auto_restart
+        row.profit_bonus_bp = profit_bp
+        row.special_json = {}
+        row.is_active = True
+        await session.flush()
 
     wallet.silver -= hire_cost
     if hasattr(wallet, "silver_spent"):
@@ -2252,19 +2271,38 @@ async def hire_manager_manual(
         manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
         return BusinessActionResult(ok=False, message=f"You need **{hire_cost:,} Silver** to hire this manager. Short by **{short:,} Silver**.", snapshot=hub, manage_snapshot=manage)
 
-    row = BusinessManagerAssignmentRow(
-        ownership_id=int(ownership.id), guild_id=int(guild_id), user_id=int(user_id), business_key=str(business_key), slot_index=int(free_slot),
-        manager_name=(str(manager_name).strip() or "Manager")[:64], rarity=norm_rarity, runtime_bonus_hours=runtime_bonus,
-        auto_restart_charges=auto_restart, profit_bonus_bp=profit_bp, special_json={}, is_active=True,
+    row = await session.scalar(
+        select(BusinessManagerAssignmentRow).where(
+            BusinessManagerAssignmentRow.ownership_id == int(ownership.id),
+            BusinessManagerAssignmentRow.slot_index == int(free_slot),
+        )
     )
-    try:
-        async with session.begin_nested():
-            session.add(row)
-            await session.flush()
-    except IntegrityError:
-        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
-        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
-        return BusinessActionResult(ok=False, message="That manager slot was taken by another action. Please try again.", snapshot=hub, manage_snapshot=manage)
+    if row is None:
+        row = BusinessManagerAssignmentRow(
+            ownership_id=int(ownership.id), guild_id=int(guild_id), user_id=int(user_id), business_key=str(business_key), slot_index=int(free_slot),
+            manager_name=(str(manager_name).strip() or "Manager")[:64], rarity=norm_rarity, runtime_bonus_hours=runtime_bonus,
+            auto_restart_charges=auto_restart, profit_bonus_bp=profit_bp, special_json={}, is_active=True,
+        )
+        try:
+            async with session.begin_nested():
+                session.add(row)
+                await session.flush()
+        except IntegrityError:
+            hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+            manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+            return BusinessActionResult(ok=False, message="That manager slot was taken by another action. Please try again.", snapshot=hub, manage_snapshot=manage)
+    else:
+        row.guild_id = int(guild_id)
+        row.user_id = int(user_id)
+        row.business_key = str(business_key)
+        row.manager_name = (str(manager_name).strip() or "Manager")[:64]
+        row.rarity = norm_rarity
+        row.runtime_bonus_hours = runtime_bonus
+        row.auto_restart_charges = auto_restart
+        row.profit_bonus_bp = profit_bp
+        row.special_json = {}
+        row.is_active = True
+        await session.flush()
 
     if charge_silver:
         wallet.silver -= hire_cost
