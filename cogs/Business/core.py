@@ -557,18 +557,8 @@ def _prestige_config_for(defn: BusinessDef) -> PrestigeConfig:
 
 
 def _prestige_cost(defn: BusinessDef, prestige: int) -> int:
-    capped_level = max_stored_level_for_prestige(prestige)
-    capped_hourly_income = _effective_base_income(defn, level=capped_level, prestige=prestige)
     config = _prestige_config_for(defn)
-    return prestige_cost(
-        config=PrestigeConfig(
-            base_cost=config.base_cost,
-            growth_rate=config.growth_rate,
-            revenue_per_hour=int(capped_hourly_income),
-            revenue_hours_multiplier=int(defn.prestige_revenue_hours),
-        ),
-        current_prestige=prestige,
-    )
+    return prestige_cost(config=config, current_prestige=prestige)
 
 
 def _upgrade_cost(defn: BusinessDef, level: int) -> int:

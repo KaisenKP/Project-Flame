@@ -64,11 +64,6 @@ def prestige_multiplier_display(prestige: int) -> str:
 
 def prestige_cost(*, config: PrestigeConfig, current_prestige: int) -> int:
     p = clamp_prestige(current_prestige)
-    revenue_per_hour = max(int(config.revenue_per_hour), 0)
-    revenue_hours_multiplier = max(int(config.revenue_hours_multiplier), 0)
-    if revenue_per_hour > 0 and revenue_hours_multiplier > 0:
-        return max(revenue_per_hour * revenue_hours_multiplier, 1)
-
     base_cost = max(int(config.base_cost), 0)
     flat_step = 25_000
     cost = base_cost + (flat_step * p)
