@@ -15,7 +15,7 @@ from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import select, text
 
-from db.models import LootboxInventoryRow, WalletRow
+from db.models import LootboxInventoryRow, WalletRow, XpRow
 from services.db import sessions
 from services.users import ensure_user_rows
 from services.vip import is_vip_member
@@ -105,6 +105,7 @@ class DailyReward:
     xp: int
     bonus_silver: int
     bonus_xp: int
+    level_multiplier: int
     streak: int
     xp_mult: float
     milestone_hit: bool
@@ -876,6 +877,17 @@ class DailyCog(commands.Cog):
                     session.add(wallet)
                     await session.flush()
 
+                xp_row = await session.scalar(
+                    select(XpRow).where(
+                        XpRow.guild_id == guild_id,
+                        XpRow.user_id == user_id,
+                    )
+                )
+                level_multiplier = max(int(getattr(xp_row, "level_cached", 1) or 1), 1)
+
+                silver *= int(level_multiplier)
+                bonus_silver *= int(level_multiplier)
+
                 wallet.silver += int(silver)
                 if hasattr(wallet, "silver_earned"):
                     wallet.silver_earned += int(max(silver, 0))
@@ -929,6 +941,7 @@ class DailyCog(commands.Cog):
             xp=xp,
             bonus_silver=bonus_silver,
             bonus_xp=bonus_xp,
+            level_multiplier=level_multiplier,
             streak=next_streak,
             xp_mult=xp_mult,
             milestone_hit=milestone_hit,
@@ -956,6 +969,7 @@ class DailyCog(commands.Cog):
         embed.add_field(name="🧠 XP", value=f"**+{_fmt_int(reward.xp)}**", inline=True)
 
         embed.add_field(name="📈 XP Mult", value=f"**x{reward.xp_mult:.1f}**", inline=True)
+        embed.add_field(name="🆙 Level Mult", value=f"**x{reward.level_multiplier}**", inline=True)
         embed.add_field(name="✨ VIP Bonus", value="**2x**" if vip else "—", inline=True)
 
         embed.add_field(
