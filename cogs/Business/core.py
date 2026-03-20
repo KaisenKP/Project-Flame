@@ -1590,7 +1590,8 @@ async def start_business_run(
         message=(
             f"Started **{defn.emoji} {defn.name}**.\n"
             f"Runtime: **{total_runtime_hours}h**\n"
-            f"Projected hourly profit: **{hourly_profit:,}/hr**"
+            f"Hourly profit: **{hourly_profit:,}/hr**\n"
+            f"Projected run profit: **{(hourly_profit * total_runtime_hours):,} per run**"
         ),
         snapshot=hub,
         manage_snapshot=manage,

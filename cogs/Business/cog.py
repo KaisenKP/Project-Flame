@@ -579,6 +579,14 @@ def _slot_text(used: int, total: int) -> str:
     return f"{_fmt_int(used)}/{_fmt_int(total)}"
 
 
+def _estimated_cycle_hours_for_card(card: BusinessCard) -> int:
+    if getattr(card, "running", False):
+        return max(int(getattr(card, "runtime_remaining_hours", 0) or 0), 1)
+    if getattr(card, "key", "") == "shipping_company":
+        return 8
+    return 4
+
+
 def _safe_str(v: object, fallback: str = "Unknown") -> str:
     try:
         s = str(v).strip()
@@ -777,9 +785,11 @@ def _build_hub_embed(
     for c in owned_cards[:10]:
         state = "Running" if c.running else "Stopped"
         remaining = f"{_fmt_int(c.runtime_remaining_hours)}h" if c.running else "—"
+        approx_runtime = _estimated_cycle_hours_for_card(c)
+        cycle_profit = int(c.hourly_profit) * approx_runtime
         rows.append(
             f"{c.emoji} **{c.name}** • Lvl `{_fmt_int(c.level)}`\n"
-            f"`Status` **{state}** • `Time Left` `{remaining}` • `Profit` `{_fmt_int(c.hourly_profit)}/hr`"
+            f"`Status` **{state}** • `Time Left` `{remaining}` • `Profit` `{_fmt_int(c.hourly_profit)}/hr` • `Run` `{_fmt_int(cycle_profit)}`"
         )
 
     e.add_field(name="Overview", value="\n\n".join(rows), inline=False)
@@ -862,10 +872,13 @@ def _build_run_menu_embed(
     lines: list[str] = []
     for c in owned[:25]:
         runtime_txt = f"{_fmt_int(c.runtime_remaining_hours)}h left" if c.running else "Ready to start"
+        approx_runtime = _estimated_cycle_hours_for_card(c)
+        cycle_profit = int(c.hourly_profit) * approx_runtime
         lines.append(
             f"{c.emoji} **{c.name}**\n"
             f"└ {_status_badge(c.running, c.owned)}\n"
             f"└ Income: `{_fmt_int(c.hourly_profit)}/hr`\n"
+            f"└ Run Profit: `{_fmt_int(cycle_profit)} per run`\n"
             f"└ ⏱️ {runtime_txt}"
         )
 
@@ -901,10 +914,12 @@ def _build_manage_menu_embed(
 
     lines: list[str] = []
     for c in owned[:25]:
+        cycle_profit = int(c.hourly_profit) * _estimated_cycle_hours_for_card(c)
         lines.append(
             f"{c.emoji} **{c.name}**\n"
             f"└ Level `{_fmt_int(c.visible_level)}/{_fmt_int(c.max_level)}` • Prestige `{_fmt_int(c.prestige)}`\n"
             f"└ Total Progress `{_fmt_int(c.total_visible_level)}`\n"
+            f"└ Profit `{_fmt_int(c.hourly_profit)}/hr` • Run `{_fmt_int(cycle_profit)}`\n"
             f"└ Workers `{_slot_text(c.worker_slots_used, c.worker_slots_total)}` • Managers `{_slot_text(c.manager_slots_used, c.manager_slots_total)}`"
         )
 
@@ -943,6 +958,7 @@ def _build_business_detail_embed(
         name="Income",
         value=(
             f"Current Profit: `{_fmt_int(snap.hourly_profit)}/hr`\n"
+            f"Run Profit: `{_fmt_int(projected_total)} per run`\n"
             f"Base Profit: `{_fmt_int(snap.base_hourly_income)}/hr`\n"
             f"Upgrade Cost: `{_fmt_int(snap.upgrade_cost or 0)} Silver`\n"
             f"Prestige Cost: `{_fmt_int(snap.prestige_cost or 0)} Silver`\n"
