@@ -125,11 +125,14 @@ def _pct(n: int, d: int) -> int:
     return int(min(100, (n * 100) // d))
 
 
-def _effective_work_cooldown_seconds(*, base_seconds: float, work_level: int) -> float:
+def _effective_work_cooldown_seconds(*, base_seconds: float, work_level: int, vip: bool) -> float:
     # 1% cooldown reduction per work level, capped at 50% reduction.
     reduction_bp = clamp_int(max(int(work_level), 1) - 1, 0, 50) * 100
     scale = max(0.5, 1.0 - (reduction_bp / 10_000.0))
-    return max(1.0, float(base_seconds) * scale)
+    effective_seconds = max(1.0, float(base_seconds) * scale)
+    if vip:
+        effective_seconds = min(effective_seconds, 10.0)
+    return effective_seconds
 
 
 # -------------------------
@@ -471,6 +474,7 @@ class WorkCog(commands.Cog):
                 effective_cd = _effective_work_cooldown_seconds(
                     base_seconds=float(d.cooldown_seconds),
                     work_level=int(snap_before.level),
+                    vip=vip,
                 )
                 cd_key = (guild_id, user_id, key)
                 ready_at = _COOLDOWNS.get(cd_key, 0.0)
