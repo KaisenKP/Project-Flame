@@ -50,6 +50,19 @@ from datetime import datetime, timedelta, timezone
 import random
 from typing import Dict, List, Optional, Sequence
 
+from .prestige import (
+    MAX_BUSINESS_PRESTIGE,
+    PrestigeConfig,
+    at_level_cap,
+    bulk_option_for,
+    clamp_prestige,
+    max_stored_level_for_prestige,
+    max_visible_level_for_prestige,
+    prestige_cost,
+    prestige_multiplier,
+    visible_level_for,
+)
+
 from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
 
@@ -75,6 +88,8 @@ class BusinessDef:
     cost_silver: int
     base_hourly_income: int
     base_upgrade_cost: int
+    prestige_base_cost: int
+    prestige_growth_rate: str
     flavor: str = ""
     image_url: Optional[str] = None
     banner_url: Optional[str] = None
@@ -88,6 +103,8 @@ class BusinessCard:
     owned: bool
     running: bool
     level: int
+    visible_level: int
+    max_level: int
     prestige: int
     hourly_profit: int
     runtime_remaining_hours: int
@@ -119,10 +136,18 @@ class BusinessManageSnapshot:
     owned: bool
     running: bool
     level: int
+    visible_level: int
+    max_level: int
     prestige: int
     hourly_profit: int
     base_hourly_income: int
     upgrade_cost: Optional[int]
+    prestige_cost: Optional[int]
+    can_prestige: bool
+    prestige_multiplier: int
+    bulk_upgrade_1_unlocked: bool
+    bulk_upgrade_5_unlocked: bool
+    bulk_upgrade_10_unlocked: bool
     runtime_remaining_hours: int
     total_runtime_hours: int
     worker_slots_used: int
@@ -228,6 +253,8 @@ _BUSINESS_DEFS: tuple[BusinessDef, ...] = (
         cost_silver=100_000,
         base_hourly_income=1_000,
         base_upgrade_cost=25_000,
+        prestige_base_cost=100_000,
+        prestige_growth_rate="2.5",
         flavor="Your first proper business. Classy, simple, and steady.",
     ),
     BusinessDef(
@@ -238,6 +265,8 @@ _BUSINESS_DEFS: tuple[BusinessDef, ...] = (
         cost_silver=250_000,
         base_hourly_income=1_800,
         base_upgrade_cost=60_000,
+        prestige_base_cost=180_000,
+        prestige_growth_rate="2.42",
         flavor="Quiet money. Dirt, sweat, and a suspicious number of chickens.",
     ),
     BusinessDef(
@@ -248,6 +277,8 @@ _BUSINESS_DEFS: tuple[BusinessDef, ...] = (
         cost_silver=600_000,
         base_hourly_income=3_500,
         base_upgrade_cost=150_000,
+        prestige_base_cost=320_000,
+        prestige_growth_rate="2.38",
         flavor="Half the money comes from vibes. The other half from poor decisions.",
     ),
     BusinessDef(
@@ -258,6 +289,8 @@ _BUSINESS_DEFS: tuple[BusinessDef, ...] = (
         cost_silver=1_200_000,
         base_hourly_income=6_500,
         base_upgrade_cost=300_000,
+        prestige_base_cost=550_000,
+        prestige_growth_rate="2.34",
         flavor="Loud, efficient, and probably violating something somewhere.",
     ),
     BusinessDef(
@@ -268,6 +301,8 @@ _BUSINESS_DEFS: tuple[BusinessDef, ...] = (
         cost_silver=2_500_000,
         base_hourly_income=10_000,
         base_upgrade_cost=625_000,
+        prestige_base_cost=900_000,
+        prestige_growth_rate="2.31",
         flavor="A machine that legally weaponizes temptation.",
     ),
     BusinessDef(
@@ -278,6 +313,8 @@ _BUSINESS_DEFS: tuple[BusinessDef, ...] = (
         cost_silver=5_000_000,
         base_hourly_income=18_000,
         base_upgrade_cost=1_250_000,
+        prestige_base_cost=1_500_000,
+        prestige_growth_rate="2.28",
         flavor="Buzzwords, dashboards, and someone definitely saying synergy unironically.",
     ),
     BusinessDef(
@@ -288,6 +325,8 @@ _BUSINESS_DEFS: tuple[BusinessDef, ...] = (
         cost_silver=9_000_000,
         base_hourly_income=30_000,
         base_upgrade_cost=2_250_000,
+        prestige_base_cost=2_400_000,
+        prestige_growth_rate="2.24",
         flavor="Massive cargo, massive delays, massive invoices.",
     ),
     BusinessDef(
@@ -298,6 +337,8 @@ _BUSINESS_DEFS: tuple[BusinessDef, ...] = (
         cost_silver=15_000_000,
         base_hourly_income=45_000,
         base_upgrade_cost=3_750_000,
+        prestige_base_cost=3_800_000,
+        prestige_growth_rate="2.21",
         flavor="Customer service with a smile and a silent internal scream.",
     ),
     BusinessDef(
@@ -308,6 +349,8 @@ _BUSINESS_DEFS: tuple[BusinessDef, ...] = (
         cost_silver=25_000_000,
         base_hourly_income=70_000,
         base_upgrade_cost=6_250_000,
+        prestige_base_cost=6_000_000,
+        prestige_growth_rate="2.18",
         flavor="Drama in front of the camera and ten times more behind it.",
     ),
     BusinessDef(
@@ -318,6 +361,8 @@ _BUSINESS_DEFS: tuple[BusinessDef, ...] = (
         cost_silver=50_000_000,
         base_hourly_income=120_000,
         base_upgrade_cost=12_500_000,
+        prestige_base_cost=9_500_000,
+        prestige_growth_rate="2.15",
         flavor="Mining rocks in space because Earth was apparently too easy.",
     ),
 )
@@ -445,26 +490,19 @@ def _manager_slots_for_level(level: int) -> int:
 def _effective_base_income(defn: BusinessDef, *, level: int, prestige: int) -> int:
     value = int(defn.base_hourly_income)
     value = _apply_bp(value, _upgrade_percent_bp_for_level(level))
-    value = _apply_bp(value, _prestige_bonus_bp(prestige))
-    return max(value, 0)
+    value *= prestige_multiplier(prestige)
+    return max(int(value), 0)
 
 
-def _prestige_bonus_bp(prestige: int) -> int:
-    # I: +20%, II: +35%, III: +50%, IV: +65%, V: +80%
-    p = max(int(prestige), 0)
-    if p <= 0:
-        return 0
-    table = {
-        1: 2000,
-        2: 3500,
-        3: 5000,
-        4: 6500,
-        5: 8000,
-    }
-    if p in table:
-        return table[p]
-    # after 5, keep scaling gently
-    return 8000 + ((p - 5) * 1000)
+def _prestige_config_for(defn: BusinessDef) -> PrestigeConfig:
+    return PrestigeConfig(
+        base_cost=int(defn.prestige_base_cost),
+        growth_rate=str(defn.prestige_growth_rate),
+    )
+
+
+def _prestige_cost(defn: BusinessDef, prestige: int) -> int:
+    return prestige_cost(config=_prestige_config_for(defn), current_prestige=prestige)
 
 
 def _upgrade_cost(defn: BusinessDef, level: int) -> int:
@@ -946,8 +984,8 @@ async def _calc_display_hourly_profit_for_owned_business(
     We are not doing deep worker synergies yet.
     That comes later when the staffing layer gets spicy.
     """
-    level = int(ownership.level or 0)
-    prestige = int(ownership.prestige or 0)
+    level = max(int(ownership.level or 0), 0)
+    prestige = clamp_prestige(int(ownership.prestige or 0))
 
     base_after_scaling = _effective_base_income(defn, level=level, prestige=prestige)
 
@@ -1004,6 +1042,8 @@ async def _build_business_card_for_user(
             owned=False,
             running=False,
             level=0,
+            visible_level=visible_level_for(0),
+            max_level=max_visible_level_for_prestige(0),
             prestige=0,
             hourly_profit=int(defn.base_hourly_income),
             runtime_remaining_hours=0,
@@ -1044,6 +1084,8 @@ async def _build_business_card_for_user(
         owned=True,
         running=running,
         level=level,
+        visible_level=visible_level_for(level),
+        max_level=max_visible_level_for_prestige(prestige),
         prestige=prestige,
         hourly_profit=hourly_profit,
         runtime_remaining_hours=runtime_remaining_hours,
@@ -1127,6 +1169,7 @@ async def get_business_manage_snapshot(
     if ownership is None:
         level = 0
         prestige = 0
+        max_level = max_visible_level_for_prestige(prestige)
         worker_used = 0
         manager_used = 0
         runtime_total = _base_runtime_hours_for_key(defn.key)
@@ -1145,10 +1188,18 @@ async def get_business_manage_snapshot(
             owned=False,
             running=False,
             level=level,
+            visible_level=visible_level_for(level),
+            max_level=max_level,
             prestige=prestige,
             hourly_profit=hourly_profit,
             base_hourly_income=int(defn.base_hourly_income),
             upgrade_cost=int(_upgrade_cost(defn, level)),
+            prestige_cost=int(_prestige_cost(defn, prestige)),
+            can_prestige=at_level_cap(stored_level=level, prestige=prestige),
+            prestige_multiplier=prestige_multiplier(prestige),
+            bulk_upgrade_1_unlocked=True,
+            bulk_upgrade_5_unlocked=bulk_option_for(prestige, 5).unlocked,
+            bulk_upgrade_10_unlocked=bulk_option_for(prestige, 10).unlocked,
             runtime_remaining_hours=runtime_remaining,
             total_runtime_hours=runtime_total,
             worker_slots_used=worker_used,
@@ -1160,8 +1211,8 @@ async def get_business_manage_snapshot(
             notes=notes,
         )
 
-    level = int(ownership.level or 0)
-    prestige = int(ownership.prestige or 0)
+    level = max(int(ownership.level or 0), 0)
+    prestige = clamp_prestige(int(ownership.prestige or 0))
 
     worker_used = await _count_active_workers_for_ownership(
         session,
@@ -1204,10 +1255,18 @@ async def get_business_manage_snapshot(
         owned=True,
         running=running,
         level=level,
+        visible_level=visible_level_for(level),
+        max_level=max_level,
         prestige=prestige,
         hourly_profit=hourly_profit,
         base_hourly_income=int(defn.base_hourly_income),
-        upgrade_cost=int(_upgrade_cost(defn, level)),
+        upgrade_cost=None if at_level_cap(stored_level=level, prestige=prestige) else int(_upgrade_cost(defn, level)),
+        prestige_cost=int(_prestige_cost(defn, prestige)) if at_level_cap(stored_level=level, prestige=prestige) and prestige < MAX_BUSINESS_PRESTIGE else None,
+        can_prestige=at_level_cap(stored_level=level, prestige=prestige) and prestige < MAX_BUSINESS_PRESTIGE,
+        prestige_multiplier=prestige_multiplier(prestige),
+        bulk_upgrade_1_unlocked=True,
+        bulk_upgrade_5_unlocked=bulk_option_for(prestige, 5).unlocked,
+        bulk_upgrade_10_unlocked=bulk_option_for(prestige, 10).unlocked,
         runtime_remaining_hours=runtime_remaining,
         total_runtime_hours=runtime_total,
         worker_slots_used=worker_used,
@@ -1554,92 +1613,160 @@ async def upgrade_business(
     guild_id: int,
     user_id: int,
     business_key: str,
+    quantity: int = 1,
 ) -> BusinessActionResult:
     defn = _def_for_key(business_key)
     if defn is None:
-        return BusinessActionResult(
-            ok=False,
-            message="That business does not exist.",
-        )
+        return BusinessActionResult(ok=False, message="That business does not exist.")
 
-    ownership = await _get_ownership_row(
-        session,
-        guild_id=guild_id,
-        user_id=user_id,
-        business_key=business_key,
-    )
+    ownership = await _get_ownership_row(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
     if ownership is None:
         hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
-        return BusinessActionResult(
-            ok=False,
-            message=f"You do not own **{defn.name}** yet.",
-            snapshot=hub,
-        )
+        return BusinessActionResult(ok=False, message=f"You do not own **{defn.name}** yet.", snapshot=hub)
 
-    old_level = int(ownership.level or 0)
-    old_hourly = await _calc_display_hourly_profit_for_owned_business(
-        session,
-        ownership=ownership,
-        defn=defn,
-    )
-    old_runtime_hours = await _calc_total_runtime_hours_for_owned_business(
-        session,
-        ownership=ownership,
-        defn=defn,
-    )
+    requested_quantity = max(int(quantity), 1)
+    old_level = max(int(ownership.level or 0), 0)
+    old_prestige = clamp_prestige(int(ownership.prestige or 0))
+    old_visible_level = visible_level_for(old_level)
 
-    cost = int(_upgrade_cost(defn, old_level))
-    wallet = await _get_wallet(session, guild_id=guild_id, user_id=user_id)
-    balance = int(wallet.silver or 0)
-    if balance < cost:
-        short = cost - balance
+    if at_level_cap(stored_level=old_level, prestige=old_prestige):
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
         hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
-        manage = await get_business_manage_snapshot(
-            session,
-            guild_id=guild_id,
-            user_id=user_id,
-            business_key=business_key,
-        )
         return BusinessActionResult(
             ok=False,
             message=(
-                f"You need **{cost:,} Silver** to upgrade **{defn.name}**.\n"
-                f"You are short by **{short:,} Silver**."
+                f"**{defn.name}** is capped at **Level {max_visible_level_for_prestige(old_prestige)}** for Prestige **{old_prestige}**.\n"
+                "Prestige the business to unlock the next 10 levels."
             ),
             snapshot=hub,
             manage_snapshot=manage,
         )
 
-    wallet.silver -= cost
-    if hasattr(wallet, "silver_spent"):
-        wallet.silver_spent += cost
+    wallet = await _get_wallet(session, guild_id=guild_id, user_id=user_id)
+    balance = int(wallet.silver or 0)
+    unlock = bulk_option_for(old_prestige, requested_quantity)
+    if requested_quantity > 1 and not unlock.unlocked:
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        needed_prestige = 3 if requested_quantity == 5 else 10
+        return BusinessActionResult(ok=False, message=f"Upgrade x{requested_quantity} unlocks at Prestige **{needed_prestige}**.", snapshot=hub, manage_snapshot=manage)
 
-    ownership.level = old_level + 1
+    cap_level = max_stored_level_for_prestige(old_prestige)
+    affordable_cost = 0
+    actual_upgrades = 0
+    for lvl in range(old_level, min(old_level + requested_quantity, cap_level + 1)):
+        if lvl > cap_level - 1:
+            break
+        cost = int(_upgrade_cost(defn, lvl))
+        if balance < affordable_cost + cost:
+            break
+        affordable_cost += cost
+        actual_upgrades += 1
+
+    if actual_upgrades <= 0:
+        next_cost = int(_upgrade_cost(defn, old_level))
+        short = max(next_cost - balance, 0)
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        return BusinessActionResult(ok=False, message=f"You need **{next_cost:,} Silver** to upgrade **{defn.name}**.\nYou are short by **{short:,} Silver**.", snapshot=hub, manage_snapshot=manage)
+
+    old_hourly = await _calc_display_hourly_profit_for_owned_business(session, ownership=ownership, defn=defn)
+    old_runtime_hours = await _calc_total_runtime_hours_for_owned_business(session, ownership=ownership, defn=defn)
+
+    wallet.silver -= affordable_cost
+    if hasattr(wallet, "silver_spent"):
+        wallet.silver_spent += affordable_cost
+    ownership.level = old_level + actual_upgrades
     if hasattr(ownership, "total_spent"):
-        ownership.total_spent = int(ownership.total_spent or 0) + cost
+        ownership.total_spent = int(ownership.total_spent or 0) + affordable_cost
 
     await session.flush()
-
     hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
-    manage = await get_business_manage_snapshot(
-        session,
-        guild_id=guild_id,
-        user_id=user_id,
-        business_key=business_key,
-    )
+    manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
 
-    new_level = int(ownership.level or 0)
-    new_hourly = old_hourly
-    new_runtime_hours = old_runtime_hours
-    if manage is not None:
-        new_hourly = int(manage.hourly_profit)
-        new_runtime_hours = int(manage.total_runtime_hours)
+    new_level = max(int(ownership.level or 0), 0)
+    new_visible_level = visible_level_for(new_level)
+    new_hourly = int(manage.hourly_profit) if manage is not None else old_hourly
+    new_runtime_hours = int(manage.total_runtime_hours) if manage is not None else old_runtime_hours
+    requested_text = f"x{requested_quantity}" if requested_quantity > 1 else "x1"
+    landed_at_cap = at_level_cap(stored_level=new_level, prestige=old_prestige)
+    cap_suffix = "\nLevel cap reached. Prestige to keep scaling." if landed_at_cap else ""
 
     return BusinessActionResult(
         ok=True,
         message=(
-            f"Upgraded **{defn.emoji} {defn.name}** from **Level {old_level}** to **Level {new_level}** "
-            f"for **{cost:,} Silver**.\n"
+            f"Upgraded **{defn.emoji} {defn.name}** {requested_text} from **Level {old_visible_level}** to **Level {new_visible_level}** "
+            f"for **{affordable_cost:,} Silver**.\n"
+            f"Hourly profit: **{old_hourly:,}/hr** → **{new_hourly:,}/hr**\n"
+            f"Run projection: **{old_runtime_hours:,}h / {old_hourly * old_runtime_hours:,} Silver**"
+            f" → **{new_runtime_hours:,}h / {new_hourly * new_runtime_hours:,} Silver**"
+            f"{cap_suffix}"
+        ),
+        snapshot=hub,
+        manage_snapshot=manage,
+    )
+
+
+async def prestige_business(
+    session,
+    *,
+    guild_id: int,
+    user_id: int,
+    business_key: str,
+) -> BusinessActionResult:
+    defn = _def_for_key(business_key)
+    if defn is None:
+        return BusinessActionResult(ok=False, message="That business does not exist.")
+
+    ownership = await _get_ownership_row(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    if ownership is None:
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        return BusinessActionResult(ok=False, message=f"You do not own **{defn.name}** yet.", snapshot=hub)
+
+    current_level = max(int(ownership.level or 0), 0)
+    current_prestige = clamp_prestige(int(ownership.prestige or 0))
+    current_visible_level = visible_level_for(current_level)
+    current_max_level = max_visible_level_for_prestige(current_prestige)
+    if not at_level_cap(stored_level=current_level, prestige=current_prestige):
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        return BusinessActionResult(ok=False, message=f"Reach **Level {current_max_level}** before prestiging **{defn.name}**.", snapshot=hub, manage_snapshot=manage)
+    if current_prestige >= MAX_BUSINESS_PRESTIGE:
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        return BusinessActionResult(ok=False, message=f"**{defn.name}** is already at the max Prestige **{MAX_BUSINESS_PRESTIGE}**.", snapshot=hub, manage_snapshot=manage)
+
+    cost = int(_prestige_cost(defn, current_prestige))
+    wallet = await _get_wallet(session, guild_id=guild_id, user_id=user_id)
+    balance = int(wallet.silver or 0)
+    if balance < cost:
+        short = cost - balance
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        return BusinessActionResult(ok=False, message=f"You need **{cost:,} Silver** to prestige **{defn.name}**.\nYou are short by **{short:,} Silver**.", snapshot=hub, manage_snapshot=manage)
+
+    old_hourly = await _calc_display_hourly_profit_for_owned_business(session, ownership=ownership, defn=defn)
+    old_runtime_hours = await _calc_total_runtime_hours_for_owned_business(session, ownership=ownership, defn=defn)
+    wallet.silver -= cost
+    if hasattr(wallet, "silver_spent"):
+        wallet.silver_spent += cost
+    ownership.level = 0
+    ownership.prestige = current_prestige + 1
+    if hasattr(ownership, "total_spent"):
+        ownership.total_spent = int(ownership.total_spent or 0) + cost
+
+    await session.flush()
+    hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+    manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    new_prestige = clamp_prestige(int(ownership.prestige or 0))
+    new_hourly = int(manage.hourly_profit) if manage is not None else old_hourly
+    new_runtime_hours = int(manage.total_runtime_hours) if manage is not None else old_runtime_hours
+    return BusinessActionResult(
+        ok=True,
+        message=(
+            f"Prestiged **{defn.emoji} {defn.name}** from **Prestige {current_prestige}** to **Prestige {new_prestige}** for **{cost:,} Silver**.\n"
+            f"Visible level reset: **Level {current_visible_level}** → **Level 1**\n"
+            f"Output multiplier: **x{prestige_multiplier(current_prestige):,}** → **x{prestige_multiplier(new_prestige):,}**\n"
             f"Hourly profit: **{old_hourly:,}/hr** → **{new_hourly:,}/hr**\n"
             f"Run projection: **{old_runtime_hours:,}h / {old_hourly * old_runtime_hours:,} Silver**"
             f" → **{new_runtime_hours:,}h / {new_hourly * new_runtime_hours:,} Silver**"
