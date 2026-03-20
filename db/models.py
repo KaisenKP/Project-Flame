@@ -453,6 +453,76 @@ class UserJobSlotRow(Base):
     assigned_at: Mapped[datetime] = mapped_column(TS, server_default=NOW, nullable=False)
 
 
+class UserJobHubSlotRow(Base):
+    __tablename__ = "user_job_hub_slots"
+    __table_args__ = (
+        UniqueConstraint("guild_id", "user_id", "slot_index", name="uq_user_job_hub_slots"),
+        Index("ix_user_job_hub_slots_user", "guild_id", "user_id", "slot_index"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    slot_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_unlocked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    job_key: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
+    selected_tool_key: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    last_switched_at: Mapped[Optional[datetime]] = mapped_column(TS, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        TS,
+        server_default=NOW,
+        onupdate=NOW,
+        nullable=False,
+    )
+
+
+class UserJobHubProgressRow(Base):
+    __tablename__ = "user_job_hub_progress"
+    __table_args__ = (
+        UniqueConstraint("guild_id", "user_id", "slot_index", "job_key", name="uq_user_job_hub_progress"),
+        Index("ix_user_job_hub_progress_user", "guild_id", "user_id", "slot_index"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    slot_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    job_key: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    level: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    prestige: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    xp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_xp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        TS,
+        server_default=NOW,
+        onupdate=NOW,
+        nullable=False,
+    )
+
+
+class UserJobHubToolRow(Base):
+    __tablename__ = "user_job_hub_tools"
+    __table_args__ = (
+        UniqueConstraint("guild_id", "user_id", "slot_index", "job_key", "tool_key", name="uq_user_job_hub_tools"),
+        Index("ix_user_job_hub_tools_user", "guild_id", "user_id", "slot_index"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    slot_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    job_key: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    tool_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    level: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        TS,
+        server_default=NOW,
+        onupdate=NOW,
+        nullable=False,
+    )
+
+
 class JobProgressRow(Base):
     __tablename__ = "job_progress"
     __table_args__ = (

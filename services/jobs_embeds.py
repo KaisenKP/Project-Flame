@@ -1,18 +1,21 @@
-# services/jobs_embeds.py
 from __future__ import annotations
 
 from typing import Optional
 
 import discord
 
-from services.jobs_core import (
-    JOB_DEFS,
-    JOB_SWITCH_COST,
-    JOB_UNLOCK_LEVEL,
-    JobCategory,
-    category_fail_bp,
-    fmt_int,
+from services.job_hub import (
+    SlotSnapshot,
+    income_range_for,
+    perk_defs_for,
+    prestige_preview,
+    slot_label,
+    stamina_cost_preview,
+    tool_bonus_snapshot,
+    tool_defs_for,
+    unlocked_perks,
 )
+from services.jobs_core import JOB_DEFS, JOB_SWITCH_COST, JOB_UNLOCK_LEVEL, JobCategory, category_fail_bp, fmt_int
 
 VIP_WORK_COOLDOWN_SECONDS = 10
 
@@ -27,193 +30,107 @@ def work_color(category: JobCategory) -> discord.Color:
     return discord.Color.blurple()
 
 
-def _equipped_line(equipped: Optional[str], equipped_keys: Optional[list[str]] = None) -> str:
-    if equipped_keys:
-        names = []
-        for key in equipped_keys:
-            d = JOB_DEFS.get(key)
-            names.append(d.name if d else key)
-        lines = ["✅ Equipped Jobs:"]
-        lines.extend(f"{idx+1}. **{name}**" for idx, name in enumerate(names))
-        return "\n".join(lines)
-    if not equipped:
-        return "No job equipped yet."
-    d = JOB_DEFS.get(equipped)
-    if d:
-        return f"✅ Equipped: **{d.name}** (`{d.key}`)"
-    return f"✅ Equipped: `{equipped}`"
-
-
-def job_list_lines(*, vip: bool, want_vip: bool, equipped: Optional[str]) -> list[str]:
-    lines: list[str] = []
-
-    defs = sorted(JOB_DEFS.values(), key=lambda d: (d.vip_only, d.name.lower()))
-    for d in defs:
-        if bool(d.vip_only) != bool(want_vip):
-            continue
-
-        marker = "✅ " if equipped == d.key else ""
-        unlock = JOB_UNLOCK_LEVEL[d.category]
-        cost = JOB_SWITCH_COST[d.category]
-
-        cooldown_seconds = min(int(d.cooldown_seconds), VIP_WORK_COOLDOWN_SECONDS) if vip else int(d.cooldown_seconds)
-        cooldown = f"{fmt_int(cooldown_seconds)}s"
-        if d.vip_only and not vip:
-            lines.append(f"{marker}🔒 **{d.name}** (`{d.key}`) • VIP")
-        else:
-            lines.append(
-                f"{marker}• **{d.name}** (`{d.key}`) • {d.category.value} • unlock **{unlock}** • switch **{fmt_int(cost)}** • cd **{cooldown}**"
-            )
-
-    return lines
-
-
-def make_panel_embed(*, user: discord.abc.User, vip: bool, page: str, equipped: Optional[str], equipped_keys: Optional[list[str]] = None) -> discord.Embed:
+def make_job_hub_embed(*, user: discord.abc.User, vip: bool, slot_snap: SlotSnapshot, section: str) -> discord.Embed:
     color = discord.Color.gold() if vip else discord.Color.blurple()
+    title = f"Job Hub • {slot_label(slot_snap.slot_index)}"
+    if slot_snap.is_active:
+        title += " • Active"
 
-    desc_lines = [
-        _equipped_line(equipped, equipped_keys),
-        "",
-        "Pick up to 3 jobs in the dropdown to build your loadout.",
-        "Equip with the **Equip Selected** button.",
-        "Each **/work** uses the first slot, then rotates to the next slot.",
-        "",
-        "**Unlocks + Switch Costs**",
-        f"• Hard: unlock lvl {JOB_UNLOCK_LEVEL[JobCategory.HARD]}, switch {fmt_int(JOB_SWITCH_COST[JobCategory.HARD])}",
-        f"• Stable: unlock lvl {JOB_UNLOCK_LEVEL[JobCategory.STABLE]}, switch {fmt_int(JOB_SWITCH_COST[JobCategory.STABLE])}",
-        f"• Easy: unlock lvl {JOB_UNLOCK_LEVEL[JobCategory.EASY]}, switch {fmt_int(JOB_SWITCH_COST[JobCategory.EASY])}",
-        "",
-        "**Progression**",
-        "• Each job has its own levels, titles, and prestige.",
-        "• Your job title upgrades when you prestige.",
-        "• **/work** awards user XP + job XP.",
-        "• Hard jobs pay higher but carry bigger fail chance.",
-    ]
+    if not slot_snap.is_unlocked:
+        embed = discord.Embed(title=title, description="This slot is locked. VIP unlocks the third slot instantly.", color=discord.Color.orange())
+        embed.set_footer(text="Use the slot buttons to browse your other job loadouts.")
+        return embed
+
+    if not slot_snap.job_key:
+        embed = discord.Embed(title=title, description="No job assigned yet. Use **Switch Job** to claim a role for this slot.", color=color)
+        embed.add_field(name="What this slot stores", value="• Job assignment\n• Level & prestige\n• Tool loadout\n• Perk unlocks", inline=False)
+        embed.set_footer(text="Job Hub keeps each slot fully independent.")
+        return embed
+
+    d = JOB_DEFS[slot_snap.job_key]
+    progress = slot_snap.progress
+    assert progress is not None
+    income_bp, xp_bp, stamina_bp, tool_name = tool_bonus_snapshot(slot_snap.job_key, slot_snap.selected_tool_key, slot_snap.tool_levels)
+    lo, hi = income_range_for(slot_snap.job_key, progress.level, progress.prestige, income_bp)
+    stamina_cost = stamina_cost_preview(slot_snap.job_key, progress.level, progress.prestige, stamina_bp)
+    unlocked, locked = unlocked_perks(slot_snap.job_key, progress.level)
+    xp_pct = int((progress.xp / max(progress.xp_needed, 1)) * 100)
+    prog_bar = "▰" * min(12, round(12 * progress.xp / max(progress.xp_needed, 1))) + "▱" * (12 - min(12, round(12 * progress.xp / max(progress.xp_needed, 1))))
 
     embed = discord.Embed(
-        title="Jobs Panel",
-        description="\n".join(desc_lines),
+        title=title,
+        description=f"**{d.name}**\nLevel **{progress.level}/{progress.level_cap}** • Prestige **{progress.prestige}**\n`{prog_bar}` **{xp_pct}%** ({fmt_int(progress.xp)}/{fmt_int(progress.xp_needed)} XP)",
         color=color,
     )
+    embed.set_author(name=str(user), icon_url=getattr(getattr(user, 'display_avatar', None), 'url', None))
 
-    if page == "vip":
-        lines = job_list_lines(vip=vip, want_vip=True, equipped=equipped)
-        embed.add_field(
-            name="VIP Jobs",
-            value="\n".join(lines) if lines else "No VIP jobs configured.",
-            inline=False,
-        )
-    else:
-        lines = job_list_lines(vip=vip, want_vip=False, equipped=equipped)
-        embed.add_field(
-            name="Standard Jobs",
-            value="\n".join(lines) if lines else "No standard jobs configured.",
-            inline=False,
-        )
+    if section == "overview":
+        buffs = [f"• Tool: **{tool_name or 'None'}**"]
+        if income_bp:
+            buffs.append(f"• Income: **+{income_bp / 100:.0f}%**")
+        if xp_bp:
+            buffs.append(f"• Job XP: **+{xp_bp / 100:.0f}%**")
+        if stamina_bp:
+            buffs.append(f"• Stamina efficiency: **+{stamina_bp / 100:.0f}%**")
+        if len(buffs) == 1:
+            buffs.append("• No active buffs yet")
+        embed.add_field(name="Overview", value=f"• Current job: **{d.name}**\n• Category: **{d.category.value.title()}**\n• Active perks: **{len(unlocked)}**\n• Selected tool: **{tool_name or 'Starter'}**", inline=False)
+        embed.add_field(name="Economy Fit", value=f"• Income range: **{fmt_int(lo)} - {fmt_int(hi)} Silver**\n• Stamina cost: **{fmt_int(stamina_cost)}**\n• Switch cost: **{fmt_int(JOB_SWITCH_COST[d.category])} Silver**", inline=True)
+        embed.add_field(name="Buffs & Multipliers", value="\n".join(buffs), inline=True)
+    elif section == "tools":
+        lines = []
+        for tool in tool_defs_for(slot_snap.job_key):
+            lvl = slot_snap.tool_levels.get(tool.key, 0)
+            marker = "✅" if slot_snap.selected_tool_key == tool.key else "•"
+            effects = []
+            if tool.income_bonus_bp:
+                effects.append(f"+{tool.income_bonus_bp/100:.0f}% income/lv")
+            if tool.xp_bonus_bp:
+                effects.append(f"+{tool.xp_bonus_bp/100:.0f}% xp/lv")
+            if tool.stamina_discount_bp:
+                effects.append(f"-{tool.stamina_discount_bp/100:.0f}% stamina/lv")
+            effects_txt = ", ".join(effects) if effects else "starter benefits"
+            lines.append(f"{marker} **{tool.name}** • Lv {lvl}\nCost: **{fmt_int(tool.cost * (lvl + 1))}** • {effects_txt}\n{tool.description}")
+        embed.add_field(name="Tools & Upgrades", value="\n\n".join(lines), inline=False)
+    elif section == "perks":
+        unlocked_lines = [f"✅ **{perk.name}** — {perk.description}" for perk in unlocked] or ["No perks unlocked yet."]
+        locked_lines = [f"🔒 **{perk.name}** at **Lv {perk.level_required}** — {perk.description}" for perk in locked] or ["All perks unlocked."]
+        embed.add_field(name="Unlocked", value="\n".join(unlocked_lines), inline=False)
+        embed.add_field(name="Locked", value="\n".join(locked_lines), inline=False)
+    elif section == "prestige":
+        current_mult, next_mult, cost = prestige_preview(slot_snap.job_key, progress)
+        embed.add_field(name="Prestige Preview", value=f"• Current earnings multiplier: **x{current_mult}**\n• Next earnings multiplier: **x{next_mult}**\n• Required level: **{progress.level_cap}**\n• Cost: **{fmt_int(cost)} Silver**", inline=False)
+        embed.add_field(name="Effects", value="Prestiging resets the slot level to 1, keeps the slot's job identity, and increases future earnings scaling.", inline=False)
+    elif section == "switch":
+        lines = []
+        for job in sorted(JOB_DEFS.values(), key=lambda item: item.name.lower()):
+            unlock = JOB_UNLOCK_LEVEL[job.category]
+            vip_lock = " • VIP" if job.vip_only else ""
+            selected = "✅ " if job.key == slot_snap.job_key else ""
+            lines.append(f"{selected}**{job.name}** — unlock **Lv {unlock}** • switch **{fmt_int(JOB_SWITCH_COST[job.category])}**{vip_lock}")
+        embed.add_field(name="Available Jobs", value="\n".join(lines[:25]), inline=False)
 
-    embed.add_field(
-        name="Quick Tips",
-        value="• Mix one stable job with one hard job for balanced income.\n"
-        "• Keep stamina tools stocked to sustain longer work sessions.\n"
-        "• Check `/job` often—cooldowns and costs differ by role.",
-        inline=False,
-    )
-
-    embed.set_footer(text="Use: /job • /work • /job_admin • /work_image_admin")
+    embed.set_footer(text="Buttons: slots • overview • switch • tools • perks • prestige")
     return embed
+
+
+# legacy helpers retained for compatibility
+
+def make_panel_embed(*, user: discord.abc.User, vip: bool, page: str, equipped: Optional[str], equipped_keys: Optional[list[str]] = None) -> discord.Embed:
+    description = "The legacy jobs panel has been replaced by Job Hub. Use the buttons below to manage slots, tools, perks, and prestige."
+    if equipped_keys:
+        description += "\n\nCurrent loadout: " + ", ".join(JOB_DEFS.get(key, None).name if JOB_DEFS.get(key) else key for key in equipped_keys)
+    return discord.Embed(title="Job Hub", description=description, color=discord.Color.gold() if vip else discord.Color.blurple())
 
 
 def make_job_info_embed(*, vip: bool, job_key: str, equipped: Optional[str]) -> discord.Embed:
     key = (job_key or "").strip().lower()
     d = JOB_DEFS.get(key)
-
     if d is None:
-        return discord.Embed(
-            title="Unknown job",
-            description=f"I don’t recognize `{key}`.",
-            color=discord.Color.red(),
-        )
-
-    if d.vip_only and not vip:
-        return discord.Embed(
-            title=f"🔒 {d.name}",
-            description="This job is VIP-locked.",
-            color=discord.Color.red(),
-        )
-
+        return discord.Embed(title="Unknown job", description=f"I don’t recognize `{key}`.", color=discord.Color.red())
     fail_bp = category_fail_bp(d.category, d.fail_chance_bp)
-    fail_txt = "0.00%" if d.category == JobCategory.EASY else f"{fail_bp / 100:.2f}%"
-    bonus_txt = (
-        f"{d.bonus_chance_bp / 100:.2f}% for x{d.bonus_multiplier:.1f}"
-        if d.bonus_chance_bp > 0 and d.bonus_multiplier > 1.0
-        else "None"
-    )
-
-    unlock = JOB_UNLOCK_LEVEL[d.category]
-    switch_cost = JOB_SWITCH_COST[d.category]
-
-    action_lines: list[str] = []
-    for a in d.actions[:6]:
-        lo = fmt_int(a.min_silver)
-        hi = fmt_int(a.max_silver)
-        tag = " (failure)" if (a.can_fail and int(a.min_silver) == 0 and int(a.max_silver) == 0) else ""
-        action_lines.append(f"• `{a.key}`: {lo} to {hi}{tag}")
-
-    avg_silver = int(sum((a.min_silver + a.max_silver) / 2 for a in d.actions) / max(len(d.actions), 1))
-
-    title = d.name
-    if equipped == d.key:
-        title = f"✅ {title}"
-
-    embed = discord.Embed(
-        title=title,
-        description=f"Key: `{d.key}`",
-        color=discord.Color.gold() if vip else discord.Color.blurple(),
-    )
-    embed.add_field(name="Category", value=f"**{d.category.value}**", inline=True)
-    embed.add_field(name="Unlock", value=f"**Level {unlock}**", inline=True)
-    embed.add_field(name="Switch Cost", value=f"**{fmt_int(switch_cost)} Silver**", inline=True)
-    cooldown_seconds = min(int(d.cooldown_seconds), VIP_WORK_COOLDOWN_SECONDS) if vip else int(d.cooldown_seconds)
-    cooldown_label = f"**{fmt_int(cooldown_seconds)}s**"
-    if vip and cooldown_seconds < int(d.cooldown_seconds):
-        cooldown_label += " (VIP)"
-    embed.add_field(name="Cooldown", value=cooldown_label, inline=True)
-    embed.add_field(name="Stamina Cost", value=f"**{fmt_int(d.stamina_cost)}**", inline=True)
-    embed.add_field(name="User XP", value=f"**+{fmt_int(d.user_xp_gain)}**", inline=True)
-    embed.add_field(name="Job XP", value=f"**+{fmt_int(d.job_xp_gain)}**", inline=True)
-    embed.add_field(name="Fail Chance", value=f"**{fail_txt}**", inline=True)
-    embed.add_field(name="Bonus", value=f"**{bonus_txt}**", inline=True)
-    embed.add_field(name="Avg Silver", value=f"**{fmt_int(avg_silver)}**", inline=True)
-    embed.add_field(
-        name="Outcomes",
-        value="\n".join(action_lines) if action_lines else "None",
-        inline=False,
-    )
-    embed.set_footer(text="Use the Equip button to confirm switching.")
-    return embed
+    return discord.Embed(title=d.name, description=f"Unlock **Lv {JOB_UNLOCK_LEVEL[d.category]}** • Switch **{fmt_int(JOB_SWITCH_COST[d.category])}** • Fail **{fail_bp/100:.2f}%**", color=discord.Color.gold() if vip else discord.Color.blurple())
 
 
 def make_rules_embed(*, vip: bool) -> discord.Embed:
-    lines = [
-        "**How Jobs Work**",
-        "• Pick a job from the dropdown",
-        "• Click **Equip Selected**",
-        "• Switching costs Silver after your first equip",
-        "• Pick up to 3 jobs and equip the loadout",
-        "• `/work` cycles slots: 1 → 2 → 3 → 1",
-        "",
-        "**Unlocks**",
-        f"• Easy: level {JOB_UNLOCK_LEVEL[JobCategory.EASY]} ({fmt_int(JOB_SWITCH_COST[JobCategory.EASY])} to switch)",
-        f"• Stable: level {JOB_UNLOCK_LEVEL[JobCategory.STABLE]} ({fmt_int(JOB_SWITCH_COST[JobCategory.STABLE])} to switch)",
-        f"• Hard: level {JOB_UNLOCK_LEVEL[JobCategory.HARD]} ({fmt_int(JOB_SWITCH_COST[JobCategory.HARD])} to switch)",
-        "",
-        "**Job Progression**",
-        "• Every job tracks its own Level, Title, Prestige",
-        "• `/work` awards Job XP and upgrades your job title over time",
-        f"• VIP members wait at most {VIP_WORK_COOLDOWN_SECONDS} seconds between `/work` uses",
-    ]
-    return discord.Embed(
-        title="Jobs Guide",
-        description="\n".join(lines),
-        color=discord.Color.gold() if vip else discord.Color.blurple(),
-    )
+    return discord.Embed(title="Job Hub Guide", description="Use slots to manage independent job loadouts. Only the active slot is used for `/work`.", color=discord.Color.gold() if vip else discord.Color.blurple())
