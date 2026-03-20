@@ -59,6 +59,7 @@ from .prestige import (
     clamp_prestige,
     LEVELS_PER_PRESTIGE,
     max_stored_level_for_prestige,
+    total_visible_level_for,
     max_visible_level_for_prestige,
     prestige_cost,
     prestige_multiplier,
@@ -107,6 +108,7 @@ class BusinessCard:
     running: bool
     level: int
     visible_level: int
+    total_visible_level: int
     max_level: int
     prestige: int
     hourly_profit: int
@@ -140,6 +142,7 @@ class BusinessManageSnapshot:
     running: bool
     level: int
     visible_level: int
+    total_visible_level: int
     max_level: int
     prestige: int
     hourly_profit: int
@@ -1068,6 +1071,7 @@ async def _build_business_card_for_user(
             running=False,
             level=0,
             visible_level=visible_level_for(0),
+            total_visible_level=total_visible_level_for(stored_level=0, prestige=0),
             max_level=max_visible_level_for_prestige(0),
             prestige=0,
             hourly_profit=int(defn.base_hourly_income),
@@ -1112,6 +1116,7 @@ async def _build_business_card_for_user(
         running=running,
         level=level,
         visible_level=visible_level_for(level),
+        total_visible_level=total_visible_level_for(stored_level=level, prestige=prestige),
         max_level=max_visible_level_for_prestige(prestige),
         prestige=prestige,
         hourly_profit=hourly_profit,
@@ -1216,6 +1221,7 @@ async def get_business_manage_snapshot(
             running=False,
             level=level,
             visible_level=visible_level_for(level),
+            total_visible_level=total_visible_level_for(stored_level=level, prestige=prestige),
             max_level=max_level,
             prestige=prestige,
             hourly_profit=hourly_profit,
@@ -1286,6 +1292,7 @@ async def get_business_manage_snapshot(
         running=running,
         level=level,
         visible_level=visible_level_for(level),
+        total_visible_level=total_visible_level_for(stored_level=level, prestige=prestige),
         max_level=max_level,
         prestige=prestige,
         hourly_profit=hourly_profit,
