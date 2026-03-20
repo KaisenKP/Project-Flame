@@ -14,6 +14,8 @@ from services.jobs_core import (
     fmt_int,
 )
 
+VIP_WORK_COOLDOWN_SECONDS = 10
+
 
 def work_color(category: JobCategory) -> discord.Color:
     if category == JobCategory.EASY:
@@ -54,7 +56,8 @@ def job_list_lines(*, vip: bool, want_vip: bool, equipped: Optional[str]) -> lis
         unlock = JOB_UNLOCK_LEVEL[d.category]
         cost = JOB_SWITCH_COST[d.category]
 
-        cooldown = f"{fmt_int(d.cooldown_seconds)}s"
+        cooldown_seconds = min(int(d.cooldown_seconds), VIP_WORK_COOLDOWN_SECONDS) if vip else int(d.cooldown_seconds)
+        cooldown = f"{fmt_int(cooldown_seconds)}s"
         if d.vip_only and not vip:
             lines.append(f"{marker}🔒 **{d.name}** (`{d.key}`) • VIP")
         else:
@@ -170,7 +173,11 @@ def make_job_info_embed(*, vip: bool, job_key: str, equipped: Optional[str]) -> 
     embed.add_field(name="Category", value=f"**{d.category.value}**", inline=True)
     embed.add_field(name="Unlock", value=f"**Level {unlock}**", inline=True)
     embed.add_field(name="Switch Cost", value=f"**{fmt_int(switch_cost)} Silver**", inline=True)
-    embed.add_field(name="Cooldown", value=f"**{fmt_int(d.cooldown_seconds)}s**", inline=True)
+    cooldown_seconds = min(int(d.cooldown_seconds), VIP_WORK_COOLDOWN_SECONDS) if vip else int(d.cooldown_seconds)
+    cooldown_label = f"**{fmt_int(cooldown_seconds)}s**"
+    if vip and cooldown_seconds < int(d.cooldown_seconds):
+        cooldown_label += " (VIP)"
+    embed.add_field(name="Cooldown", value=cooldown_label, inline=True)
     embed.add_field(name="Stamina Cost", value=f"**{fmt_int(d.stamina_cost)}**", inline=True)
     embed.add_field(name="User XP", value=f"**+{fmt_int(d.user_xp_gain)}**", inline=True)
     embed.add_field(name="Job XP", value=f"**+{fmt_int(d.job_xp_gain)}**", inline=True)
@@ -203,6 +210,7 @@ def make_rules_embed(*, vip: bool) -> discord.Embed:
         "**Job Progression**",
         "• Every job tracks its own Level, Title, Prestige",
         "• `/work` awards Job XP and upgrades your job title over time",
+        f"• VIP members wait at most {VIP_WORK_COOLDOWN_SECONDS} seconds between `/work` uses",
     ]
     return discord.Embed(
         title="Jobs Guide",
