@@ -56,6 +56,7 @@ from .prestige import (
     at_level_cap,
     bulk_option_for,
     clamp_prestige,
+    LEVELS_PER_PRESTIGE,
     max_stored_level_for_prestige,
     max_visible_level_for_prestige,
     prestige_cost,
@@ -487,7 +488,27 @@ def _manager_slots_for_level(level: int) -> int:
     return BASE_MANAGER_SLOTS + (max(int(level), 0) // 5)
 
 
+def _normalize_business_progress(*, level: int, prestige: int) -> tuple[int, int]:
+    """
+    Compatibility shim for pre-prestige ownership rows.
+
+    Older rows could carry their total upgrade count in `level` with `prestige=0`.
+    Fold any overflow above the current prestige cap into prestige tiers so the new
+    prestige flow can still reason about the row without crashing or soft-locking it.
+    """
+    normalized_prestige = clamp_prestige(int(prestige))
+    normalized_level = max(int(level), 0)
+    if normalized_level <= max_stored_level_for_prestige(normalized_prestige):
+        return normalized_level, normalized_prestige
+
+    overflow, normalized_level = divmod(normalized_level, LEVELS_PER_PRESTIGE)
+    normalized_prestige = clamp_prestige(normalized_prestige + overflow)
+    normalized_level = min(normalized_level, max_stored_level_for_prestige(normalized_prestige))
+    return normalized_level, normalized_prestige
+
+
 def _effective_base_income(defn: BusinessDef, *, level: int, prestige: int) -> int:
+    level, prestige = _normalize_business_progress(level=level, prestige=prestige)
     value = int(defn.base_hourly_income)
     value = _apply_bp(value, _upgrade_percent_bp_for_level(level))
     value *= prestige_multiplier(prestige)
@@ -984,8 +1005,10 @@ async def _calc_display_hourly_profit_for_owned_business(
     We are not doing deep worker synergies yet.
     That comes later when the staffing layer gets spicy.
     """
-    level = max(int(ownership.level or 0), 0)
-    prestige = clamp_prestige(int(ownership.prestige or 0))
+    level, prestige = _normalize_business_progress(
+        level=int(ownership.level or 0),
+        prestige=int(ownership.prestige or 0),
+    )
 
     base_after_scaling = _effective_base_income(defn, level=level, prestige=prestige)
 
@@ -1055,8 +1078,10 @@ async def _build_business_card_for_user(
             image_url=defn.image_url,
         )
 
-    level = int(owned_row.level or 0)
-    prestige = int(owned_row.prestige or 0)
+    level, prestige = _normalize_business_progress(
+        level=int(owned_row.level or 0),
+        prestige=int(owned_row.prestige or 0),
+    )
 
     running_row = running_map.get(defn.key)
     running = running_row is not None
@@ -1211,8 +1236,10 @@ async def get_business_manage_snapshot(
             notes=notes,
         )
 
-    level = max(int(ownership.level or 0), 0)
-    prestige = clamp_prestige(int(ownership.prestige or 0))
+    level, prestige = _normalize_business_progress(
+        level=int(ownership.level or 0),
+        prestige=int(ownership.prestige or 0),
+    )
 
     worker_used = await _count_active_workers_for_ownership(
         session,
@@ -1236,6 +1263,7 @@ async def get_business_manage_snapshot(
 
     running = running_row is not None
     runtime_remaining = _hours_remaining(running_row.ends_at) if running_row is not None else 0
+    max_level = max_visible_level_for_prestige(prestige)
 
     notes: list[str] = []
     notes.append(f"Base runtime: {int(_base_runtime_hours_for_key(defn.key))}h")
@@ -1478,8 +1506,8 @@ async def start_business_run(
             "business_name": defn.name,
             "hourly_profit_snapshot": int(hourly_profit),
             "runtime_hours_snapshot": int(total_runtime_hours),
-            "ownership_level": int(ownership.level or 0),
-            "ownership_prestige": int(ownership.prestige or 0),
+            "ownership_level": int(_normalize_business_progress(level=int(ownership.level or 0), prestige=int(ownership.prestige or 0))[0]),
+            "ownership_prestige": int(_normalize_business_progress(level=int(ownership.level or 0), prestige=int(ownership.prestige or 0))[1]),
             "auto_restart_remaining": int(auto_restart_remaining),
             "started_at_iso": now.isoformat(),
             "ends_at_iso": ends_at.isoformat(),
@@ -1625,8 +1653,10 @@ async def upgrade_business(
         return BusinessActionResult(ok=False, message=f"You do not own **{defn.name}** yet.", snapshot=hub)
 
     requested_quantity = max(int(quantity), 1)
-    old_level = max(int(ownership.level or 0), 0)
-    old_prestige = clamp_prestige(int(ownership.prestige or 0))
+    old_level, old_prestige = _normalize_business_progress(
+        level=int(ownership.level or 0),
+        prestige=int(ownership.prestige or 0),
+    )
     old_visible_level = visible_level_for(old_level)
 
     if at_level_cap(stored_level=old_level, prestige=old_prestige):
@@ -1684,12 +1714,15 @@ async def upgrade_business(
     hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
     manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
 
-    new_level = max(int(ownership.level or 0), 0)
+    new_level, new_prestige = _normalize_business_progress(
+        level=int(ownership.level or 0),
+        prestige=int(ownership.prestige or 0),
+    )
     new_visible_level = visible_level_for(new_level)
     new_hourly = int(manage.hourly_profit) if manage is not None else old_hourly
     new_runtime_hours = int(manage.total_runtime_hours) if manage is not None else old_runtime_hours
     requested_text = f"x{requested_quantity}" if requested_quantity > 1 else "x1"
-    landed_at_cap = at_level_cap(stored_level=new_level, prestige=old_prestige)
+    landed_at_cap = at_level_cap(stored_level=new_level, prestige=new_prestige)
     cap_suffix = "\nLevel cap reached. Prestige to keep scaling." if landed_at_cap else ""
 
     return BusinessActionResult(
@@ -1723,8 +1756,10 @@ async def prestige_business(
         hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
         return BusinessActionResult(ok=False, message=f"You do not own **{defn.name}** yet.", snapshot=hub)
 
-    current_level = max(int(ownership.level or 0), 0)
-    current_prestige = clamp_prestige(int(ownership.prestige or 0))
+    current_level, current_prestige = _normalize_business_progress(
+        level=int(ownership.level or 0),
+        prestige=int(ownership.prestige or 0),
+    )
     current_visible_level = visible_level_for(current_level)
     current_max_level = max_visible_level_for_prestige(current_prestige)
     if not at_level_cap(stored_level=current_level, prestige=current_prestige):
