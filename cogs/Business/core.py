@@ -871,6 +871,20 @@ async def _sum_active_manager_profit_bonus_bp_for_ownership(
     return total
 
 
+async def _sum_active_manager_auto_restart_charges_for_ownership(
+    session,
+    *,
+    ownership_id: int,
+) -> int:
+    value = await session.scalar(
+        select(func.coalesce(func.sum(BusinessManagerAssignmentRow.auto_restart_charges), 0)).where(
+            BusinessManagerAssignmentRow.ownership_id == int(ownership_id),
+            BusinessManagerAssignmentRow.is_active.is_(True),
+        )
+    )
+    return int(value or 0)
+
+
 async def _sum_active_worker_flat_bonus_for_ownership(
     session,
     *,
@@ -1382,6 +1396,11 @@ async def start_business_run(
     now = _utc_now()
     ends_at = now + timedelta(hours=total_runtime_hours)
 
+    auto_restart_remaining = await _sum_active_manager_auto_restart_charges_for_ownership(
+        session,
+        ownership_id=int(ownership.id),
+    )
+
     run = BusinessRunRow(
         ownership_id=int(ownership.id),
         guild_id=int(guild_id),
@@ -1394,7 +1413,7 @@ async def start_business_run(
         completed_at=None,
         runtime_hours_snapshot=int(total_runtime_hours),
         hourly_profit_snapshot=int(hourly_profit),
-        auto_restart_remaining=0,
+        auto_restart_remaining=int(auto_restart_remaining),
         snapshot_json={
             "business_key": defn.key,
             "business_name": defn.name,
@@ -1402,6 +1421,7 @@ async def start_business_run(
             "runtime_hours_snapshot": int(total_runtime_hours),
             "ownership_level": int(ownership.level or 0),
             "ownership_prestige": int(ownership.prestige or 0),
+            "auto_restart_remaining": int(auto_restart_remaining),
             "started_at_iso": now.isoformat(),
             "ends_at_iso": ends_at.isoformat(),
         },
