@@ -5,7 +5,7 @@ from datetime import timedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import LuxuryLoanRow, UserAssetRow, WalletRow
+from db.models import BusinessOwnershipRow, LuxuryLoanRow, UserAssetRow, WalletRow
 from services.users import ensure_user_rows
 
 from .catalog import ASSET_CATALOG
@@ -145,7 +145,7 @@ async def clear_showcase_slot(session: AsyncSession, *, guild_id: int, user_id: 
 
 
 async def get_total_asset_value(session: AsyncSession, *, guild_id: int, user_id: int) -> int:
-    rows = (
+    luxury_rows = (
         await session.scalars(
             select(UserAssetRow.asset_key).where(
                 UserAssetRow.guild_id == guild_id,
@@ -154,7 +154,17 @@ async def get_total_asset_value(session: AsyncSession, *, guild_id: int, user_id
             )
         )
     ).all()
-    return int(sum(ASSET_CATALOG.get(k).value for k in rows if k in ASSET_CATALOG))
+    luxury_value = int(sum(ASSET_CATALOG.get(k).value for k in luxury_rows if k in ASSET_CATALOG))
+    business_value = int(
+        await session.scalar(
+            select(func.coalesce(func.sum(BusinessOwnershipRow.total_spent), 0)).where(
+                BusinessOwnershipRow.guild_id == guild_id,
+                BusinessOwnershipRow.user_id == user_id,
+            )
+        )
+        or 0
+    )
+    return luxury_value + business_value
 
 
 async def get_user_asset_value(session: AsyncSession, *, guild_id: int, user_id: int) -> int:
