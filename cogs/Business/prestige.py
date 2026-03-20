@@ -30,6 +30,10 @@ def visible_level_for(stored_level: int) -> int:
     return max(int(stored_level), 0) + BASE_VISIBLE_LEVEL
 
 
+def total_visible_level_for(*, stored_level: int, prestige: int) -> int:
+    return (clamp_prestige(prestige) * LEVELS_PER_PRESTIGE) + visible_level_for(stored_level)
+
+
 def max_visible_level_for_prestige(prestige: int) -> int:
     return (clamp_prestige(prestige) + 1) * LEVELS_PER_PRESTIGE
 

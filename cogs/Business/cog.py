@@ -135,6 +135,7 @@ except Exception:
         running: bool
         level: int
         visible_level: int
+        total_visible_level: int
         max_level: int
         prestige: int
         hourly_profit: int
@@ -166,6 +167,7 @@ except Exception:
         running: bool
         level: int
         visible_level: int
+        total_visible_level: int
         max_level: int
         prestige: int
         hourly_profit: int
@@ -373,6 +375,9 @@ except Exception:
                 owned=False,
                 running=False,
                 level=0,
+                visible_level=1,
+                total_visible_level=1,
+                max_level=10,
                 prestige=0,
                 hourly_profit=d.base_hourly_income,
                 runtime_remaining_hours=0,
@@ -415,6 +420,9 @@ except Exception:
             owned=False,
             running=False,
             level=0,
+            visible_level=1,
+            total_visible_level=1,
+            max_level=10,
             prestige=0,
             hourly_profit=d.base_hourly_income,
             base_hourly_income=d.base_hourly_income,
@@ -896,6 +904,7 @@ def _build_manage_menu_embed(
         lines.append(
             f"{c.emoji} **{c.name}**\n"
             f"└ Level `{_fmt_int(c.visible_level)}/{_fmt_int(c.max_level)}` • Prestige `{_fmt_int(c.prestige)}`\n"
+            f"└ Total Progress `{_fmt_int(c.total_visible_level)}`\n"
             f"└ Workers `{_slot_text(c.worker_slots_used, c.worker_slots_total)}` • Managers `{_slot_text(c.manager_slots_used, c.manager_slots_total)}`"
         )
 
@@ -914,7 +923,10 @@ def _build_business_detail_embed(
 
     e = _base_embed(
         title=f"📊 {snap.emoji} {snap.name}",
-        description=f"`Status` {status} • `Level` `{_fmt_int(snap.visible_level)}/{_fmt_int(snap.max_level)}` • `Prestige` `{_fmt_int(snap.prestige)}`",
+        description=(
+            f"`Status` {status} • `Level` `{_fmt_int(snap.visible_level)}/{_fmt_int(snap.max_level)}` "
+            f"• `Prestige` `{_fmt_int(snap.prestige)}` • `Total Progress` `{_fmt_int(snap.total_visible_level)}`"
+        ),
     )
     e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
 
@@ -951,6 +963,7 @@ def _build_business_detail_embed(
         f"Bulk x1: {'Unlocked' if snap.bulk_upgrade_1_unlocked else 'Locked'}",
         f"Bulk x5: {'Unlocked' if snap.bulk_upgrade_5_unlocked else 'Locked'}",
         f"Bulk x10: {'Unlocked' if snap.bulk_upgrade_10_unlocked else 'Locked'}",
+        f"Legacy equivalent level: {int(snap.total_visible_level)}",
     ]
     if snap.can_prestige:
         progression_lines.append("Prestige available now.")
