@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 
 MAX_BUSINESS_PRESTIGE = 100
 BASE_VISIBLE_LEVEL = 1
@@ -68,8 +68,11 @@ def prestige_cost(*, config: PrestigeConfig, current_prestige: int) -> int:
     revenue_hours_multiplier = max(int(config.revenue_hours_multiplier), 0)
     if revenue_per_hour > 0 and revenue_hours_multiplier > 0:
         return max(revenue_per_hour * revenue_hours_multiplier, 1)
-    cost = Decimal(int(config.base_cost)) * (Decimal(str(config.growth_rate)) ** Decimal(p))
-    return max(int(cost.to_integral_value(rounding=ROUND_HALF_UP)), 1)
+
+    base_cost = max(int(config.base_cost), 0)
+    flat_step = 25_000
+    cost = base_cost + (flat_step * p)
+    return max(cost, 1)
 
 
 def bulk_option_for(prestige: int, amount: int) -> BulkUpgradeOption:
