@@ -173,7 +173,7 @@ except Exception:
         upgrade_cost: Optional[int]
         prestige_cost: Optional[int]
         can_prestige: bool
-        prestige_multiplier: int
+        prestige_multiplier: str
         bulk_upgrade_1_unlocked: bool
         bulk_upgrade_5_unlocked: bool
         bulk_upgrade_10_unlocked: bool
@@ -934,7 +934,7 @@ def _build_business_detail_embed(
             f"Base Profit: `{_fmt_int(snap.base_hourly_income)}/hr`\n"
             f"Upgrade Cost: `{_fmt_int(snap.upgrade_cost or 0)} Silver`\n"
             f"Prestige Cost: `{_fmt_int(snap.prestige_cost or 0)} Silver`\n"
-            f"Output Multiplier: `x{_fmt_int(snap.prestige_multiplier)}`"
+            f"Output Multiplier: `x{snap.prestige_multiplier}`"
         ),
         inline=True,
     )

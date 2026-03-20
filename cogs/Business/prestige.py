@@ -42,10 +42,18 @@ def at_level_cap(*, stored_level: int, prestige: int) -> bool:
     return max(int(stored_level), 0) >= max_stored_level_for_prestige(prestige)
 
 
-def prestige_multiplier(prestige: int) -> int:
+def prestige_multiplier(prestige: int) -> Decimal:
     p = clamp_prestige(prestige)
-    multiplier = Decimal("1.5") ** Decimal(p)
-    return max(int(multiplier.to_integral_value(rounding=ROUND_HALF_UP)), 1)
+    return Decimal("1.5") ** Decimal(p)
+
+
+def prestige_multiplier_display(prestige: int) -> str:
+    multiplier = prestige_multiplier(prestige)
+    normalized = multiplier.normalize()
+    text = format(normalized, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
 
 
 def prestige_cost(*, config: PrestigeConfig, current_prestige: int) -> int:

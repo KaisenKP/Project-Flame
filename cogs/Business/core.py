@@ -47,6 +47,7 @@ How this file is intended to be used:
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_HALF_UP
 import random
 from typing import Dict, List, Optional, Sequence
 
@@ -61,6 +62,7 @@ from .prestige import (
     max_visible_level_for_prestige,
     prestige_cost,
     prestige_multiplier,
+    prestige_multiplier_display,
     visible_level_for,
 )
 
@@ -145,7 +147,7 @@ class BusinessManageSnapshot:
     upgrade_cost: Optional[int]
     prestige_cost: Optional[int]
     can_prestige: bool
-    prestige_multiplier: int
+    prestige_multiplier: str
     bulk_upgrade_1_unlocked: bool
     bulk_upgrade_5_unlocked: bool
     bulk_upgrade_10_unlocked: bool
@@ -511,8 +513,8 @@ def _effective_base_income(defn: BusinessDef, *, level: int, prestige: int) -> i
     level, prestige = _normalize_business_progress(level=level, prestige=prestige)
     value = int(defn.base_hourly_income)
     value = _apply_bp(value, _upgrade_percent_bp_for_level(level))
-    value *= prestige_multiplier(prestige)
-    return max(int(value), 0)
+    value = Decimal(value) * prestige_multiplier(prestige)
+    return max(int(value.to_integral_value(rounding=ROUND_HALF_UP)), 0)
 
 
 def _prestige_config_for(defn: BusinessDef) -> PrestigeConfig:
@@ -1221,7 +1223,7 @@ async def get_business_manage_snapshot(
             upgrade_cost=int(_upgrade_cost(defn, level)),
             prestige_cost=int(_prestige_cost(defn, prestige)),
             can_prestige=at_level_cap(stored_level=level, prestige=prestige),
-            prestige_multiplier=prestige_multiplier(prestige),
+            prestige_multiplier=prestige_multiplier_display(prestige),
             bulk_upgrade_1_unlocked=True,
             bulk_upgrade_5_unlocked=bulk_option_for(prestige, 5).unlocked,
             bulk_upgrade_10_unlocked=bulk_option_for(prestige, 10).unlocked,
@@ -1291,7 +1293,7 @@ async def get_business_manage_snapshot(
         upgrade_cost=None if at_level_cap(stored_level=level, prestige=prestige) else int(_upgrade_cost(defn, level)),
         prestige_cost=int(_prestige_cost(defn, prestige)) if at_level_cap(stored_level=level, prestige=prestige) and prestige < MAX_BUSINESS_PRESTIGE else None,
         can_prestige=at_level_cap(stored_level=level, prestige=prestige) and prestige < MAX_BUSINESS_PRESTIGE,
-        prestige_multiplier=prestige_multiplier(prestige),
+        prestige_multiplier=prestige_multiplier_display(prestige),
         bulk_upgrade_1_unlocked=True,
         bulk_upgrade_5_unlocked=bulk_option_for(prestige, 5).unlocked,
         bulk_upgrade_10_unlocked=bulk_option_for(prestige, 10).unlocked,
@@ -1801,7 +1803,7 @@ async def prestige_business(
         message=(
             f"Prestiged **{defn.emoji} {defn.name}** from **Prestige {current_prestige}** to **Prestige {new_prestige}** for **{cost:,} Silver**.\n"
             f"Visible level reset: **Level {current_visible_level}** → **Level 1**\n"
-            f"Output multiplier: **x{prestige_multiplier(current_prestige):,}** → **x{prestige_multiplier(new_prestige):,}**\n"
+            f"Output multiplier: **x{prestige_multiplier_display(current_prestige)}** → **x{prestige_multiplier_display(new_prestige)}**\n"
             f"Hourly profit: **{old_hourly:,}/hr** → **{new_hourly:,}/hr**\n"
             f"Run projection: **{old_runtime_hours:,}h / {old_hourly * old_runtime_hours:,} Silver**"
             f" → **{new_runtime_hours:,}h / {new_hourly * new_runtime_hours:,} Silver**"
