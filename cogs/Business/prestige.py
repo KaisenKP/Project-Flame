@@ -50,7 +50,11 @@ def at_level_cap(*, stored_level: int, prestige: int) -> bool:
 
 def prestige_multiplier(prestige: int) -> Decimal:
     p = clamp_prestige(prestige)
-    return Decimal("1.5") ** Decimal(p)
+    # Prestige was previously compounding at +50% every tier, which pushed
+    # starter businesses into runaway late-game income. Keep prestige valuable,
+    # but flatten it to a predictable +6.5% per tier so P10 restaurants land in
+    # the ~20k-30k/hr range before staffing bonuses.
+    return Decimal("1.0") + (Decimal("0.065") * Decimal(p))
 
 
 def prestige_multiplier_display(prestige: int) -> str:
