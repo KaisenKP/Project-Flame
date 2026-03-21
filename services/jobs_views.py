@@ -52,6 +52,19 @@ class ToolPicker(Select):
         await view.refresh(interaction, notice="✅ Active tool updated.")
 
 
+
+
+async def open_job_hub(*, interaction: discord.Interaction, sessionmaker, guild_id: int, user_id: int, vip: bool, selected_slot: int = 0, section: str = "overview", notice: Optional[str] = None) -> None:
+    view = JobHubView(sessionmaker=sessionmaker, guild_id=guild_id, user_id=user_id, vip=vip, selected_slot=selected_slot, section=section)
+    async with sessionmaker() as session:
+        async with session.begin():
+            slot_snap = await get_slot_snapshot(session, guild_id=guild_id, user_id=user_id, vip=vip, slot_index=selected_slot)
+    embed = make_job_hub_embed(user=interaction.user, vip=vip, slot_snap=slot_snap, section=section)
+    if interaction.response.is_done():
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True if interaction.guild is not None else False, content=notice)
+    else:
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True if interaction.guild is not None else False, content=notice)
+
 class JobHubView(discord.ui.View):
     def __init__(self, *, sessionmaker, guild_id: int, user_id: int, vip: bool, selected_slot: int = 0, section: str = "overview", timeout: float = 180.0):
         super().__init__(timeout=timeout)
@@ -146,6 +159,20 @@ class JobHubView(discord.ui.View):
         self.selected_slot = slot_index
         self.section = "overview"
         await self.refresh(interaction, notice=f"✅ {slot_label(slot_index)} set to **{JOB_DEFS[job_key].name}**.")
+
+    @discord.ui.button(label="Work", style=discord.ButtonStyle.success, emoji="💼", row=3)
+    async def work_now(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.guild is None or interaction.guild.id != self.guild_id:
+            await interaction.response.send_message("This button only works in the original server.", ephemeral=True)
+            return
+
+        cog = interaction.client.get_cog("WorkCog") if interaction.client else None
+        cmd = getattr(cog, "work_cmd", None) if cog is not None else None
+        if cog is None or cmd is None or not hasattr(cmd, "callback"):
+            await interaction.response.send_message("Work command is currently unavailable.", ephemeral=True)
+            return
+
+        await cmd.callback(cog, interaction)
 
     @discord.ui.button(label="Upgrade Selected Tool", style=discord.ButtonStyle.primary, row=3)
     async def upgrade_tool(self, interaction: discord.Interaction, _: discord.ui.Button):
