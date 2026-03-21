@@ -62,6 +62,7 @@ from services.job_hub import (
 )
 from .jobs import get_job_def
 from services.job_upgrades import apply_income_upgrade, get_upgrade_level, upgrade_once
+from services.jobs_views import open_job_hub
 
 # -------------------------
 # Cooldowns
@@ -750,6 +751,7 @@ class _WorkUpgradeView(discord.ui.View):
 
     async def on_timeout(self) -> None:
         self.upgrade_tool.disabled = True
+        self.open_job_hub_button.disabled = True
         self.work_again.disabled = True
         if self._message is not None:
             try:
@@ -776,6 +778,26 @@ class _WorkUpgradeView(discord.ui.View):
                 user_id=self.user_id,
                 source_view=self,
             ),
+        )
+
+    @discord.ui.button(label="Job Hub", style=discord.ButtonStyle.secondary, emoji="🧰")
+    async def open_job_hub_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None or interaction.guild.id != self.guild_id:
+            await interaction.response.send_message("This button only works in the original server.", ephemeral=True)
+            return
+
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Only the user who ran /work can use this button.", ephemeral=True)
+            return
+
+        vip = is_vip_member(interaction.user)  # type: ignore[arg-type]
+        await open_job_hub(
+            interaction=interaction,
+            sessionmaker=self.sessionmaker,
+            guild_id=self.guild_id,
+            user_id=self.user_id,
+            vip=vip,
+            notice="Opened your Job Hub.",
         )
 
     @discord.ui.button(label="Work Again", style=discord.ButtonStyle.success, emoji="🔁")
