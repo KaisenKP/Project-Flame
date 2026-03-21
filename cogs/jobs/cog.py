@@ -1,30 +1,33 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Optional
 
 import discord
 from discord import app_commands
 from discord.app_commands import checks
-from sqlalchemy import select
 from discord.ext import commands
 
-from db.models import XpRow
 from services.db import sessions
 from services.job_hub import ensure_job_hub_slots, get_or_create_progress, get_slot_snapshot, set_slot_progress
-from services.job_progression import state_from_total_xp
+from services.job_progression import state_from_total_xp, total_xp_from_state
 from services.jobs_core import ensure_job_row, get_or_create_job_row, job_row_image_set, tier_for_category
 from services.jobs_embeds import make_job_hub_embed
 from services.jobs_views import JobHubView
-from services.users import ensure_user_rows
 from services.vip import is_vip_member
-from services.xp import get_xp_progress
 
 from .jobs import JOB_MODULES, get_job_def
 
 _WORK_RESULT_TITLE_SUFFIX = " Work Result"
-_USER_XP_RE = re.compile(r"User XP:\s*\*\*\+([\d,]+)\*\*")
 _JOB_XP_RE = re.compile(r"Job XP:\s*\*\*\+([\d,]+)\*\*")
+_WORK_PROGRESS_RE = re.compile(r"\*\*P(?P<prestige>\d+)\*\*.*?Level \*\*(?P<level>\d+)\*\*", re.IGNORECASE | re.DOTALL)
+
+
+@dataclass(frozen=True)
+class _RecoveredWorkState:
+    prestige: int
+    level: int
 
 
 class JobsCog(commands.Cog):
@@ -46,23 +49,18 @@ class JobsCog(commands.Cog):
         return title.endswith(_WORK_RESULT_TITLE_SUFFIX)
 
     @staticmethod
-    def _extract_work_gain(message: discord.Message, *, gain_type: str) -> int:
+    def _extract_work_job_xp(message: discord.Message) -> int:
         if not message.embeds:
             return 0
         embed = message.embeds[0]
-        pattern = _USER_XP_RE if gain_type == "user_xp" else _JOB_XP_RE
         for field in embed.fields:
             if (field.name or "").strip().lower() != "gains":
                 continue
-            match = pattern.search(field.value or "")
+            match = _JOB_XP_RE.search(field.value or "")
             if match is None:
                 return 0
             return int(match.group(1).replace(",", ""))
         return 0
-
-    @staticmethod
-    def _extract_work_user_xp(message: discord.Message) -> int:
-        return JobsCog._extract_work_gain(message, gain_type="user_xp")
 
     @staticmethod
     def _extract_work_job_name(message: discord.Message) -> str | None:
@@ -74,8 +72,21 @@ class JobsCog(commands.Cog):
         return title[: -len(_WORK_RESULT_TITLE_SUFFIX)].strip() or None
 
     @staticmethod
-    def _extract_work_job_xp(message: discord.Message) -> int:
-        return JobsCog._extract_work_gain(message, gain_type="job_xp")
+    def _extract_work_state(message: discord.Message) -> _RecoveredWorkState | None:
+        if not message.embeds:
+            return None
+        embed = message.embeds[0]
+        for field in embed.fields:
+            if (field.name or "").strip().lower() != "job progress":
+                continue
+            match = _WORK_PROGRESS_RE.search(field.value or "")
+            if match is None:
+                return None
+            return _RecoveredWorkState(
+                prestige=max(int(match.group("prestige")), 0),
+                level=max(int(match.group("level")), 1),
+            )
+        return None
 
     @app_commands.command(name="work_image_admin", description="Admin: set an image URL used in /work embeds for a job.")
     @app_commands.describe(job="Job key (miner, fisherman, etc.)", image_url="Direct image URL from your image library")
@@ -248,9 +259,9 @@ class JobsCog(commands.Cog):
         embed = make_job_hub_embed(user=interaction.user, vip=vip, slot_snap=snap, section="tools")
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    @app_commands.command(name="fixjobxp", description="Admin: scan /work results and restore missing user/job XP for a user.")
+    @app_commands.command(name="fixjobxp", description="Admin: scan /work results and repair job progression for a user.")
     @app_commands.describe(
-        user="User whose /work history should be restored",
+        user="User whose job /work history should be repaired",
         channel="Channel to scan for /work result messages",
         limit="How many recent messages to scan (50-5000)",
     )
@@ -282,50 +293,34 @@ class JobsCog(commands.Cog):
 
         scanned_messages = 0
         matched_work_messages = 0
-        recovered_user_xp_total = 0
         recovered_job_xp_by_name: dict[str, int] = {}
+        recovered_job_state_by_name: dict[str, _RecoveredWorkState] = {}
 
         async for message in channel.history(limit=int(limit), oldest_first=True):
             scanned_messages += 1
             if not self._message_matches_work_result(message, user_id=user.id):
                 continue
             matched_work_messages += 1
-            recovered_user_xp_total += self._extract_work_user_xp(message)
             job_name = self._extract_work_job_name(message)
             if not job_name:
                 continue
-            recovered_job_xp_by_name[job_name.casefold()] = recovered_job_xp_by_name.get(job_name.casefold(), 0) + self._extract_work_job_xp(message)
+
+            key = job_name.casefold()
+            recovered_job_xp_by_name[key] = recovered_job_xp_by_name.get(key, 0) + self._extract_work_job_xp(message)
+
+            parsed_state = self._extract_work_state(message)
+            if parsed_state is None:
+                continue
+            current_state = recovered_job_state_by_name.get(key)
+            if current_state is None or (parsed_state.prestige, parsed_state.level) > (current_state.prestige, current_state.level):
+                recovered_job_state_by_name[key] = parsed_state
 
         async with self.sessionmaker() as session:
             async with session.begin():
-                await ensure_user_rows(session, guild_id=interaction.guild.id, user_id=user.id)
-                xp_row = await session.scalar(
-                    select(XpRow).where(
-                        XpRow.guild_id == interaction.guild.id,
-                        XpRow.user_id == user.id,
-                    )
-                )
-                if xp_row is None:
-                    xp_row = XpRow(guild_id=interaction.guild.id, user_id=user.id, xp_total=0, level_cached=1)
-                    session.add(xp_row)
-                    await session.flush()
-
-                current_user_xp = int(xp_row.xp_total)
-                user_xp_missing = max(int(recovered_user_xp_total) - current_user_xp, 0)
-                if user_xp_missing > 0:
-                    new_total = current_user_xp + user_xp_missing
-                    prog = get_xp_progress(new_total)
-                    xp_row.xp_total = int(prog.xp_total)
-                    xp_row.level_cached = int(prog.level)
-
-                final_user_xp = int(xp_row.xp_total)
-                final_user_level = int(xp_row.level_cached)
-
                 vip = is_vip_member(user)
                 slots = await ensure_job_hub_slots(session, guild_id=interaction.guild.id, user_id=user.id, vip=vip)
                 restored_jobs: list[str] = []
                 skipped_jobs: list[str] = []
-                restored_job_xp_total = 0
 
                 for slot in slots:
                     job_key = (slot.job_key or "").strip().lower()
@@ -335,16 +330,12 @@ class JobsCog(commands.Cog):
                     if job_def is None:
                         skipped_jobs.append(f"Slot {int(slot.slot_index) + 1}: unknown job `{job_key}`")
                         continue
-                    recovered_total_xp = int(recovered_job_xp_by_name.get(job_def.name.casefold(), 0))
-                    if recovered_total_xp <= 0:
-                        skipped_jobs.append(f"Slot {int(slot.slot_index) + 1}: {job_def.name} (no /work history found)")
+
+                    recovered_state = recovered_job_state_by_name.get(job_def.name.casefold())
+                    if recovered_state is None:
+                        skipped_jobs.append(f"Slot {int(slot.slot_index) + 1}: {job_def.name} (no prestige/level history found)")
                         continue
 
-                    state = state_from_total_xp(
-                        tier=tier_for_category(job_def.category),
-                        job_key=job_key,
-                        total_xp=recovered_total_xp,
-                    )
                     progress = await get_or_create_progress(
                         session,
                         guild_id=interaction.guild.id,
@@ -352,38 +343,67 @@ class JobsCog(commands.Cog):
                         slot_index=int(slot.slot_index),
                         job_key=job_key,
                     )
-                    current_total_xp = max(int(progress.total_xp), 0)
-                    if current_total_xp >= recovered_total_xp:
+                    current_state = (max(int(progress.prestige), 0), max(int(progress.level), 1))
+                    target_state = (int(recovered_state.prestige), int(recovered_state.level))
+                    recovered_total_xp = max(
+                        int(recovered_job_xp_by_name.get(job_def.name.casefold(), 0)),
+                        int(total_xp_from_state(
+                            tier=tier_for_category(job_def.category),
+                            job_key=job_key,
+                            prestige=target_state[0],
+                            level=target_state[1],
+                            xp_into=0,
+                        )),
+                    )
+                    inferred_state = state_from_total_xp(
+                        tier=tier_for_category(job_def.category),
+                        job_key=job_key,
+                        total_xp=recovered_total_xp,
+                    )
+                    if (int(inferred_state.prestige), int(inferred_state.level)) > target_state:
+                        target_state = (int(inferred_state.prestige), int(inferred_state.level))
+
+                    target_total_xp = max(
+                        recovered_total_xp,
+                        int(total_xp_from_state(
+                            tier=tier_for_category(job_def.category),
+                            job_key=job_key,
+                            prestige=target_state[0],
+                            level=target_state[1],
+                            xp_into=0,
+                        )),
+                    )
+
+                    if current_state >= target_state and max(int(progress.total_xp), 0) >= target_total_xp:
                         skipped_jobs.append(
-                            f"Slot {int(slot.slot_index) + 1}: {job_def.name} (stored total XP {current_total_xp:,} is already >= recovered {recovered_total_xp:,})"
+                            f"Slot {int(slot.slot_index) + 1}: {job_def.name} (stored P{current_state[0]} Lv {current_state[1]} is already >= recovered P{target_state[0]} Lv {target_state[1]})"
                         )
                         continue
 
-                    progress.prestige = int(state.prestige)
-                    progress.level = int(state.level)
-                    progress.xp = int(state.xp_into)
-                    progress.total_xp = int(recovered_total_xp)
-                    restored_job_xp_total += recovered_total_xp - current_total_xp
+                    repaired_state = state_from_total_xp(
+                        tier=tier_for_category(job_def.category),
+                        job_key=job_key,
+                        total_xp=target_total_xp,
+                    )
+                    progress.prestige = int(repaired_state.prestige)
+                    progress.level = int(repaired_state.level)
+                    progress.xp = int(repaired_state.xp_into)
+                    progress.total_xp = int(target_total_xp)
                     restored_jobs.append(
-                        f"Slot {int(slot.slot_index) + 1}: {job_def.name} — P{int(state.prestige)} Lv {int(state.level)} ({int(state.xp_into):,} XP into level, {recovered_total_xp:,} total XP; restored {recovered_total_xp - current_total_xp:,})"
+                        f"Slot {int(slot.slot_index) + 1}: {job_def.name} — P{int(progress.prestige)} Lv {int(progress.level)} ({int(progress.total_xp):,} total XP reconstructed from /work history)"
                     )
 
         lines = [
             f"Scanned **{scanned_messages:,}** messages in {channel.mention}.",
             f"Found **{matched_work_messages:,}** `/work` result messages for {user.mention}.",
-            f"Recovered user XP from that channel: **{recovered_user_xp_total:,}**.",
+            "Checked each assigned job against the highest prestige/level visible in historical `/work` embeds.",
         ]
-        if user_xp_missing > 0:
-            lines.append(f"✅ Restored **{user_xp_missing:,}** missing user XP.")
-        else:
-            lines.append("ℹ️ No missing user XP was found from the scanned `/work` messages.")
-        lines.append(f"Current stored user XP: **{final_user_xp:,}** • Level **{final_user_level:,}**.")
 
         if restored_jobs:
-            lines.append(f"✅ Restored **{len(restored_jobs)}** assigned job(s) from `/work` history (**{restored_job_xp_total:,}** job XP added).")
+            lines.append(f"✅ Repaired **{len(restored_jobs)}** assigned job(s) from `/work` history.")
             lines.extend(restored_jobs)
         else:
-            lines.append("ℹ️ No assigned jobs could be restored from the scanned `/work` history.")
+            lines.append("ℹ️ No assigned jobs needed repair from the scanned `/work` history.")
 
         if skipped_jobs:
             lines.append("Skipped:")
