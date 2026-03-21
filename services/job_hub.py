@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 
 from db.models import JobRow, UserJobHubProgressRow, UserJobHubSlotRow, UserJobHubToolRow, UserJobSlotRow, WalletRow
-from services.job_progression import level_cap_for, xp_needed_for_level
+from services.job_progression import level_cap_for, total_xp_from_state, xp_needed_for_level
 from services.jobs_balance import payout_for_work, prestige_cost, stamina_cost_for_work
 from services.jobs_core import JOB_DEFS, JOB_SWITCH_COST, fmt_int, tier_for_category
 
@@ -365,6 +365,38 @@ async def prestige_slot(session, *, guild_id: int, user_id: int, slot_index: int
     progress.level = 1
     progress.xp = 0
     return True, f"Prestiged **{JOB_DEFS[job_key].name}** to **P{progress.prestige}** for **{fmt_int(cost)}** Silver."
+
+
+async def set_slot_progress(
+    session,
+    *,
+    guild_id: int,
+    user_id: int,
+    slot_index: int,
+    job_key: str,
+    prestige: int,
+    xp: int,
+) -> UserJobHubProgressRow:
+    progress = await get_or_create_progress(
+        session,
+        guild_id=guild_id,
+        user_id=user_id,
+        slot_index=slot_index,
+        job_key=job_key,
+    )
+    progress.prestige = max(int(prestige), 0)
+    progress.level = max(int(progress.level), 1)
+    cap = level_cap_for(progress.prestige)
+    progress.level = min(progress.level, cap)
+    need = xp_needed(job_key, progress.level, progress.prestige)
+    progress.xp = max(min(int(xp), need), 0)
+    progress.total_xp = total_xp_from_state(
+        tier=tier_for_category(JOB_DEFS[job_key].category),
+        prestige=progress.prestige,
+        level=progress.level,
+        xp_into=progress.xp,
+    )
+    return progress
 
 
 async def award_slot_job_xp(session, *, guild_id: int, user_id: int, slot_index: int, job_key: str, amount: int) -> tuple[UserJobHubProgressRow, bool]:
