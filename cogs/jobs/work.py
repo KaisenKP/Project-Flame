@@ -53,6 +53,7 @@ from services.jobs_core import (
 )
 from services.job_hub import (
     award_slot_job_xp,
+    buy_or_upgrade_tool,
     event_defs_for,
     get_active_slot,
     get_slot_snapshot,
@@ -835,10 +836,55 @@ class _UpgradeConfirmView(discord.ui.View):
         self.user_id = int(user_id)
         self.source_view = source_view
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Only the user who ran /work can use this button.", ephemeral=True)
+            return False
+        return True
+
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger, emoji="✅")
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Use **/job** → **Tools & Upgrades** to manage slot-based tools in the new Job Hub.", ephemeral=True)
+        vip = is_vip_member(interaction.user)  # type: ignore[arg-type]
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                active_slot = await get_active_slot(session, guild_id=self.guild_id, user_id=self.user_id, vip=vip)
+                slot_snap = await get_slot_snapshot(
+                    session,
+                    guild_id=self.guild_id,
+                    user_id=self.user_id,
+                    vip=vip,
+                    slot_index=int(active_slot.slot_index),
+                )
+                if not slot_snap.job_key or not slot_snap.selected_tool_key:
+                    await interaction.response.send_message(
+                        "Assign a job and select a tool in **/job** before upgrading.",
+                        ephemeral=True,
+                    )
+                    return
+
+                ok, message = await buy_or_upgrade_tool(
+                    session,
+                    guild_id=self.guild_id,
+                    user_id=self.user_id,
+                    slot_index=int(active_slot.slot_index),
+                    job_key=slot_snap.job_key,
+                    tool_key=slot_snap.selected_tool_key,
+                )
+
+        if not ok:
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+
+        self.confirm.disabled = True
+        for child in self.children:
+            if isinstance(child, discord.ui.Button) and child.label == "Cancel":
+                child.disabled = True
+        await interaction.response.edit_message(content=f"✅ {message}", view=self)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Upgrade cancelled.", ephemeral=True)
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="Upgrade cancelled.", view=self)
+
