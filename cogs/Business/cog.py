@@ -60,17 +60,25 @@ from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import select
 
-from db.models import BusinessOwnershipRow, WalletRow
+from db.models import AdminAuditLogRow, BusinessManagerAssignmentRow, BusinessOwnershipRow, BusinessRunRow, BusinessWorkerAssignmentRow, WalletRow
 from services.db import sessions
 from services.achievements import check_and_grant_achievements, queue_achievement_announcements
 from services.users import ensure_user_rows
 from services.vip import is_vip_member
+import os
 from .runtime import BusinessRuntimeEngine, CompletedRunNotice
 
 log = logging.getLogger(__name__)
 
 AUTO_HIRE_MAX_REROLLS = 250
 AUTO_HIRE_ALLOWED_RARITIES = {"common", "uncommon", "rare", "epic", "mythic"}
+
+_BUSINESS_ADMIN_ROLE_IDS = {int(part) for part in ((os.getenv("BUSINESS_ADMIN_ROLE_IDS") or os.getenv("BUSINESS_ADMIN_ROLE_ID") or "").replace(",", " ").split()) if part.strip().isdigit()}
+RARITY_ORDER = ("common", "uncommon", "rare", "epic", "legendary", "mythical")
+_MANAGER_TEMPLATES = {"Operations Lead": {"runtime_bonus_hours": 4, "profit_bonus_bp": 300, "auto_restart_charges": 1}, "Revenue Director": {"runtime_bonus_hours": 2, "profit_bonus_bp": 650, "auto_restart_charges": 0}, "Automation Chief": {"runtime_bonus_hours": 6, "profit_bonus_bp": 250, "auto_restart_charges": 2}, "Mythical Overseer": {"runtime_bonus_hours": 12, "profit_bonus_bp": 1200, "auto_restart_charges": 5}}
+_WORKER_TEMPLATES = {"Analyst": {"worker_type": "efficient", "flat_profit_bonus": 250, "percent_profit_bonus_bp": 125}, "Closer": {"worker_type": "fast", "flat_profit_bonus": 400, "percent_profit_bonus_bp": 90}, "Specialist": {"worker_type": "kind", "flat_profit_bonus": 150, "percent_profit_bonus_bp": 220}, "Mythical Operator": {"worker_type": "efficient", "flat_profit_bonus": 1500, "percent_profit_bonus_bp": 900}}
+_PANEL_PAGE_SIZE = 5
+_ACCESS_DENIED = "Access Denied - You do not have permission to use this dashboard."
 
 _BUSINESS_RUNTIME_STATE_PATH = Path("data/business_runtime_state.json")
 
@@ -111,6 +119,7 @@ try:
         stop_business_run,
         upgrade_business,
         prestige_business,
+        get_business_def_by_key,
     )
 except Exception:
     @dataclass(slots=True)
@@ -3179,6 +3188,225 @@ class BusinessCog(commands.Cog):
 
 
 
+    async def _business_admin_authorized(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is None:
+            return False
+        member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
+        if member is not None and member.guild_permissions.administrator:
+            return True
+        if member is not None and _BUSINESS_ADMIN_ROLE_IDS and any(int(role.id) in _BUSINESS_ADMIN_ROLE_IDS for role in member.roles):
+            return True
+        owner_ids = getattr(self.bot, "owner_ids", set()) or set()
+        return int(interaction.user.id) in owner_ids or int(interaction.user.id) == int(interaction.guild.owner_id)
+
+    async def _log_business_admin_action(self, session, *, guild_id: int, actor_user_id: int, target_user_id: int, action: str, table_name: str, pk_json: dict, before: Optional[dict], after: Optional[dict], reason: str) -> None:
+        row = AdminAuditLogRow(
+            guild_id=int(guild_id),
+            actor_user_id=int(actor_user_id),
+            target_user_id=int(target_user_id),
+            action=str(action)[:32],
+            table_name=str(table_name)[:64],
+            pk_json=json.dumps(pk_json, default=str),
+            before_json=json.dumps(before, default=str) if before is not None else None,
+            after_json=json.dumps(after, default=str) if after is not None else None,
+            reason=str(reason)[:200],
+        )
+        session.add(row)
+        log.info("business_admin action=%s guild_id=%s actor=%s target=%s reason=%s", action, guild_id, actor_user_id, target_user_id, reason)
+
+    async def _fetch_target_businesses(self, session, *, guild_id: int, user_id: int) -> list[BusinessOwnershipRow]:
+        rows = await session.scalars(select(BusinessOwnershipRow).where(BusinessOwnershipRow.guild_id == int(guild_id), BusinessOwnershipRow.user_id == int(user_id)).order_by(BusinessOwnershipRow.created_at.asc(), BusinessOwnershipRow.business_key.asc()))
+        return list(rows.all())
+
+    async def _build_business_admin_payload(self, *, guild_id: int, session: BusinessAdminSession) -> dict:
+        async with self.sessionmaker() as db_session:
+            ownerships = await self._fetch_target_businesses(db_session, guild_id=guild_id, user_id=session.target_user_id)
+            if session.target_business_key is None and ownerships:
+                session.target_business_key = ownerships[0].business_key
+            ownership = next((row for row in ownerships if row.business_key == session.target_business_key), None)
+            embed = discord.Embed(title="Business Admin Dashboard", color=discord.Color.orange(), timestamp=datetime.now(timezone.utc))
+            embed.add_field(name="Target User", value=f"<@{session.target_user_id}>\n`{session.target_user_id}`", inline=False)
+            if ownership is None:
+                embed.description = "This user does not currently own a business. Use **Edit Core Stats** after initializing a business to repair data if needed."
+            else:
+                detail = await get_business_manage_snapshot(db_session, guild_id=guild_id, user_id=session.target_user_id, business_key=ownership.business_key)
+                worker_slots = await get_worker_assignment_slots(db_session, guild_id=guild_id, user_id=session.target_user_id, business_key=ownership.business_key)
+                manager_slots = await get_manager_assignment_slots(db_session, guild_id=guild_id, user_id=session.target_user_id, business_key=ownership.business_key)
+                run = await db_session.scalar(select(BusinessRunRow).where(BusinessRunRow.guild_id == int(guild_id), BusinessRunRow.user_id == int(session.target_user_id), BusinessRunRow.business_key == ownership.business_key, BusinessRunRow.status == "running").order_by(BusinessRunRow.created_at.desc()))
+                rarity_counts = {}
+                for slot in [*worker_slots, *manager_slots]:
+                    if slot.is_active and slot.rarity:
+                        rarity_counts[slot.rarity.title()] = rarity_counts.get(slot.rarity.title(), 0) + 1
+                embed.description = f"Panel: **{session.panel.title()}**\nBusiness: **{detail.name}** (`{detail.key}`)"
+                embed.add_field(name="Progress", value=f"Level **{detail.visible_level}**\nPrestige **{detail.prestige}**", inline=True)
+                embed.add_field(name="Staffing", value=f"Managers **{detail.manager_slots_used}/{detail.manager_slots_total}**\nEmployees **{detail.worker_slots_used}/{detail.worker_slots_total}**", inline=True)
+                embed.add_field(name="Dates", value=f"Created {_fmt_dt(ownership.created_at)}\nUpdated {_fmt_dt(ownership.updated_at)}", inline=True)
+                if session.panel == "overview":
+                    embed.add_field(name="Overview", value=f"Owner: <@{ownership.user_id}>\nIncome Mod: x{detail.prestige_multiplier}\nHourly Profit: {detail.hourly_profit:,}\nRunning: {'Yes' if detail.running else 'No'}", inline=False)
+                    embed.add_field(name="Rarity Breakdown", value="\n".join(f"• {k}: {v}" for k, v in sorted(rarity_counts.items())) or "No active staff.", inline=False)
+                elif session.panel == "managers":
+                    lines=[]
+                    active=[slot for slot in manager_slots]
+                    start=session.page*_PANEL_PAGE_SIZE
+                    for slot in active[start:start+_PANEL_PAGE_SIZE]:
+                        if slot.is_active:
+                            lines.append(f"Slot {slot.slot_index}: **{slot.manager_name}** ({slot.rarity}) • +{slot.runtime_bonus_hours}h • {_bp_to_percent(slot.profit_bonus_bp)} • restart {slot.auto_restart_charges}")
+                        else:
+                            lines.append(f"Slot {slot.slot_index}: *(empty)*")
+                    embed.add_field(name="Manager List", value="\n".join(lines) or "No manager slots.", inline=False)
+                elif session.panel == "employees":
+                    lines=[]
+                    active=[slot for slot in worker_slots]
+                    start=session.page*_PANEL_PAGE_SIZE
+                    for slot in active[start:start+_PANEL_PAGE_SIZE]:
+                        if slot.is_active:
+                            lines.append(f"Slot {slot.slot_index}: **{slot.worker_name}** ({slot.rarity}/{slot.worker_type}) • +{slot.flat_profit_bonus:,} • {_bp_to_percent(slot.percent_profit_bonus_bp)}")
+                        else:
+                            lines.append(f"Slot {slot.slot_index}: *(empty)*")
+                    embed.add_field(name="Employee List", value="\n".join(lines) or "No employee slots.", inline=False)
+                elif session.panel == "level":
+                    embed.add_field(name="Level Controls", value=f"Current visible level: **{detail.visible_level}**\nUse the buttons below for ±1/5/10 or set an exact stored level via modal.", inline=False)
+                elif session.panel == "prestige":
+                    embed.add_field(name="Prestige Controls", value=f"Current prestige: **{detail.prestige}**\nUse the buttons below for ±1 or exact set.", inline=False)
+                elif session.panel == "core":
+                    embed.add_field(name="Core Stats", value=f"Stored Level: `{ownership.level}`\nPrestige: `{ownership.prestige}`\nTotal Earned: `{ownership.total_earned}`\nTotal Spent: `{ownership.total_spent}`\nActive Run: `{run.id if run else 'none'}`", inline=False)
+                elif session.panel == "special":
+                    embed.add_field(name="Grant Special Staff", value=f"Type: **{session.special_staff_type.title()}**\nRarity: **{session.special_staff_rarity.title()}**\nTemplate: **{session.special_staff_template or 'Not selected'}**", inline=False)
+            view = BusinessAdminDashboardView(cog=self, guild_id=guild_id, session=session, ownerships=ownerships)
+            self._configure_business_admin_view(view, ownership is not None)
+            return {"embed": embed, "view": view}
+
+    def _configure_business_admin_view(self, view: BusinessAdminDashboardView, has_business: bool) -> None:
+        view.btn_overview.disabled = not has_business
+        view.btn_managers.disabled = not has_business
+        view.btn_employees.disabled = not has_business
+        view.btn_level.disabled = not has_business
+        view.btn_prestige.disabled = not has_business
+        view.btn_special.disabled = not has_business
+        panel = view.session.panel
+        primary = {"overview": "Fix Data", "managers": "Add/Edit", "employees": "Add/Edit", "level": "+1 / Set", "prestige": "+1 / Set", "core": "Edit Core", "special": "Grant"}.get(panel, "Action")
+        secondary = {"overview": "Initialize", "managers": "Remove/Replace", "employees": "Remove/Replace", "level": "-1 / +5", "prestige": "-1", "core": "Normalize", "special": "Cycle Type"}.get(panel, "Secondary")
+        view.btn_action.label = primary
+        view.btn_secondary.label = secondary
+        view.btn_action.disabled = not has_business and panel not in {"overview", "core"}
+        view.btn_secondary.disabled = False
+
+    async def _business_admin_adjust_level(self, interaction: discord.Interaction, admin_session: BusinessAdminSession, delta: int) -> None:
+        view = BusinessAdminDashboardView(cog=self, guild_id=int(interaction.guild_id), session=admin_session, ownerships=[])
+        session_obj = admin_session
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                ownership = await session.scalar(select(BusinessOwnershipRow).where(BusinessOwnershipRow.guild_id == int(interaction.guild_id), BusinessOwnershipRow.user_id == int(session_obj.target_user_id), BusinessOwnershipRow.business_key == str(session_obj.target_business_key)))
+                if ownership is None:
+                    await interaction.response.send_message("Target user has no selected business.", ephemeral=True)
+                    return
+                before = {"level": int(ownership.level), "prestige": int(ownership.prestige)}
+                ownership.level = max(0, int(ownership.level) + int(delta))
+                await self._log_business_admin_action(session, guild_id=interaction.guild_id, actor_user_id=interaction.user.id, target_user_id=session_obj.target_user_id, action="update", table_name="business_ownership", pk_json={"id": ownership.id}, before=before, after={"level": ownership.level, "prestige": ownership.prestige}, reason=f"Level delta {delta}")
+        payload = await self._build_business_admin_payload(guild_id=int(interaction.guild_id), session=admin_session)
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=payload["embed"], view=payload["view"])
+        else:
+            await interaction.response.edit_message(embed=payload["embed"], view=payload["view"])
+
+
+    async def _handle_business_admin_primary_action(self, interaction: discord.Interaction, admin_session: BusinessAdminSession, view: BusinessAdminDashboardView) -> None:
+        panel = admin_session.panel
+        if panel == "level":
+            await self._business_admin_adjust_level(interaction, admin_session, 1)
+            return
+        if panel == "prestige":
+            await self._business_admin_adjust_prestige(interaction, admin_session, 1)
+            return
+        if panel == "special":
+            await self._business_admin_grant_special(interaction, admin_session)
+            return
+        if panel == "core":
+            await interaction.response.send_modal(AdminValueModal(title="Edit Core Stats", fields=[("level","Stored level", "0", True), ("prestige","Prestige", "0", True), ("earned","Total earned", "0", True), ("spent","Total spent", "0", True)], on_submit_cb=lambda i,v: self._business_admin_save_core_modal(i, admin_session, v)))
+            return
+        await interaction.response.send_message("Switch to a specific panel to perform that action.", ephemeral=True)
+
+    async def _handle_business_admin_secondary_action(self, interaction: discord.Interaction, admin_session: BusinessAdminSession, view: BusinessAdminDashboardView) -> None:
+        panel = admin_session.panel
+        if panel == "level":
+            await self._business_admin_adjust_level(interaction, admin_session, -1)
+            return
+        if panel == "prestige":
+            await self._business_admin_adjust_prestige(interaction, admin_session, -1)
+            return
+        if panel == "special":
+            admin_session.special_staff_type = "employee" if admin_session.special_staff_type == "manager" else "manager"
+            admin_session.special_staff_template = None
+            await view.refresh(interaction, notice=f"Grant type changed to {admin_session.special_staff_type}.")
+            return
+        await interaction.response.send_message("Secondary action is not available on this panel yet.", ephemeral=True)
+
+    async def _business_admin_adjust_prestige(self, interaction: discord.Interaction, admin_session: BusinessAdminSession, delta: int) -> None:
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                ownership = await session.scalar(select(BusinessOwnershipRow).where(BusinessOwnershipRow.guild_id == int(interaction.guild_id), BusinessOwnershipRow.user_id == int(admin_session.target_user_id), BusinessOwnershipRow.business_key == str(admin_session.target_business_key)))
+                if ownership is None:
+                    await interaction.response.send_message("Target user has no selected business.", ephemeral=True)
+                    return
+                before = {"level": int(ownership.level), "prestige": int(ownership.prestige)}
+                ownership.prestige = max(0, int(ownership.prestige) + int(delta))
+                await self._log_business_admin_action(session, guild_id=interaction.guild_id, actor_user_id=interaction.user.id, target_user_id=admin_session.target_user_id, action="update", table_name="business_ownership", pk_json={"id": ownership.id}, before=before, after={"level": ownership.level, "prestige": ownership.prestige}, reason=f"Prestige delta {delta}")
+        payload = await self._build_business_admin_payload(guild_id=int(interaction.guild_id), session=admin_session)
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=payload["embed"], view=payload["view"])
+        else:
+            await interaction.response.edit_message(embed=payload["embed"], view=payload["view"])
+
+    async def _business_admin_save_core_modal(self, interaction: discord.Interaction, admin_session: BusinessAdminSession, values: dict[str, str]) -> None:
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                ownership = await session.scalar(select(BusinessOwnershipRow).where(BusinessOwnershipRow.guild_id == int(interaction.guild_id), BusinessOwnershipRow.user_id == int(admin_session.target_user_id), BusinessOwnershipRow.business_key == str(admin_session.target_business_key)))
+                if ownership is None:
+                    await interaction.response.send_message("Target user has no selected business.", ephemeral=True)
+                    return
+                before = {"level": int(ownership.level), "prestige": int(ownership.prestige), "total_earned": int(ownership.total_earned), "total_spent": int(ownership.total_spent)}
+                ownership.level = max(0, int(values["level"]))
+                ownership.prestige = max(0, int(values["prestige"]))
+                ownership.total_earned = max(0, int(values["earned"]))
+                ownership.total_spent = max(0, int(values["spent"]))
+                await self._log_business_admin_action(session, guild_id=interaction.guild_id, actor_user_id=interaction.user.id, target_user_id=admin_session.target_user_id, action="update", table_name="business_ownership", pk_json={"id": ownership.id}, before=before, after={"level": ownership.level, "prestige": ownership.prestige, "total_earned": ownership.total_earned, "total_spent": ownership.total_spent}, reason="Core stats edit")
+        payload = await self._build_business_admin_payload(guild_id=int(interaction.guild_id), session=admin_session)
+        await interaction.response.edit_message(embed=payload["embed"], view=payload["view"])
+
+    async def _business_admin_grant_special(self, interaction: discord.Interaction, admin_session: BusinessAdminSession) -> None:
+        template_name = admin_session.special_staff_template
+        if not template_name:
+            template_name = ("Mythical Overseer" if admin_session.special_staff_type == "manager" else "Mythical Operator")
+            admin_session.special_staff_template = template_name
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                if admin_session.special_staff_type == "manager":
+                    stats = dict(_MANAGER_TEMPLATES[template_name])
+                    result = await hire_manager_manual(session, guild_id=int(interaction.guild_id), user_id=int(admin_session.target_user_id), business_key=str(admin_session.target_business_key), manager_name=template_name, rarity=admin_session.special_staff_rarity, runtime_bonus_hours=int(stats["runtime_bonus_hours"]), profit_bonus_bp=int(stats["profit_bonus_bp"]), auto_restart_charges=int(stats["auto_restart_charges"]), charge_silver=False)
+                else:
+                    stats = dict(_WORKER_TEMPLATES[template_name])
+                    result = await hire_worker_manual(session, guild_id=int(interaction.guild_id), user_id=int(admin_session.target_user_id), business_key=str(admin_session.target_business_key), worker_name=template_name, worker_type=str(stats["worker_type"]), rarity=admin_session.special_staff_rarity, flat_profit_bonus=int(stats["flat_profit_bonus"]), percent_profit_bonus_bp=int(stats["percent_profit_bonus_bp"]), charge_silver=False)
+                await self._log_business_admin_action(session, guild_id=interaction.guild_id, actor_user_id=interaction.user.id, target_user_id=admin_session.target_user_id, action="insert", table_name=f"business_{admin_session.special_staff_type}_assignments", pk_json={"business_key": admin_session.target_business_key}, before=None, after={"template": template_name, "rarity": admin_session.special_staff_rarity, "ok": result.ok, "message": result.message}, reason=f"Granted special {admin_session.special_staff_type}")
+        payload = await self._build_business_admin_payload(guild_id=int(interaction.guild_id), session=admin_session)
+        embed = payload["embed"]
+        embed.description = f"{result.message}\n\n{embed.description or ''}".strip()
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=embed, view=payload["view"])
+        else:
+            await interaction.response.edit_message(embed=embed, view=payload["view"])
+
+    @app_commands.command(name="businessadmin", description="Open the admin-only business management dashboard for a target user.")
+    async def business_admin_dashboard_cmd(self, interaction: discord.Interaction, user: discord.Member) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("This only works in a server.", ephemeral=True)
+            return
+        if not await self._business_admin_authorized(interaction):
+            await interaction.response.send_message(_ACCESS_DENIED, ephemeral=True)
+            return
+        admin_session = BusinessAdminSession(admin_id=int(interaction.user.id), target_user_id=int(user.id))
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        payload = await self._build_business_admin_payload(guild_id=int(interaction.guild.id), session=admin_session)
+        await interaction.followup.send(embed=payload["embed"], view=payload["view"], ephemeral=True)
     @app_commands.command(name="business_admin_hire_worker", description="[Admin/Debug] Manually hire a worker with explicit stats.")
     @app_commands.checks.has_permissions(administrator=True)
     async def business_admin_hire_worker_cmd(
@@ -3276,6 +3504,184 @@ class BusinessCog(commands.Cog):
             embed=_build_result_embed(title="Admin Manager Hire", message=result.message, ok=False),
             ephemeral=True,
         )
+from dataclasses import asdict
+
+
+def _fmt_dt(dt: Optional[datetime]) -> str:
+    if dt is None:
+        return "—"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return discord.utils.format_dt(dt, style="F")
+
+
+def _bp_to_percent(bp: int) -> str:
+    return f"{bp / 100:.2f}%"
+
+
+def _normalize_rarity(value: str) -> str:
+    text = str(value or "common").strip().lower()
+    return text if text in RARITY_ORDER else "common"
+
+
+class BusinessAdminSession:
+    def __init__(self, *, admin_id: int, target_user_id: int, target_business_key: Optional[str] = None):
+        self.admin_id = int(admin_id)
+        self.target_user_id = int(target_user_id)
+        self.target_business_key = target_business_key
+        self.panel = "overview"
+        self.page = 0
+        self.selected_slot: Optional[int] = None
+        self.special_staff_type = "manager"
+        self.special_staff_rarity = "mythical"
+        self.special_staff_template: Optional[str] = None
+
+
+class BusinessAdminBaseView(discord.ui.View):
+    def __init__(self, *, cog: "BusinessCog", guild_id: int, session: BusinessAdminSession, timeout: float = 600):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.session = session
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        allowed = await self.cog._business_admin_authorized(interaction)
+        if not allowed or int(interaction.user.id) != self.session.admin_id:
+            msg = _ACCESS_DENIED if not allowed else "This admin dashboard belongs to another admin session."
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+
+
+class BusinessAdminTargetSelect(discord.ui.UserSelect):
+    def __init__(self, view: "BusinessAdminDashboardView"):
+        super().__init__(placeholder="Switch target user…", min_values=1, max_values=1, row=0)
+        self.parent_view = view
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        user = self.values[0]
+        self.parent_view.session.target_user_id = int(user.id)
+        self.parent_view.session.target_business_key = None
+        self.parent_view.session.page = 0
+        await self.parent_view.refresh(interaction, notice=f"Target changed to {user.mention}.")
+
+
+class BusinessAdminBusinessSelect(discord.ui.Select):
+    def __init__(self, view: "BusinessAdminDashboardView", ownerships: list[BusinessOwnershipRow]):
+        options = [discord.SelectOption(label=row.business_key.replace('_', ' ').title(), value=row.business_key, default=(row.business_key == view.session.target_business_key)) for row in ownerships[:25]]
+        super().__init__(placeholder="Choose business…", options=options or [discord.SelectOption(label="No business found", value="__none__")], row=0)
+        self.parent_view = view
+        self.disabled = not ownerships
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        value = self.values[0]
+        if value == "__none__":
+            await interaction.response.send_message("No business available for that user.", ephemeral=True)
+            return
+        self.parent_view.session.target_business_key = value
+        self.parent_view.session.page = 0
+        await self.parent_view.refresh(interaction)
+
+
+class AdminValueModal(discord.ui.Modal):
+    def __init__(self, *, title: str, fields: list[tuple[str, str, str, bool]], on_submit_cb):
+        super().__init__(title=title)
+        self._on_submit_cb = on_submit_cb
+        self.inputs = {}
+        for custom_id, label, default, required in fields:
+            inp = discord.ui.TextInput(label=label, default=default, required=required)
+            self.inputs[custom_id] = inp
+            self.add_item(inp)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        values = {key: str(inp.value).strip() for key, inp in self.inputs.items()}
+        await self._on_submit_cb(interaction, values)
+
+
+class BusinessAdminDashboardView(BusinessAdminBaseView):
+    def __init__(self, *, cog: "BusinessCog", guild_id: int, session: BusinessAdminSession, ownerships: list[BusinessOwnershipRow]):
+        super().__init__(cog=cog, guild_id=guild_id, session=session)
+        self.ownerships = ownerships
+        self.add_item(BusinessAdminTargetSelect(self))
+        self.add_item(BusinessAdminBusinessSelect(self, ownerships))
+
+    async def refresh(self, interaction: discord.Interaction, *, notice: Optional[str] = None) -> None:
+        payload = await self.cog._build_business_admin_payload(guild_id=self.guild_id, session=self.session)
+        embed = payload["embed"]
+        view = payload["view"]
+        if notice:
+            embed.description = f"{notice}\n\n{embed.description or ''}".strip()
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=embed, view=view)
+        else:
+            await interaction.response.edit_message(embed=embed, view=view)
+
+    @discord.ui.button(label="View Overview", style=discord.ButtonStyle.primary, row=1)
+    async def btn_overview(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.session.panel = "overview"
+        self.session.page = 0
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="Manage Managers", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_managers(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.session.panel = "managers"
+        self.session.page = 0
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="Manage Employees", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_employees(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.session.panel = "employees"
+        self.session.page = 0
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="Edit Business Level", style=discord.ButtonStyle.secondary, row=2)
+    async def btn_level(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.session.panel = "level"
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="Edit Prestige", style=discord.ButtonStyle.secondary, row=2)
+    async def btn_prestige(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.session.panel = "prestige"
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="Edit Core Stats", style=discord.ButtonStyle.secondary, row=2)
+    async def btn_core(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.session.panel = "core"
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="Grant Special Staff", style=discord.ButtonStyle.success, row=3)
+    async def btn_special(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.session.panel = "special"
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="Action", style=discord.ButtonStyle.success, row=4)
+    async def btn_action(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog._handle_business_admin_primary_action(interaction, self.session, self)
+
+    @discord.ui.button(label="Secondary", style=discord.ButtonStyle.secondary, row=4)
+    async def btn_secondary(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog._handle_business_admin_secondary_action(interaction, self.session, self)
+
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, row=3)
+    async def btn_refresh(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger, row=3)
+    async def btn_close(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        for item in self.children:
+            item.disabled = True
+        if interaction.response.is_done():
+            await interaction.edit_original_response(view=self)
+        else:
+            await interaction.response.edit_message(view=self)
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(BusinessCog(bot))
