@@ -8,7 +8,7 @@ from discord.app_commands import checks
 from discord.ext import commands
 
 from services.db import sessions
-from services.job_hub import ensure_job_hub_slots, get_slot_snapshot
+from services.job_hub import ensure_job_hub_slots, get_slot_snapshot, set_slot_progress
 from services.jobs_core import ensure_job_row, get_or_create_job_row, job_row_image_set
 from services.jobs_embeds import make_job_hub_embed
 from services.jobs_views import JobHubView
@@ -111,6 +111,75 @@ class JobsCog(commands.Cog):
                 row = await ensure_job_row(session, key=key, name=d.name)
                 row.enabled = bool(enabled)
         await interaction.response.send_message(f"✅ **{d.name}** is now {'enabled' if enabled else 'disabled'}.", ephemeral=True)
+
+    @app_commands.command(name="job_progress_admin", description="Admin: set a user's XP and prestige for one assigned job slot.")
+    @app_commands.describe(
+        user="Target user",
+        slot="The assigned slot to update",
+        xp="Stored XP into the slot's current level",
+        prestige="Prestige to set for that slot",
+    )
+    @checks.has_permissions(manage_guild=True)
+    async def job_progress_admin(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        slot: app_commands.Range[int, 1, 3],
+        xp: app_commands.Range[int, 0],
+        prestige: app_commands.Range[int, 0, 100],
+    ):
+        if interaction.guild is None:
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+
+        guild_id = int(interaction.guild.id)
+        user_id = int(user.id)
+        slot_index = int(slot) - 1
+        vip = is_vip_member(user)
+
+        await interaction.response.defer(ephemeral=True)
+
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                rows = await ensure_job_hub_slots(session, guild_id=guild_id, user_id=user_id, vip=vip)
+                target_slot = rows[slot_index]
+                job_key = (target_slot.job_key or "").strip().lower()
+                if not job_key:
+                    await interaction.followup.send(
+                        f"{user.mention} does not have a job assigned in slot **{slot}**.",
+                        ephemeral=True,
+                    )
+                    return
+
+                await set_slot_progress(
+                    session,
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    slot_index=slot_index,
+                    job_key=job_key,
+                    xp=int(xp),
+                    prestige=int(prestige),
+                )
+                snap = await get_slot_snapshot(session, guild_id=guild_id, user_id=user_id, vip=vip, slot_index=slot_index)
+
+        d = get_job_def(job_key)
+        job_name = d.name if d is not None else job_key.replace("_", " ").title()
+        progress_snap = snap.progress
+        if progress_snap is None:
+            await interaction.followup.send("Updated the slot, but I couldn't load the progress snapshot afterwards.", ephemeral=True)
+            return
+        await interaction.followup.send(
+            "\n".join(
+                (
+                    f"✅ Updated {user.mention}'s **{job_name}** progress in slot **{slot}**.",
+                    f"• Level: **{progress_snap.level}/{progress_snap.level_cap}**",
+                    f"• Prestige: **{progress_snap.prestige}**",
+                    f"• XP: **{progress_snap.xp:,}/{progress_snap.xp_needed:,}**",
+                    f"• Total XP: **{progress_snap.total_xp:,}**",
+                )
+            ),
+            ephemeral=True,
+        )
 
     @app_commands.command(name="job_upgrade", description="Open the Job Hub on the tools section.")
     async def job_upgrade_cmd(self, interaction: discord.Interaction):
