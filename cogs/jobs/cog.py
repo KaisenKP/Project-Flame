@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional
 
 import discord
@@ -20,14 +22,40 @@ from services.vip import is_vip_member
 from .jobs import JOB_MODULES, get_job_def
 
 _WORK_RESULT_TITLE_SUFFIX = " Work Result"
-_JOB_XP_RE = re.compile(r"Job XP:\s*\*\*\+([\d,]+)\*\*")
-_WORK_PROGRESS_RE = re.compile(r"\*\*P(?P<prestige>\d+)\*\*.*?Level \*\*(?P<level>\d+)\*\*", re.IGNORECASE | re.DOTALL)
+_LOG = logging.getLogger(__name__)
+_PROGRESS_PATTERNS = (
+    re.compile(r"prestige\s*[:#-]?\s*(?P<prestige>\d+)\D{0,12}level\s*[:#-]?\s*(?P<level>\d+)", re.IGNORECASE | re.DOTALL),
+    re.compile(r"\bp\s*[:#-]?\s*(?P<prestige>\d+)\D{0,8}l\s*[:#-]?\s*(?P<level>\d+)\b", re.IGNORECASE | re.DOTALL),
+    re.compile(r"\*\*p(?P<prestige>\d+)\*\*.*?level\s*\*\*(?P<level>\d+)\*\*", re.IGNORECASE | re.DOTALL),
+)
 
 
 @dataclass(frozen=True)
 class _RecoveredWorkState:
     prestige: int
     level: int
+
+
+@dataclass(frozen=True)
+class _ParsedWorkMessage:
+    job_name: str | None
+    state: _RecoveredWorkState | None
+
+
+@lru_cache(maxsize=4096)
+def _extract_progress_state(text: str) -> _RecoveredWorkState | None:
+    normalized = " ".join((text or "").replace("|", " ").split())
+    if not normalized:
+        return None
+    for pattern in _PROGRESS_PATTERNS:
+        match = pattern.search(normalized)
+        if match is None:
+            continue
+        return _RecoveredWorkState(
+            prestige=max(int(match.group("prestige")), 0),
+            level=max(int(match.group("level")), 1),
+        )
+    return None
 
 
 class JobsCog(commands.Cog):
@@ -49,20 +77,6 @@ class JobsCog(commands.Cog):
         return title.endswith(_WORK_RESULT_TITLE_SUFFIX)
 
     @staticmethod
-    def _extract_work_job_xp(message: discord.Message) -> int:
-        if not message.embeds:
-            return 0
-        embed = message.embeds[0]
-        for field in embed.fields:
-            if (field.name or "").strip().lower() != "gains":
-                continue
-            match = _JOB_XP_RE.search(field.value or "")
-            if match is None:
-                return 0
-            return int(match.group(1).replace(",", ""))
-        return 0
-
-    @staticmethod
     def _extract_work_job_name(message: discord.Message) -> str | None:
         if not message.embeds:
             return None
@@ -71,22 +85,36 @@ class JobsCog(commands.Cog):
             return None
         return title[: -len(_WORK_RESULT_TITLE_SUFFIX)].strip() or None
 
-    @staticmethod
-    def _extract_work_state(message: discord.Message) -> _RecoveredWorkState | None:
+    def _parse_work_message(self, message: discord.Message, *, cache: dict[int, _ParsedWorkMessage | None]) -> _ParsedWorkMessage | None:
+        cached = cache.get(int(message.id))
+        if cached is not None or int(message.id) in cache:
+            return cached
         if not message.embeds:
+            cache[int(message.id)] = None
             return None
+
+        job_name = self._extract_work_job_name(message)
+        if not job_name:
+            cache[int(message.id)] = None
+            return None
+
         embed = message.embeds[0]
-        for field in embed.fields:
-            if (field.name or "").strip().lower() != "job progress":
-                continue
-            match = _WORK_PROGRESS_RE.search(field.value or "")
-            if match is None:
-                return None
-            return _RecoveredWorkState(
-                prestige=max(int(match.group("prestige")), 0),
-                level=max(int(match.group("level")), 1),
-            )
-        return None
+        text_blocks: list[str] = [embed.description or ""]
+        text_blocks.extend(field.value or "" for field in embed.fields)
+        text_blocks.append(embed.footer.text if embed.footer else "")
+
+        state: _RecoveredWorkState | None = None
+        for block in text_blocks:
+            state = _extract_progress_state(block)
+            if state is not None:
+                break
+
+        if state is None:
+            _LOG.debug("fixjobxp: unable to parse progression from work message", extra={"message_id": int(message.id), "author_id": int(message.author.id)})
+
+        parsed = _ParsedWorkMessage(job_name=job_name, state=state)
+        cache[int(message.id)] = parsed
+        return parsed
 
     @app_commands.command(name="work_image_admin", description="Admin: set an image URL used in /work embeds for a job.")
     @app_commands.describe(job="Job key (miner, fisherman, etc.)", image_url="Direct image URL from your image library")
@@ -293,24 +321,26 @@ class JobsCog(commands.Cog):
 
         scanned_messages = 0
         matched_work_messages = 0
-        recovered_job_xp_by_name: dict[str, int] = {}
+        parse_failures = 0
+        parsed_message_cache: dict[int, _ParsedWorkMessage | None] = {}
         recovered_job_state_by_name: dict[str, _RecoveredWorkState] = {}
 
-        async for message in channel.history(limit=int(limit), oldest_first=True):
+        async for message in channel.history(limit=int(limit), oldest_first=False):
             scanned_messages += 1
             if not self._message_matches_work_result(message, user_id=user.id):
                 continue
             matched_work_messages += 1
-            job_name = self._extract_work_job_name(message)
-            if not job_name:
+
+            parsed_message = self._parse_work_message(message, cache=parsed_message_cache)
+            if parsed_message is None or not parsed_message.job_name:
                 continue
 
-            key = job_name.casefold()
-            recovered_job_xp_by_name[key] = recovered_job_xp_by_name.get(key, 0) + self._extract_work_job_xp(message)
-
-            parsed_state = self._extract_work_state(message)
+            key = parsed_message.job_name.casefold()
+            parsed_state = parsed_message.state
             if parsed_state is None:
+                parse_failures += 1
                 continue
+
             current_state = recovered_job_state_by_name.get(key)
             if current_state is None or (parsed_state.prestige, parsed_state.level) > (current_state.prestige, current_state.level):
                 recovered_job_state_by_name[key] = parsed_state
@@ -345,59 +375,63 @@ class JobsCog(commands.Cog):
                     )
                     current_state = (max(int(progress.prestige), 0), max(int(progress.level), 1))
                     target_state = (int(recovered_state.prestige), int(recovered_state.level))
-                    recovered_total_xp = max(
-                        int(recovered_job_xp_by_name.get(job_def.name.casefold(), 0)),
-                        int(total_xp_from_state(
-                            tier=tier_for_category(job_def.category),
-                            job_key=job_key,
-                            prestige=target_state[0],
-                            level=target_state[1],
-                            xp_into=0,
-                        )),
-                    )
-                    inferred_state = state_from_total_xp(
+                    target_total_xp = int(total_xp_from_state(
                         tier=tier_for_category(job_def.category),
                         job_key=job_key,
-                        total_xp=recovered_total_xp,
-                    )
-                    if (int(inferred_state.prestige), int(inferred_state.level)) > target_state:
-                        target_state = (int(inferred_state.prestige), int(inferred_state.level))
+                        prestige=target_state[0],
+                        level=target_state[1],
+                        xp_into=0,
+                    ))
 
-                    target_total_xp = max(
-                        recovered_total_xp,
-                        int(total_xp_from_state(
-                            tier=tier_for_category(job_def.category),
-                            job_key=job_key,
-                            prestige=target_state[0],
-                            level=target_state[1],
-                            xp_into=0,
-                        )),
-                    )
-
-                    if current_state >= target_state and max(int(progress.total_xp), 0) >= target_total_xp:
+                    current_total_xp = max(int(progress.total_xp), 0)
+                    if current_state > target_state:
                         skipped_jobs.append(
-                            f"Slot {int(slot.slot_index) + 1}: {job_def.name} (stored P{current_state[0]} Lv {current_state[1]} is already >= recovered P{target_state[0]} Lv {target_state[1]})"
+                            f"Slot {int(slot.slot_index) + 1}: {job_def.name} (stored P{current_state[0]} Lv {current_state[1]} is already above recovered P{target_state[0]} Lv {target_state[1]})"
+                        )
+                        continue
+                    if current_state == target_state and current_total_xp >= target_total_xp:
+                        skipped_jobs.append(
+                            f"Slot {int(slot.slot_index) + 1}: {job_def.name} (stored P{current_state[0]} Lv {current_state[1]} already matches or exceeds the recovered floor)"
                         )
                         continue
 
                     repaired_state = state_from_total_xp(
                         tier=tier_for_category(job_def.category),
                         job_key=job_key,
-                        total_xp=target_total_xp,
+                        total_xp=max(current_total_xp, target_total_xp) if current_state == target_state else target_total_xp,
                     )
+                    new_total_xp = max(current_total_xp, target_total_xp) if current_state == target_state else target_total_xp
                     progress.prestige = int(repaired_state.prestige)
                     progress.level = int(repaired_state.level)
                     progress.xp = int(repaired_state.xp_into)
-                    progress.total_xp = int(target_total_xp)
+                    progress.total_xp = int(new_total_xp)
+                    _LOG.info(
+                        "fixjobxp corrected job progression",
+                        extra={
+                            "guild_id": int(interaction.guild.id),
+                            "user_id": int(user.id),
+                            "slot_index": int(slot.slot_index),
+                            "job_key": job_key,
+                            "old_prestige": current_state[0],
+                            "old_level": current_state[1],
+                            "old_total_xp": int(current_total_xp),
+                            "new_prestige": int(repaired_state.prestige),
+                            "new_level": int(repaired_state.level),
+                            "new_total_xp": int(new_total_xp),
+                        },
+                    )
                     restored_jobs.append(
-                        f"Slot {int(slot.slot_index) + 1}: {job_def.name} — P{int(progress.prestige)} Lv {int(progress.level)} ({int(progress.total_xp):,} total XP reconstructed from /work history)"
+                        f"Slot {int(slot.slot_index) + 1}: {job_def.name} — P{int(progress.prestige)} Lv {int(progress.level)} ({int(progress.total_xp):,} total XP minimum reconstructed from /work history)"
                     )
 
         lines = [
             f"Scanned **{scanned_messages:,}** messages in {channel.mention}.",
             f"Found **{matched_work_messages:,}** `/work` result messages for {user.mention}.",
-            "Checked each assigned job against the highest prestige/level visible in historical `/work` embeds.",
+            "Checked each assigned job against the highest prestige/level visible in historical `/work` embeds and only repaired job progression fields.",
         ]
+
+        if parse_failures:
+            lines.append(f"⚠️ Skipped **{parse_failures:,}** malformed `/work` embed(s) that did not contain readable job progression.")
 
         if restored_jobs:
             lines.append(f"✅ Repaired **{len(restored_jobs)}** assigned job(s) from `/work` history.")
