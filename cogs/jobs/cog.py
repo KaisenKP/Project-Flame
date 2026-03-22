@@ -17,6 +17,7 @@ from services.job_progression import state_from_total_xp, total_xp_from_state
 from services.jobs_core import ensure_job_row, get_or_create_job_row, job_row_image_set, tier_for_category
 from services.jobs_embeds import make_job_hub_embed
 from services.jobs_views import JobHubView
+from services.users import ensure_user_rows
 from services.vip import is_vip_member
 
 from .jobs import JOB_MODULES, get_job_def
