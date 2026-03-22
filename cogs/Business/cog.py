@@ -78,6 +78,7 @@ RARITY_ORDER = ("common", "uncommon", "rare", "epic", "legendary", "mythical")
 _MANAGER_TEMPLATES = {"Operations Lead": {"runtime_bonus_hours": 4, "profit_bonus_bp": 300, "auto_restart_charges": 1}, "Revenue Director": {"runtime_bonus_hours": 2, "profit_bonus_bp": 650, "auto_restart_charges": 0}, "Automation Chief": {"runtime_bonus_hours": 6, "profit_bonus_bp": 250, "auto_restart_charges": 2}, "Mythical Overseer": {"runtime_bonus_hours": 12, "profit_bonus_bp": 1200, "auto_restart_charges": 5}}
 _WORKER_TEMPLATES = {"Analyst": {"worker_type": "efficient", "flat_profit_bonus": 250, "percent_profit_bonus_bp": 125}, "Closer": {"worker_type": "fast", "flat_profit_bonus": 400, "percent_profit_bonus_bp": 90}, "Specialist": {"worker_type": "kind", "flat_profit_bonus": 150, "percent_profit_bonus_bp": 220}, "Mythical Operator": {"worker_type": "efficient", "flat_profit_bonus": 1500, "percent_profit_bonus_bp": 900}}
 _PANEL_PAGE_SIZE = 5
+_ASSIGNMENTS_PAGE_SIZE = 10
 _ACCESS_DENIED = "Access Denied - You do not have permission to use this dashboard."
 
 _BUSINESS_RUNTIME_STATE_PATH = Path("data/business_runtime_state.json")
@@ -1012,6 +1013,7 @@ def _build_worker_assignments_embed(
     user: discord.abc.User,
     detail: BusinessManageSnapshot,
     slots: Sequence[WorkerAssignmentSlotSnapshot],
+    page: int = 0,
 ) -> discord.Embed:
     title = f"👷 Worker Panel • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}"
     description = (
@@ -1021,8 +1023,17 @@ def _build_worker_assignments_embed(
     e = _base_embed(title=title, description=description)
     e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
 
+    all_slots = list(slots or ())
+    total_pages = max(1, (len(all_slots) + _ASSIGNMENTS_PAGE_SIZE - 1) // _ASSIGNMENTS_PAGE_SIZE)
+    current_page = min(max(int(page), 0), total_pages - 1)
+    start = current_page * _ASSIGNMENTS_PAGE_SIZE
+    visible_slots = all_slots[start:start + _ASSIGNMENTS_PAGE_SIZE]
+
+    if total_pages > 1:
+        e.add_field(name="Page", value=f"Page **{_fmt_int(current_page + 1)}** of **{_fmt_int(total_pages)}**", inline=False)
+
     lines: list[str] = []
-    for slot in slots or ():
+    for slot in visible_slots:
         slot_index = _fmt_int(getattr(slot, 'slot_index', 0))
         is_active = bool(getattr(slot, 'is_active', False))
         if is_active:
@@ -1050,6 +1061,7 @@ def _build_manager_assignments_embed(
     user: discord.abc.User,
     detail: BusinessManageSnapshot,
     slots: Sequence[ManagerAssignmentSlotSnapshot],
+    page: int = 0,
 ) -> discord.Embed:
     title = f"🧑‍💼 Manager Panel • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}"
     description = (
@@ -1059,8 +1071,17 @@ def _build_manager_assignments_embed(
     e = _base_embed(title=title, description=description)
     e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
 
+    all_slots = list(slots or ())
+    total_pages = max(1, (len(all_slots) + _ASSIGNMENTS_PAGE_SIZE - 1) // _ASSIGNMENTS_PAGE_SIZE)
+    current_page = min(max(int(page), 0), total_pages - 1)
+    start = current_page * _ASSIGNMENTS_PAGE_SIZE
+    visible_slots = all_slots[start:start + _ASSIGNMENTS_PAGE_SIZE]
+
+    if total_pages > 1:
+        e.add_field(name="Page", value=f"Page **{_fmt_int(current_page + 1)}** of **{_fmt_int(total_pages)}**", inline=False)
+
     lines: list[str] = []
-    for slot in slots or ():
+    for slot in visible_slots:
         slot_index = _fmt_int(getattr(slot, 'slot_index', 0))
         is_active = bool(getattr(slot, 'is_active', False))
         if is_active:
@@ -1664,6 +1685,7 @@ class BusinessHubView(BusinessBaseView):
             await interaction.followup.send("This business panel expired. Please run `/business` again.", ephemeral=True)
             return
         view = WorkerAssignmentsView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=detail.key, panel_message_id=panel_message_id, requester=interaction.user)
+        view._sync_pagination_buttons(total_slots=len(slots))
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="View Managers", style=discord.ButtonStyle.secondary, emoji="🧑‍💼", row=2)
@@ -1683,6 +1705,7 @@ class BusinessHubView(BusinessBaseView):
             await interaction.followup.send("This business panel expired. Please run `/business` again.", ephemeral=True)
             return
         view = ManagerAssignmentsView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=detail.key, panel_message_id=panel_message_id, requester=interaction.user)
+        view._sync_pagination_buttons(total_slots=len(slots))
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="Upgrade Business", style=discord.ButtonStyle.primary, emoji="⬆️", row=2)
@@ -2095,6 +2118,7 @@ class BusinessDetailView(BusinessBaseView):
             await interaction.followup.send("This business panel expired. Please run `/business` again.", ephemeral=True)
             return
         view = WorkerAssignmentsView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, panel_message_id=panel_message_id, requester=interaction.user)
+        view._sync_pagination_buttons(total_slots=len(slots))
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="View Managers", style=discord.ButtonStyle.secondary, emoji="🧑‍💼", row=3, disabled=True)
@@ -2114,6 +2138,7 @@ class BusinessDetailView(BusinessBaseView):
             await interaction.followup.send("This business panel expired. Please run `/business` again.", ephemeral=True)
             return
         view = ManagerAssignmentsView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, panel_message_id=panel_message_id, requester=interaction.user)
+        view._sync_pagination_buttons(total_slots=len(slots))
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="Back to Business Hub", style=discord.ButtonStyle.secondary, emoji="⬅️", row=4)
@@ -2148,7 +2173,7 @@ class RemoveWorkerModal(discord.ui.Modal, title="Remove Worker"):
         selected_slot = next((slot for slot in slots if int(getattr(slot, "slot_index", 0)) == int(requested_slot)), None)
         if not selected_slot or not bool(getattr(selected_slot, "is_active", False)):
             await _safe_defer(interaction)
-            embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots)
+            embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots, page=self.parent_view.page)
             embed.add_field(name="Action", value=f"❌ No active worker found in slot **#{_fmt_int(requested_slot)}**.", inline=False)
             await _safe_edit_panel(interaction, embed=embed, view=self.parent_view, message_id=self.parent_view.panel_message_id)
             return
@@ -2205,7 +2230,8 @@ class ConfirmWorkerRemovalView(discord.ui.View):
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
-        embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots)
+        self.parent_view._sync_pagination_buttons(total_slots=len(slots))
+        embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots, page=self.parent_view.page)
         embed.add_field(name="Action", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
         await _safe_edit_panel(interaction, embed=embed, view=self.parent_view, message_id=self.parent_view.panel_message_id)
         await interaction.edit_original_response(content="Removal confirmed.", embed=None, view=None)
@@ -2235,7 +2261,7 @@ class RemoveManagerModal(discord.ui.Modal, title="Remove Manager"):
         selected_slot = next((slot for slot in slots if int(getattr(slot, "slot_index", 0)) == int(requested_slot)), None)
         if not selected_slot or not bool(getattr(selected_slot, "is_active", False)):
             await _safe_defer(interaction)
-            embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots)
+            embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots, page=self.parent_view.page)
             embed.add_field(name="Action", value=f"❌ No active manager found in slot **#{_fmt_int(requested_slot)}**.", inline=False)
             await _safe_edit_panel(interaction, embed=embed, view=self.parent_view, message_id=self.parent_view.panel_message_id)
             return
@@ -2293,7 +2319,8 @@ class ConfirmManagerRemovalView(discord.ui.View):
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
-        embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots)
+        self.parent_view._sync_pagination_buttons(total_slots=len(slots))
+        embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots, page=self.parent_view.page)
         embed.add_field(name="Action", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
         await _safe_edit_panel(interaction, embed=embed, view=self.parent_view, message_id=self.parent_view.panel_message_id)
         await interaction.edit_original_response(content="Removal confirmed.", embed=None, view=None)
@@ -2527,6 +2554,7 @@ class WorkerAssignmentsView(BusinessBaseView):
         self.business_key = business_key
         self.panel_message_id = int(panel_message_id)
         self.current_candidate: Optional[WorkerCandidateSnapshot] = None
+        self.page = 0
         member: Optional[discord.Member] = requester if isinstance(requester, discord.Member) else None
         if member is None:
             guild = self.cog.bot.get_guild(self.guild_id)
@@ -2534,6 +2562,14 @@ class WorkerAssignmentsView(BusinessBaseView):
                 member = guild.get_member(self.owner_id)
         self.is_vip = is_vip_member(member)
         self.auto_hire_button.disabled = not self.is_vip
+        self._sync_pagination_buttons(total_slots=0)
+
+    def _sync_pagination_buttons(self, *, total_slots: int) -> None:
+        total_pages = max(1, (max(int(total_slots), 0) + _ASSIGNMENTS_PAGE_SIZE - 1) // _ASSIGNMENTS_PAGE_SIZE)
+        if self.page >= total_pages:
+            self.page = total_pages - 1
+        self.prev_page_button.disabled = self.page <= 0
+        self.next_page_button.disabled = self.page >= (total_pages - 1)
 
     async def _send_auto_hire_reply(self, interaction: discord.Interaction) -> None:
         rerolls = 15
@@ -2561,7 +2597,8 @@ class WorkerAssignmentsView(BusinessBaseView):
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return None
-        return detail, slots, _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots)
+        self._sync_pagination_buttons(total_slots=len(slots))
+        return detail, slots, _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots, page=self.page)
 
     async def _show_recruitment_board(self, interaction: discord.Interaction, action_message: Optional[str] = None) -> None:
         payload = await self._refresh_assignments_embed(interaction)
@@ -2627,7 +2664,7 @@ class WorkerAssignmentsView(BusinessBaseView):
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
 
-        assignments_embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots)
+        assignments_embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots, page=self.page)
         if result.ok and result.hired_worker is not None:
             self.current_candidate = None
             result_embed = _build_worker_hire_result_embed(user=interaction.user, detail=detail, hired=result.hired_worker)
@@ -2677,6 +2714,20 @@ class WorkerAssignmentsView(BusinessBaseView):
         view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view, message_id=self.panel_message_id)
 
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, emoji="◀️", row=2, disabled=True)
+    async def prev_page_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        self.page = max(self.page - 1, 0)
+        await _safe_defer(interaction)
+        await self._show_recruitment_board(interaction)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, emoji="▶️", row=2, disabled=True)
+    async def next_page_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        self.page += 1
+        await _safe_defer(interaction)
+        await self._show_recruitment_board(interaction)
+
 
 class ManagerAssignmentsView(BusinessBaseView):
     def __init__(
@@ -2693,6 +2744,7 @@ class ManagerAssignmentsView(BusinessBaseView):
         self.business_key = business_key
         self.panel_message_id = int(panel_message_id)
         self.current_candidate: Optional[ManagerCandidateSnapshot] = None
+        self.page = 0
         member: Optional[discord.Member] = requester if isinstance(requester, discord.Member) else None
         if member is None:
             guild = self.cog.bot.get_guild(self.guild_id)
@@ -2700,6 +2752,14 @@ class ManagerAssignmentsView(BusinessBaseView):
                 member = guild.get_member(self.owner_id)
         self.is_vip = is_vip_member(member)
         self.auto_hire_button.disabled = not self.is_vip
+        self._sync_pagination_buttons(total_slots=0)
+
+    def _sync_pagination_buttons(self, *, total_slots: int) -> None:
+        total_pages = max(1, (max(int(total_slots), 0) + _ASSIGNMENTS_PAGE_SIZE - 1) // _ASSIGNMENTS_PAGE_SIZE)
+        if self.page >= total_pages:
+            self.page = total_pages - 1
+        self.prev_page_button.disabled = self.page <= 0
+        self.next_page_button.disabled = self.page >= (total_pages - 1)
 
     async def _send_auto_hire_reply(self, interaction: discord.Interaction) -> None:
         rerolls = 15
@@ -2727,7 +2787,8 @@ class ManagerAssignmentsView(BusinessBaseView):
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return None
-        return detail, slots, _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots)
+        self._sync_pagination_buttons(total_slots=len(slots))
+        return detail, slots, _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots, page=self.page)
 
     async def _show_recruitment_board(self, interaction: discord.Interaction, action_message: Optional[str] = None) -> None:
         payload = await self._refresh_assignments_embed(interaction)
@@ -2793,7 +2854,7 @@ class ManagerAssignmentsView(BusinessBaseView):
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
 
-        assignments_embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots)
+        assignments_embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots, page=self.page)
         if result.ok and result.hired_manager is not None:
             self.current_candidate = None
             result_embed = _build_manager_hire_result_embed(user=interaction.user, detail=detail, hired=result.hired_manager)
@@ -2847,6 +2908,20 @@ class ManagerAssignmentsView(BusinessBaseView):
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
         view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view, message_id=self.panel_message_id)
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, emoji="◀️", row=2, disabled=True)
+    async def prev_page_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        self.page = max(self.page - 1, 0)
+        await _safe_defer(interaction)
+        await self._show_recruitment_board(interaction)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, emoji="▶️", row=2, disabled=True)
+    async def next_page_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        self.page += 1
+        await _safe_defer(interaction)
+        await self._show_recruitment_board(interaction)
 
 
 # =========================================================
