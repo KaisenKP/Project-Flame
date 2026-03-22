@@ -12,11 +12,11 @@ from discord.app_commands import checks
 from discord.ext import commands
 from sqlalchemy import select
 
-from db.models import UserJobHubProgressRow, UserRow
+from db.models import UserRow
 from services.db import sessions
 from services.job_hub import ensure_job_hub_slots, get_or_create_progress, get_slot_snapshot, set_slot_progress
-from services.job_progression import level_cap_for, state_from_total_xp, total_xp_from_state
-from services.jobs_core import ensure_job_row, get_or_create_job_row, job_row_image_set, tier_for_category
+from services.job_progression import state_from_total_xp, total_xp_from_state
+from services.jobs_core import ensure_job_row, get_or_create_job_row, job_row_image_set
 from services.jobs_embeds import make_job_hub_embed
 from services.jobs_views import JobHubView
 from services.users import ensure_user_rows
@@ -285,7 +285,7 @@ class JobsCog(commands.Cog):
             total += int(xp_req_for_next(current_level))
         return total
 
-    @app_commands.command(name="job_boost_existing_users", description="Admin: multiply existing users' stored levels and prestige by 50.")
+    @app_commands.command(name="job_boost_existing_users", description="Admin: rollback the mistaken regular XP boost without touching Job Hub XP.")
     @checks.has_permissions(manage_guild=True)
     async def job_boost_existing_users(self, interaction: discord.Interaction):
         if interaction.guild is None:
@@ -306,45 +306,21 @@ class JobsCog(commands.Cog):
                 ))
 
                 user_level_rows_touched = 0
-                job_progress_rows_touched = 0
                 for raw_user_id in existing_user_ids:
                     user_id = int(raw_user_id)
                     xp_row = await get_or_create_xp_row(session, guild_id=guild_id, user_id=user_id)
-                    current_level = max(int(xp_row.level_cached or 1), 1)
-                    boosted_level = max(current_level * 50, 1)
-                    xp_row.level_cached = boosted_level
-                    xp_row.xp_total = self._xp_total_for_level_floor(boosted_level)
+                    boosted_level = max(int(xp_row.level_cached or 1), 1)
+                    restored_level = max(boosted_level // 50, 1)
+                    xp_row.level_cached = restored_level
+                    xp_row.xp_total = self._xp_total_for_level_floor(restored_level)
                     user_level_rows_touched += 1
-
-                progress_rows = list(await session.scalars(
-                    select(UserJobHubProgressRow).where(UserJobHubProgressRow.guild_id == guild_id)
-                ))
-                for row in progress_rows:
-                    job_key = (row.job_key or "").strip().lower()
-                    job_def = get_job_def(job_key)
-                    if job_def is None:
-                        continue
-                    boosted_prestige = max(int(row.prestige or 0), 0) * 50
-                    boosted_level = max(int(row.level or 1), 1) * 50
-                    boosted_cap = level_cap_for(boosted_prestige)
-                    row.prestige = boosted_prestige
-                    row.level = min(boosted_level, boosted_cap)
-                    row.xp = 0
-                    row.total_xp = int(total_xp_from_state(
-                        tier=tier_for_category(job_def.category),
-                        job_key=job_key,
-                        prestige=int(row.prestige),
-                        level=int(row.level),
-                        xp_into=0,
-                    ))
-                    job_progress_rows_touched += 1
 
         await interaction.followup.send(
             "\n".join((
-                "✅ Applied the existing-user progression boost.",
+                "✅ Restored the mistaken existing-user regular XP boost.",
                 f"• Existing users scanned: **{len(existing_user_ids):,}**",
-                f"• Global XP rows boosted to **50x** current level: **{user_level_rows_touched:,}**",
-                f"• Job Hub rows boosted to **50x** current level and **50x** current prestige for free: **{job_progress_rows_touched:,}**",
+                f"• Global XP rows rolled back by restoring levels from the prior **50x** boost: **{user_level_rows_touched:,}**",
+                "• Job Hub XP, levels, and prestige were left unchanged.",
             )),
             ephemeral=True,
         )
