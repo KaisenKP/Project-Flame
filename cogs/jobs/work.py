@@ -19,6 +19,7 @@ from services.stamina import StaminaService
 from services.users import ensure_user_rows
 from services.vip import is_vip_member
 from services.xp_award import award_xp
+from services.work_xp import apply_work_xp_multipliers, is_weekend
 
 from services.jobs_balance import job_xp_for_work, payout_for_work, prestige_cost, stamina_cost_for_work, user_xp_for_work
 from services.achievements import (
@@ -310,6 +311,7 @@ def _build_work_embed(
     leveled_up: bool,
     prestiged: bool,
     next_job_name: Optional[str],
+    weekend_bonus_active: bool,
 ) -> discord.Embed:
     color = _work_color(d.category)
 
@@ -334,11 +336,14 @@ def _build_work_embed(
         f"[{prog_bar}]  **{prog_pct}%**"
     )
 
-    gain_block = (
-        f"🧠 User XP: **+{fmt_int(user_xp)}**\n"
-        f"🧰 Job XP: **+{fmt_int(job_xp)}**\n"
+    gain_lines = [
+        f"🧠 User XP: **+{fmt_int(user_xp)}**",
+        f"🧰 Job XP: **+{fmt_int(job_xp)}**",
         f"⚙️ Upgrade: **Lv {fmt_int(upgrade_level)}** (**+{fmt_int(upgrade_bonus_pct)}% income**)"
-    )
+    ]
+    if weekend_bonus_active:
+        gain_lines.append("🔥 Weekend Bonus: **2x XP Active**")
+    gain_block = "\n".join(gain_lines)
 
     notes: list[str] = []
     if prestiged:
@@ -630,8 +635,15 @@ class WorkCog(commands.Cog):
                         wallet.silver_earned += int(max(payout, 0))
 
                 base_user_xp = user_xp_for_work(user_level=user_level, category=d.category)
-                user_xp_gain = apply_bp(base_user_xp, int(merged_effects.user_xp_bonus_bp))
-                await award_xp(session, guild_id=guild_id, user_id=user_id, amount=int(user_xp_gain))
+                adjusted_user_xp = apply_bp(base_user_xp, int(merged_effects.user_xp_bonus_bp))
+                user_xp_gain = apply_work_xp_multipliers(int(adjusted_user_xp))
+                await award_xp(
+                    session,
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    amount=int(user_xp_gain),
+                    apply_weekend_multiplier=False,
+                )
                 await increment_counter(
                     session,
                     guild_id=guild_id,
@@ -645,15 +657,16 @@ class WorkCog(commands.Cog):
                     prestige=job_prestige_now,
                     category=d.category,
                 )
+                adjusted_job_xp = apply_bp(base_job_xp, int(merged_effects.job_xp_bonus_bp))
+                delta_job_xp = apply_work_xp_multipliers(int(adjusted_job_xp))
                 progress_after, leveled_up = await award_slot_job_xp(
                     session,
                     guild_id=guild_id,
                     user_id=user_id,
                     slot_index=int(active_slot.slot_index),
                     job_key=key,
-                    amount=int(apply_bp(base_job_xp, int(merged_effects.job_xp_bonus_bp))),
+                    amount=int(delta_job_xp),
                 )
-                delta_job_xp = int(apply_bp(base_job_xp, int(merged_effects.job_xp_bonus_bp)))
 
                 work_image_url = job_row_image_get(job_row)
                 next_job_name = d.name
@@ -681,6 +694,7 @@ class WorkCog(commands.Cog):
                     leveled_up=bool(leveled_up),
                     prestiged=False,
                     next_job_name=next_job_name,
+                    weekend_bonus_active=is_weekend(),
                 )
                 used_cooldown_seconds = effective_cd
 
