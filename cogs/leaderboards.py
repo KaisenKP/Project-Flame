@@ -7,12 +7,14 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Optional
 
+
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from sqlalchemy import func, select, text
 
-from db.models import ActivityDailyRow, WalletRow, XpRow
+from db.models import ActivityDailyRow, UserAchievementRow, WalletRow, XpRow
+from services.achievement_catalog import ACHIEVEMENT_CATALOG, AchievementTier
 from services.db import sessions
 
 
@@ -100,6 +102,23 @@ def _msg_embed_fingerprint(msg: discord.Message) -> str:
     return f"{title}||{desc}||{fields}||{footer}||{thumb}"
 
 
+_TIER_RANK = {
+    AchievementTier.COMMON: 0,
+    AchievementTier.RARE: 1,
+    AchievementTier.EPIC: 2,
+    AchievementTier.LEGENDARY: 3,
+    AchievementTier.MYTHIC: 4,
+}
+
+
+def _achievement_spotlight(row: tuple) -> str:
+    count = _fmt_int(int(row[1] or 0))
+    icon = str(row[2] or "🏅")
+    name = str(row[3] or "No achievement data")
+    tier = str(row[4] or "common").title()
+    return f"{count} unlocked  •  {icon} {name} ({tier})"
+
+
 @dataclass
 class _GuildState:
     tag_index: int = 0
@@ -120,6 +139,7 @@ class LeaderboardsCog(commands.Cog):
     TAG_LEVELS = "levels"
     TAG_VCTIME = "vctime"
     TAG_MONEY = "money"
+    TAG_ACHIEVEMENTS = "achievements"
 
     STARTUP_DELAY_RANGE = (6.0, 14.0)
 
@@ -183,6 +203,7 @@ class LeaderboardsCog(commands.Cog):
             self.TAG_LEVELS,
             self.TAG_VCTIME,
             self.TAG_MONEY,
+            self.TAG_ACHIEVEMENTS,
         ]
 
     async def _ensure_tables(self) -> None:
@@ -546,6 +567,19 @@ class LeaderboardsCog(commands.Cog):
             e.set_footer(text=f"{self.FOOTER_TAG_PREFIX}{tag}")
             return e
 
+        if tag == self.TAG_ACHIEVEMENTS:
+            rows = await self._query_achievements(gid, n)
+            e = make_embed(
+                title="🏆 Most Achievements",
+                color=discord.Color.fuchsia(),
+                subtitle="Total unlocked achievements • ties broken by rarest unlock",
+            )
+            spotlight, rest = await compact_lines(rows, value_fmt=_achievement_spotlight)
+            e.add_field(name="👑 #1", value=spotlight, inline=False)
+            e.add_field(name=f"Top {min(n, 10)}", value=rest, inline=False)
+            e.set_footer(text=f"{self.FOOTER_TAG_PREFIX}{tag}")
+            return e
+
         rows = await self._query_money(gid, n)
         e = make_embed(
             title="💰 Most Silver",
@@ -649,6 +683,89 @@ class LeaderboardsCog(commands.Cog):
                 )
             ).all()
         return rows
+
+
+    async def _query_achievements(self, guild_id: int, limit: int):
+        async with self.sessionmaker() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        UserAchievementRow.user_id,
+                        UserAchievementRow.achievement_key,
+                        func.max(UserAchievementRow.unlocked_at).label("latest_unlocked_at"),
+                        func.count(UserAchievementRow.id).label("achievement_total"),
+                    )
+                    .where(UserAchievementRow.guild_id == int(guild_id))
+                    .group_by(UserAchievementRow.user_id, UserAchievementRow.achievement_key)
+                )
+            ).all()
+
+        leaderboard: list[tuple[int, int, str, str, str, int, datetime]] = []
+        by_user: dict[int, dict[str, object]] = {}
+        for user_id, achievement_key, latest_unlocked_at, _ in rows:
+            definition = ACHIEVEMENT_CATALOG.get(str(achievement_key))
+            if definition is None:
+                continue
+
+            uid = int(user_id)
+            record = by_user.setdefault(
+                uid,
+                {
+                    "count": 0,
+                    "best_rank": -1,
+                    "best_sort_order": 10**9,
+                    "best_name": "No achievement data",
+                    "best_icon": "🏅",
+                    "best_tier": AchievementTier.COMMON.value,
+                    "latest_unlocked_at": datetime.min.replace(tzinfo=timezone.utc),
+                },
+            )
+            record["count"] = int(record["count"]) + 1
+
+            tier_rank = _TIER_RANK.get(definition.tier, -1)
+            best_rank = int(record["best_rank"])
+            best_sort_order = int(record["best_sort_order"])
+            best_latest = record["latest_unlocked_at"]
+            latest = latest_unlocked_at or datetime.min.replace(tzinfo=timezone.utc)
+            if latest.tzinfo is None:
+                latest = latest.replace(tzinfo=timezone.utc)
+
+            should_replace = (
+                tier_rank > best_rank
+                or (tier_rank == best_rank and definition.sort_order < best_sort_order)
+                or (tier_rank == best_rank and definition.sort_order == best_sort_order and latest > best_latest)
+            )
+            if should_replace:
+                record["best_rank"] = tier_rank
+                record["best_sort_order"] = definition.sort_order
+                record["best_name"] = definition.name
+                record["best_icon"] = definition.icon
+                record["best_tier"] = definition.tier.value
+                record["latest_unlocked_at"] = latest
+
+        for uid, record in by_user.items():
+            leaderboard.append(
+                (
+                    uid,
+                    int(record["count"]),
+                    str(record["best_icon"]),
+                    str(record["best_name"]),
+                    str(record["best_tier"]),
+                    int(record["best_rank"]),
+                    record["latest_unlocked_at"],
+                )
+            )
+
+        leaderboard.sort(
+            key=lambda row: (
+                -row[1],
+                -row[5],
+                row[3].lower(),
+                -row[6].timestamp() if isinstance(row[6], datetime) else 0.0,
+                row[0],
+            )
+        )
+        return leaderboard[:limit]
 
     async def _query_money(self, guild_id: int, limit: int):
         async with self.sessionmaker() as session:
