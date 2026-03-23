@@ -58,11 +58,13 @@ from services.job_hub import (
     event_defs_for,
     get_active_slot,
     get_slot_snapshot,
+    prestige_slot,
     tool_bonus_snapshot,
     unlocked_perks,
     xp_needed,
 )
 from .jobs import get_job_def
+from services.job_progression import level_cap_for
 from services.job_upgrades import apply_income_upgrade, get_upgrade_level, upgrade_once
 from services.jobs_views import open_job_hub
 
@@ -703,11 +705,20 @@ class WorkCog(commands.Cog):
 
         if embed is not None:
             cooldown_ready_at = now + float(used_cooldown_seconds or 0.0)
+            prestige_ready = bool(progress_after.level >= level_cap_for(progress_after.prestige))
+            current_prestige = int(progress_after.prestige)
             view = _WorkUpgradeView(
                 sessionmaker=self.sessionmaker,
                 guild_id=guild_id,
                 user_id=user_id,
                 cooldown_ready_at=cooldown_ready_at,
+                active_slot_index=int(active_slot.slot_index),
+                job_key=key,
+                job_name=d.name,
+                prestige_ready=prestige_ready,
+                prestige_cost_value=prestige_cost(current_prestige),
+                current_earnings_multiplier=current_prestige + 1,
+                next_earnings_multiplier=current_prestige + 2,
             )
             sent_msg = await interaction.followup.send(embed=embed, view=view, wait=True)
             view.bind_message(sent_msg)
@@ -739,14 +750,37 @@ class WorkCog(commands.Cog):
 
 
 class _WorkUpgradeView(discord.ui.View):
-    def __init__(self, *, sessionmaker, guild_id: int, user_id: int, cooldown_ready_at: float):
+    def __init__(
+        self,
+        *,
+        sessionmaker,
+        guild_id: int,
+        user_id: int,
+        cooldown_ready_at: float,
+        active_slot_index: int,
+        job_key: str,
+        job_name: str,
+        prestige_ready: bool,
+        prestige_cost_value: int,
+        current_earnings_multiplier: int,
+        next_earnings_multiplier: int,
+    ):
         super().__init__(timeout=300)
         self.sessionmaker = sessionmaker
         self.guild_id = int(guild_id)
         self.user_id = int(user_id)
         self.cooldown_ready_at = float(cooldown_ready_at)
+        self.active_slot_index = int(active_slot_index)
+        self.job_key = job_key
+        self.job_name = job_name
+        self.prestige_ready = bool(prestige_ready)
+        self.prestige_cost_value = int(prestige_cost_value)
+        self.current_earnings_multiplier = int(current_earnings_multiplier)
+        self.next_earnings_multiplier = int(next_earnings_multiplier)
         self._message: Optional[discord.Message] = None
         self.work_again.disabled = (time.time() < self.cooldown_ready_at)
+        if self.prestige_ready:
+            self.add_item(_PrestigeReadyButton())
 
     def bind_message(self, message: discord.Message) -> None:
         self._message = message
@@ -765,9 +799,8 @@ class _WorkUpgradeView(discord.ui.View):
                 pass
 
     async def on_timeout(self) -> None:
-        self.upgrade_tool.disabled = True
-        self.open_job_hub_button.disabled = True
-        self.work_again.disabled = True
+        for child in self.children:
+            child.disabled = True
         if self._message is not None:
             try:
                 await self._message.edit(view=self)
@@ -841,6 +874,110 @@ class _WorkUpgradeView(discord.ui.View):
 
         await cmd.callback(cog, interaction)
 
+
+
+
+class _PrestigeReadyButton(discord.ui.Button["_WorkUpgradeView"]):
+    def __init__(self):
+        super().__init__(label="Prestige Ready", style=discord.ButtonStyle.primary, emoji="🟨")
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if view is None:
+            await interaction.response.send_message("This prestige button is no longer active.", ephemeral=True)
+            return
+
+        if interaction.guild is None or interaction.guild.id != view.guild_id:
+            await interaction.response.send_message("This button only works in the original server.", ephemeral=True)
+            return
+
+        if interaction.user.id != view.user_id:
+            await interaction.response.send_message("Only the user who ran /work can use this button.", ephemeral=True)
+            return
+
+        benefit_lines = [
+            f"• Cost: **{fmt_int(view.prestige_cost_value)} Silver**",
+            f"• Earnings multiplier: **x{view.current_earnings_multiplier} → x{view.next_earnings_multiplier}**",
+            f"• Slot level resets: **Level 1**",
+            f"• Keeps your job: **{view.job_name}**",
+        ]
+        await interaction.response.send_message(
+            "Prestige confirmation for your active /work slot:\n" + "\n".join(benefit_lines),
+            ephemeral=True,
+            view=_PrestigeConfirmView(source_view=view),
+        )
+
+
+
+class _PrestigeConfirmView(discord.ui.View):
+    def __init__(self, *, source_view: _WorkUpgradeView):
+        super().__init__(timeout=60)
+        self.source_view = source_view
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.source_view.user_id:
+            await interaction.response.send_message("Only the user who ran /work can use this button.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm Prestige", style=discord.ButtonStyle.danger, emoji="✅")
+    async def confirm_prestige(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None or interaction.guild.id != self.source_view.guild_id:
+            await interaction.response.send_message("This button only works in the original server.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        vip = is_vip_member(interaction.user)  # type: ignore[arg-type]
+
+        async with self.source_view.sessionmaker() as session:
+            async with session.begin():
+                snap = await get_slot_snapshot(
+                    session,
+                    guild_id=self.source_view.guild_id,
+                    user_id=self.source_view.user_id,
+                    vip=vip,
+                    slot_index=self.source_view.active_slot_index,
+                )
+                if not snap.job_key or snap.job_key != self.source_view.job_key:
+                    await interaction.followup.send("Your active /work slot changed jobs. Run /work again before prestiging.", ephemeral=True)
+                    return
+
+                if not snap.progress or snap.progress.level < snap.progress.level_cap:
+                    await interaction.followup.send("This slot is no longer ready to prestige.", ephemeral=True)
+                    return
+
+                ok, message, _ = await prestige_slot(
+                    session,
+                    guild_id=self.source_view.guild_id,
+                    user_id=self.source_view.user_id,
+                    slot_index=self.source_view.active_slot_index,
+                    job_key=self.source_view.job_key,
+                    vip=vip,
+                )
+                if not ok:
+                    await session.rollback()
+                    await interaction.followup.send(message, ephemeral=True)
+                    return
+
+        self.source_view.prestige_ready = False
+        for child in self.source_view.children:
+            if isinstance(child, _PrestigeReadyButton):
+                child.disabled = True
+        if self.source_view._message is not None:
+            try:
+                await self.source_view._message.edit(view=self.source_view)
+            except Exception:
+                pass
+
+        for child in self.children:
+            child.disabled = True
+        await interaction.edit_original_response(content=f"✅ {message}", view=self)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="Prestige cancelled.", view=self)
 
 class _UpgradeConfirmView(discord.ui.View):
     def __init__(self, *, sessionmaker, guild_id: int, user_id: int, source_view: _WorkUpgradeView):
