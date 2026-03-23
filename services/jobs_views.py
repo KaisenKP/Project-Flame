@@ -172,35 +172,58 @@ class JobHubView(discord.ui.View):
         embed: discord.Embed,
         content: Optional[str],
     ) -> None:
-        try:
-            if not interaction.response.is_done():
+        response_open = not interaction.response.is_done()
+
+        if response_open:
+            try:
                 await interaction.response.edit_message(embed=embed, view=self, content=content)
                 self.message = interaction.message or self.message
                 return
+            except discord.NotFound:
+                log.info(
+                    "Primary Job Hub response edit returned not found; attempting recovery for user_id=%s message_id=%s",
+                    self.user_id,
+                    getattr(interaction.message, "id", None),
+                )
+            except discord.HTTPException:
+                log.warning(
+                    "Primary Job Hub response edit failed for user_id=%s message_id=%s; attempting recovery",
+                    self.user_id,
+                    getattr(interaction.message, "id", None),
+                    exc_info=True,
+                )
 
-            if self.message is not None:
-                await self.message.edit(embed=embed, view=self, content=content)
+        edit_attempts = []
+        if self.message is not None:
+            edit_attempts.append(("bound_message", self.message.edit))
+        edit_attempts.append(("original_response", interaction.edit_original_response))
+        if interaction.message is not None:
+            edit_attempts.append(("component_message", interaction.message.edit))
+            edit_attempts.append(("followup_message", lambda **kwargs: interaction.followup.edit_message(interaction.message.id, **kwargs)))
+
+        for label, editor in edit_attempts:
+            try:
+                await editor(embed=embed, view=self, content=content)
+                if interaction.message is not None:
+                    self.message = interaction.message
                 return
+            except discord.NotFound:
+                log.info(
+                    "Job Hub %s edit returned not found for user_id=%s message_id=%s",
+                    label,
+                    self.user_id,
+                    getattr(interaction.message, "id", None),
+                )
+            except discord.HTTPException:
+                log.warning(
+                    "Job Hub %s edit failed for user_id=%s message_id=%s",
+                    label,
+                    self.user_id,
+                    getattr(interaction.message, "id", None),
+                    exc_info=True,
+                )
 
-            if interaction.message is not None:
-                await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self, content=content)
-                self.message = interaction.message
-                return
-        except discord.NotFound:
-            log.info(
-                "Stale Job Hub interaction encountered for user_id=%s message_id=%s; sending recovery prompt",
-                self.user_id,
-                getattr(interaction.message, "id", None),
-            )
-        except discord.HTTPException:
-            log.warning(
-                "Job Hub edit failed for user_id=%s message_id=%s",
-                self.user_id,
-                getattr(interaction.message, "id", None),
-                exc_info=True,
-            )
-
-        if not interaction.response.is_done():
+        if response_open:
             await interaction.response.send_message("That Job Hub is stale. Please run `/job` to open a fresh panel.", ephemeral=True)
             return
 
