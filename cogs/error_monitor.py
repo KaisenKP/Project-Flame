@@ -76,21 +76,28 @@ class ErrorMonitor(commands.Cog):
         def handle_loop_exception(loop_: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
             try:
                 exception = context.get("exception")
+                task_name = getattr(context.get("task"), "get_name", lambda: None)()
+                event_name = context.get("message")
+                loop_extras = {k: repr(v) for k, v in context.items() if k != "exception"}
                 if isinstance(exception, BaseException):
                     self.log_exception(
                         exception,
                         source="asyncio",
-                        event_name=context.get("message"),
-                        task_name=getattr(context.get("task"), "get_name", lambda: None)(),
-                        extras={k: repr(v) for k, v in context.items() if k != "exception"},
+                        **merge_logging_context(
+                            event_name=event_name,
+                            task_name=task_name,
+                            extras=loop_extras,
+                        ),
                     )
                 else:
                     self.log_exception(
                         RuntimeError(context.get("message", "Asyncio loop exception")),
                         source="asyncio",
-                        event_name=context.get("message"),
-                        task_name=getattr(context.get("task"), "get_name", lambda: None)(),
-                        extras={k: repr(v) for k, v in context.items()},
+                        **merge_logging_context(
+                            event_name=event_name,
+                            task_name=task_name,
+                            extras={k: repr(v) for k, v in context.items()},
+                        ),
                     )
             except Exception:
                 log.exception("Error monitor failed inside asyncio exception handler")
@@ -135,7 +142,11 @@ class ErrorMonitor(commands.Cog):
             "arg_count": len(args),
             "kwarg_keys": list(kwargs.keys()),
         }
-        self.log_exception(error, source="event", event_name=event_method, extras=extras)
+        self.log_exception(
+            error,
+            source="event",
+            **merge_logging_context(event_name=event_method, extras=extras),
+        )
 
     @app_commands.command(name="recenterrors", description="Show the most recent logged bot errors.")
     @app_commands.default_permissions(administrator=True)
