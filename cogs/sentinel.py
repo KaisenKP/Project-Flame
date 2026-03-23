@@ -662,18 +662,19 @@ class Sentinel(commands.Cog):
     # ----------------------------
     def _message_interaction_meta(self, message: discord.Message) -> Optional[dict]:
         # discord.py exposes this differently across versions/forks.
-        # We probe safely.
-        inter = getattr(message, "interaction", None)
-        if inter is not None:
-            user = getattr(inter, "user", None)
-            name = getattr(inter, "name", None)
-            if user is not None:
-                return {"user_id": int(user.id), "user_tag": str(user), "command_name": name}
-
+        # Prefer the modern attribute and only use the legacy payload as a
+        # low-level fallback so we do not trigger deprecation warnings.
         meta = getattr(message, "interaction_metadata", None)
         if meta is not None:
             user = getattr(meta, "user", None)
             name = getattr(meta, "name", None)
+            if user is not None:
+                return {"user_id": int(user.id), "user_tag": str(user), "command_name": name}
+
+        inter = getattr(message, "__dict__", {}).get("interaction")
+        if inter is not None:
+            user = getattr(inter, "user", None)
+            name = getattr(inter, "name", None)
             if user is not None:
                 return {"user_id": int(user.id), "user_tag": str(user), "command_name": name}
 
