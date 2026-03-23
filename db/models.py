@@ -843,6 +843,161 @@ class CrownsWalletRow(Base):
 
 
 # =============================================================================
+# Bank Robbery
+# =============================================================================
+
+class BankRobberyProfileRow(Base):
+    __tablename__ = "bank_robbery_profiles"
+    __table_args__ = (
+        UniqueConstraint("guild_id", "user_id", name="uq_bank_robbery_profiles_guild_user"),
+        Index("ix_bank_robbery_profiles_rep", "guild_id", "heist_rep"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    heist_rep: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    personal_heat: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lifetime_bankrobbery_earnings: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    clean_successes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    messy_successes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    partial_successes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_escapes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    full_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    highest_single_take: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    weekly_elite_clears: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    leader_xp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    hacker_xp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    driver_xp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    enforcer_xp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    updated_at: Mapped[datetime] = mapped_column(
+        TS,
+        server_default=NOW,
+        onupdate=NOW,
+        nullable=False,
+    )
+
+
+class BankRobberyLobbyRow(Base):
+    __tablename__ = "bank_robbery_lobbies"
+    __table_args__ = (
+        UniqueConstraint("guild_id", "leader_user_id", name="uq_bank_robbery_lobbies_leader"),
+        Index("ix_bank_robbery_lobbies_state", "guild_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    leader_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    robbery_id: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    approach: Mapped[str] = mapped_column(String(16), nullable=False, default="silent")
+    stage: Mapped[str] = mapped_column(String(24), nullable=False, default="lobby")
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="open")
+    current_phase: Mapped[str] = mapped_column(String(24), nullable=False, default="entry")
+    locked_cuts: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    finale_started_at: Mapped[Optional[datetime]] = mapped_column(TS, nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(TS, nullable=True)
+    entry_cost_paid: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    crew_note: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    rng_seed: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    state_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=NOW, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        TS,
+        server_default=NOW,
+        onupdate=NOW,
+        nullable=False,
+    )
+
+
+class BankRobberyParticipantRow(Base):
+    __tablename__ = "bank_robbery_participants"
+    __table_args__ = (
+        UniqueConstraint("lobby_id", "user_id", name="uq_bank_robbery_participants_lobby_user"),
+        UniqueConstraint("guild_id", "user_id", name="uq_bank_robbery_participants_active_user"),
+        Index("ix_bank_robbery_participants_lobby", "lobby_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    lobby_id: Mapped[int] = mapped_column(ForeignKey("bank_robbery_lobbies.id", ondelete="CASCADE"), nullable=False, index=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(16), nullable=False, default="unassigned")
+    cut_percent: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ready: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    joined_at: Mapped[datetime] = mapped_column(TS, server_default=NOW, nullable=False)
+    confirmed_cuts: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    activity_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    state_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class BankRobberyPrepProgressRow(Base):
+    __tablename__ = "bank_robbery_prep_progress"
+    __table_args__ = (
+        UniqueConstraint("lobby_id", "prep_key", name="uq_bank_robbery_prep_lobby_key"),
+        Index("ix_bank_robbery_prep_lobby", "lobby_id", "completed"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    lobby_id: Mapped[int] = mapped_column(ForeignKey("bank_robbery_lobbies.id", ondelete="CASCADE"), nullable=False, index=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    prep_key: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    completed_by_user_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(TS, nullable=True)
+    effectiveness_bp: Mapped[int] = mapped_column(Integer, nullable=False, default=10000)
+    metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class BankRobberyCooldownRow(Base):
+    __tablename__ = "bank_robbery_cooldowns"
+    __table_args__ = (
+        UniqueConstraint("guild_id", "user_id", "robbery_id", name="uq_bank_robbery_cooldown_user_robbery"),
+        Index("ix_bank_robbery_cooldowns_user", "guild_id", "user_id", "ends_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    robbery_id: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    ends_at: Mapped[datetime] = mapped_column(TS, nullable=False)
+    weekly_lockout_key: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        TS,
+        server_default=NOW,
+        onupdate=NOW,
+        nullable=False,
+    )
+
+
+class BankRobberyHistoryRow(Base):
+    __tablename__ = "bank_robbery_history"
+    __table_args__ = (
+        UniqueConstraint("lobby_id", name="uq_bank_robbery_history_lobby"),
+        Index("ix_bank_robbery_history_user", "guild_id", "leader_user_id", "created_at"),
+        Index("ix_bank_robbery_history_outcome", "guild_id", "outcome"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    lobby_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    leader_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    robbery_id: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    approach: Mapped[str] = mapped_column(String(16), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    gross_take: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    secured_take: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    final_take: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    heat_delta: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rep_delta: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rewards_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    timeline_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=NOW, nullable=False)
+
+
+# =============================================================================
 # Business System
 # =============================================================================
 # This replaces the old failed business schema with a cleaner model built for:
