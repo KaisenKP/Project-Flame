@@ -65,10 +65,10 @@ async def open_job_hub(*, interaction: discord.Interaction, sessionmaker, guild_
     embed = make_job_hub_embed(user=interaction.user, vip=vip, slot_snap=slot_snap, section=section)
     ephemeral = interaction.guild is not None
     if interaction.response.is_done():
-        await interaction.followup.send(embed=embed, view=view, ephemeral=ephemeral, content=notice)
+        view.message = await interaction.followup.send(embed=embed, view=view, ephemeral=ephemeral, content=notice, wait=True)
     else:
         await interaction.response.send_message(embed=embed, view=view, ephemeral=ephemeral, content=notice)
-    await view.bind_to_interaction(interaction)
+        await view.bind_to_interaction(interaction)
 
 class JobHubView(discord.ui.View):
     def __init__(self, *, sessionmaker, guild_id: int, user_id: int, vip: bool, selected_slot: int = 0, section: str = "overview", timeout: float = 900.0):
@@ -173,12 +173,19 @@ class JobHubView(discord.ui.View):
         content: Optional[str],
     ) -> None:
         try:
-            if interaction.response.is_done():
-                await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self, content=content)
-            else:
+            if not interaction.response.is_done():
                 await interaction.response.edit_message(embed=embed, view=self, content=content)
-            self.message = interaction.message or self.message
-            return
+                self.message = interaction.message or self.message
+                return
+
+            if self.message is not None:
+                await self.message.edit(embed=embed, view=self, content=content)
+                return
+
+            if interaction.message is not None:
+                await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self, content=content)
+                self.message = interaction.message
+                return
         except discord.NotFound:
             log.info(
                 "Stale Job Hub interaction encountered for user_id=%s message_id=%s; sending recovery prompt",
