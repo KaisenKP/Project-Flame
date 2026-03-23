@@ -19,7 +19,7 @@ from services.job_hub import (
     slot_label,
     tool_defs_for,
 )
-from services.jobs_core import JOB_DEFS, JOB_SWITCH_COST, JOB_UNLOCK_LEVEL, fmt_int, get_level
+from services.jobs_core import JOB_DEFS, JOB_SWITCH_COST, fmt_int, get_level, unlock_level_for
 from services.jobs_embeds import make_job_hub_embed
 
 log = logging.getLogger(__name__)
@@ -32,7 +32,7 @@ class JobPicker(Select):
         for job in sorted(JOB_DEFS.values(), key=lambda item: item.name.lower()):
             if job.vip_only and not vip:
                 continue
-            options.append(discord.SelectOption(label=job.name, value=job.key, description=f"Unlock Lv {JOB_UNLOCK_LEVEL[job.category]}"))
+            options.append(discord.SelectOption(label=job.name, value=job.key, description=f"Unlock Lv {unlock_level_for(job.key, job.category)}"))
         super().__init__(placeholder=f"Assign a job to {slot_label(slot_index)}", min_values=1, max_values=1, options=options[:25])
 
     async def callback(self, interaction: discord.Interaction):
@@ -170,8 +170,9 @@ class JobHubView(discord.ui.View):
                 if job.vip_only and not self.vip:
                     await interaction.response.send_message("That job is VIP-only.", ephemeral=True)
                     return
-                if level < JOB_UNLOCK_LEVEL[job.category] and not self.vip:
-                    await interaction.response.send_message(f"🔒 {job.name} unlocks at Level {JOB_UNLOCK_LEVEL[job.category]}.", ephemeral=True)
+                unlock_level = unlock_level_for(job.key, job.category)
+                if level < unlock_level and not self.vip:
+                    await interaction.response.send_message(f"🔒 {job.name} unlocks at Level {unlock_level}.", ephemeral=True)
                     return
                 snap = await get_slot_snapshot(session, guild_id=self.guild_id, user_id=self.user_id, vip=self.vip, slot_index=slot_index)
                 existing = snap.job_key

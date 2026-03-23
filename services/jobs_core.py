@@ -78,6 +78,14 @@ JOB_UNLOCK_LEVEL: Dict[JobCategory, int] = {
     JobCategory.HARD: 60,
 }
 
+JOB_UNLOCK_LEVEL_OVERRIDE: Dict[str, int] = {
+    "artifact_hunter": 100,
+    "drug_lord": 100,
+    "dragon_slayer": 100,
+    "business_ceo": 100,
+    "space_miner": 100,
+}
+
 JOB_SWITCH_COST: Dict[JobCategory, int] = {
     JobCategory.EASY: 1000,
     JobCategory.STABLE: 5000,
@@ -107,6 +115,13 @@ def _base_stamina(job_key: str, category: JobCategory) -> int:
         return max(min(int(STAMINA_OVERRIDE[key]), 10), 1)
     v = int(STAMINA_BY_CATEGORY.get(category, 10))
     return max(min(v, 10), 1)
+
+
+def unlock_level_for(job_key: str, category: JobCategory) -> int:
+    key = (job_key or "").strip().lower()
+    if key in JOB_UNLOCK_LEVEL_OVERRIDE:
+        return max(int(JOB_UNLOCK_LEVEL_OVERRIDE[key]), 1)
+    return max(int(JOB_UNLOCK_LEVEL.get(category, 1)), 1)
 
 
 # -------------------------
@@ -443,6 +458,106 @@ JOB_DEFS: Dict[str, JobDef] = {
             JobAction("hostage_rescue", 16, 380, 760, "You rescue hostages unharmed. The town pools a major reward."),
             JobAction("corrupt_deputy", 18, 0, 0, "A corrupt deputy leaks your route. The mission collapses.", can_fail=True),
             JobAction("legendary_manhunt", 28, 450, 980, "Legendary manhunt completed. Your badge becomes a myth."),
+        ),
+    ),
+    "artifact_hunter": JobDef(
+        key="artifact_hunter",
+        name="Artifact Hunter",
+        category=JobCategory.HARD,
+        cooldown_seconds=180,
+        fail_chance_bp=2300,
+        bonus_chance_bp=1700,
+        bonus_multiplier=3.5,
+        user_xp_gain=_base_user_xp("artifact_hunter", JobCategory.HARD),
+        job_xp_gain=_base_job_xp("artifact_hunter", JobCategory.HARD),
+        stamina_cost=_base_stamina("artifact_hunter", JobCategory.HARD),
+        actions=(
+            JobAction("vault_scraps", 22, 380, 780, "You raid an ancient vault and cash out cracked relics."),
+            JobAction("hidden_reliquary", 18, 520, 1100, "You uncover a hidden reliquary packed with black-market treasure."),
+            JobAction("royal_collector", 16, 700, 1450, "A royal collector overpays for a forbidden piece."),
+            JobAction("cursed_find", 14, 900, 1900, "A cursed artifact still sells for a fortune before the whispers start."),
+            JobAction("counterfeit_relic", 15, 0, 0, "The relic is fake. The buyer walks and the run dies.", can_fail=True),
+            JobAction("tomb_collapse", 15, 0, 0, "The tomb collapses before you can extract the haul.", can_fail=True),
+        ),
+    ),
+    "drug_lord": JobDef(
+        key="drug_lord",
+        name="Drug Lord",
+        category=JobCategory.HARD,
+        cooldown_seconds=180,
+        fail_chance_bp=3200,
+        bonus_chance_bp=2200,
+        bonus_multiplier=4.0,
+        user_xp_gain=_base_user_xp("drug_lord", JobCategory.HARD),
+        job_xp_gain=_base_job_xp("drug_lord", JobCategory.HARD),
+        stamina_cost=_base_stamina("drug_lord", JobCategory.HARD),
+        actions=(
+            JobAction("territory_sweep", 22, 420, 900, "You lock down territory and collect a brutal cash sweep."),
+            JobAction("cartel_shipment", 18, 700, 1500, "A massive shipment lands clean and the profit explodes."),
+            JobAction("street_monopoly", 16, 980, 2100, "You crush the block and print monopoly money."),
+            JobAction("cash_warehouse", 14, 1400, 3000, "You crack open a warehouse stuffed with dirty silver."),
+            JobAction("rival_raid", 15, 0, 0, "A rival raid blows up the operation before payout lands.", can_fail=True),
+            JobAction("crackdown", 15, 0, 0, "A crackdown seizes the whole move and leaves you empty.", can_fail=True),
+        ),
+    ),
+    "dragon_slayer": JobDef(
+        key="dragon_slayer",
+        name="Dragon Slayer",
+        category=JobCategory.HARD,
+        cooldown_seconds=180,
+        fail_chance_bp=2500,
+        bonus_chance_bp=1800,
+        bonus_multiplier=3.6,
+        user_xp_gain=_base_user_xp("dragon_slayer", JobCategory.HARD),
+        job_xp_gain=_base_job_xp("dragon_slayer", JobCategory.HARD),
+        stamina_cost=_base_stamina("dragon_slayer", JobCategory.HARD),
+        actions=(
+            JobAction("nest_clear", 22, 450, 950, "You clear a dragon nest and haul scorched treasure."),
+            JobAction("royal_bounty", 18, 700, 1350, "A royal bounty pays heavy for a confirmed dragon kill."),
+            JobAction("heartscale_drop", 16, 900, 1750, "You secure pristine heartscales worth absurd silver."),
+            JobAction("ancient_wyrm", 14, 1200, 2500, "An ancient wyrm falls and the kingdom showers you with silver."),
+            JobAction("burned_loot", 15, 0, 0, "The dragon torches the loot before you can salvage it.", can_fail=True),
+            JobAction("hunt_ruined", 15, 0, 0, "The hunt collapses when a stronger beast crashes the contract.", can_fail=True),
+        ),
+    ),
+    "business_ceo": JobDef(
+        key="business_ceo",
+        name="Business CEO",
+        category=JobCategory.STABLE,
+        cooldown_seconds=165,
+        fail_chance_bp=900,
+        bonus_chance_bp=1300,
+        bonus_multiplier=2.8,
+        user_xp_gain=_base_user_xp("business_ceo", JobCategory.STABLE),
+        job_xp_gain=_base_job_xp("business_ceo", JobCategory.STABLE),
+        stamina_cost=_base_stamina("business_ceo", JobCategory.STABLE),
+        actions=(
+            JobAction("major_acquisition", 24, 620, 980, "A major acquisition closes and your quarter jumps."),
+            JobAction("investor_surge", 22, 720, 1080, "Investors pile in and the company mints silver."),
+            JobAction("dividend_explosion", 18, 820, 1250, "A dividend explosion turns the boardroom into a mint."),
+            JobAction("global_expansion", 18, 980, 1450, "Global expansion opens a rich new market overnight."),
+            JobAction("tax_audit", 10, 350, 700, "A tax audit clips the win, but you still cash out.", can_fail=False),
+            JobAction("bad_quarter", 8, 0, 0, "A brutal quarter kills the deal flow and the run comes up empty.", can_fail=True),
+        ),
+    ),
+    "space_miner": JobDef(
+        key="space_miner",
+        name="Space Miner",
+        category=JobCategory.HARD,
+        cooldown_seconds=180,
+        fail_chance_bp=2700,
+        bonus_chance_bp=1900,
+        bonus_multiplier=3.8,
+        user_xp_gain=_base_user_xp("space_miner", JobCategory.HARD),
+        job_xp_gain=_base_job_xp("space_miner", JobCategory.HARD),
+        stamina_cost=_base_stamina("space_miner", JobCategory.HARD),
+        actions=(
+            JobAction("void_crystal_vein", 22, 400, 860, "You tap a void crystal vein and the haul glows like silver."),
+            JobAction("alien_core", 18, 650, 1380, "An alien core deposit pays out hard."),
+            JobAction("starstorm_harvest", 16, 920, 1850, "You ride a starstorm harvest and strip insane ore."),
+            JobAction("cosmic_motherlode", 14, 1250, 2700, "A cosmic motherlode changes the whole shift."),
+            JobAction("hull_breach", 15, 0, 0, "A hull breach blows the cargo into deep space.", can_fail=True),
+            JobAction("ore_detonation", 15, 0, 0, "Unstable ore detonates and wipes the payout.", can_fail=True),
         ),
     ),
     # VIP
