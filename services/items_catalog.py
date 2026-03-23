@@ -40,6 +40,8 @@ class ItemDef:
     daily_limit: int
     tradable: bool
     effect: EffectDef
+    description: str = ""
+    inventory_description: str = ""
 
 
 ITEMS: dict[str, ItemDef] = {
@@ -370,5 +372,22 @@ ITEMS: dict[str, ItemDef] = {
             charges=1,
             stacking=EffectStacking.ADD,
         ),
+    ),
+    "uno_reverse_wallet": ItemDef(
+        key="uno_reverse_wallet",
+        name="Uno Reverse Wallet",
+        rarity=ItemRarity.MYTHICAL,
+        price=125000,
+        daily_limit=1,
+        tradable=False,
+        effect=EffectDef(
+            effect_key="uno_reverse_wallet",
+            group_key="pickpocket_defense",
+            payload={"pickpocket_reverse": 1},
+            charges=1,
+            stacking=EffectStacking.ADD,
+        ),
+        description="Get robbed? Cute. This wallet instantly robs them back.",
+        inventory_description="One-use trap wallet. If someone successfully pickpockets you, it instantly steals back from them.",
     ),
 }
