@@ -17,8 +17,7 @@ from services.db import sessions
 from services.job_hub import ensure_job_hub_slots, get_or_create_progress, get_slot_snapshot, set_slot_progress
 from services.job_progression import state_from_total_xp, total_xp_from_state
 from services.jobs_core import ensure_job_row, get_or_create_job_row, job_row_image_set
-from services.jobs_embeds import make_job_hub_embed
-from services.jobs_views import JobHubView
+from services.jobs_views import open_job_hub
 from services.users import ensure_user_rows
 from services.vip import is_vip_member
 from services.xp import xp_req_for_next
@@ -170,7 +169,6 @@ class JobsCog(commands.Cog):
                 await ensure_user_rows(session, guild_id=guild_id, user_id=user_id)
                 await ensure_job_hub_slots(session, guild_id=guild_id, user_id=user_id, vip=vip)
 
-        view = JobHubView(sessionmaker=self.sessionmaker, guild_id=guild_id, user_id=user_id, vip=vip)
         if any((job_1, job_2, job_3)):
             async with self.sessionmaker() as session:
                 async with session.begin():
@@ -185,11 +183,14 @@ class JobsCog(commands.Cog):
                         from services.job_hub import assign_job_to_slot
                         await assign_job_to_slot(session, guild_id=guild_id, user_id=user_id, vip=vip, slot_index=idx, job_key=job_key.strip().lower())
 
-        async with self.sessionmaker() as session:
-            async with session.begin():
-                snap = await get_slot_snapshot(session, guild_id=guild_id, user_id=user_id, vip=vip, slot_index=0)
-        embed = make_job_hub_embed(user=interaction.user, vip=vip, slot_snap=snap, section="overview")
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await open_job_hub(
+            interaction=interaction,
+            sessionmaker=self.sessionmaker,
+            guild_id=guild_id,
+            user_id=user_id,
+            vip=vip,
+            section="overview",
+        )
 
     @app_commands.command(name="job_admin", description="Enable or disable a job (admin only).")
     @app_commands.describe(job="Job key", enabled="Enable or disable the job")
@@ -331,12 +332,14 @@ class JobsCog(commands.Cog):
             await interaction.response.send_message("This only works in a server.", ephemeral=True)
             return
         vip = is_vip_member(interaction.user)  # type: ignore[arg-type]
-        view = JobHubView(sessionmaker=self.sessionmaker, guild_id=interaction.guild.id, user_id=interaction.user.id, vip=vip, section="tools")
-        async with self.sessionmaker() as session:
-            async with session.begin():
-                snap = await get_slot_snapshot(session, guild_id=interaction.guild.id, user_id=interaction.user.id, vip=vip, slot_index=0)
-        embed = make_job_hub_embed(user=interaction.user, vip=vip, slot_snap=snap, section="tools")
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await open_job_hub(
+            interaction=interaction,
+            sessionmaker=self.sessionmaker,
+            guild_id=interaction.guild.id,
+            user_id=interaction.user.id,
+            vip=vip,
+            section="tools",
+        )
 
     @app_commands.command(name="fixjobxp", description="Admin: scan /work results and repair job progression for a user.")
     @app_commands.describe(

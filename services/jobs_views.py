@@ -63,10 +63,12 @@ async def open_job_hub(*, interaction: discord.Interaction, sessionmaker, guild_
         async with session.begin():
             slot_snap = await get_slot_snapshot(session, guild_id=guild_id, user_id=user_id, vip=vip, slot_index=selected_slot)
     embed = make_job_hub_embed(user=interaction.user, vip=vip, slot_snap=slot_snap, section=section)
+    ephemeral = interaction.guild is not None
     if interaction.response.is_done():
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True if interaction.guild is not None else False, content=notice)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=ephemeral, content=notice)
     else:
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True if interaction.guild is not None else False, content=notice)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=ephemeral, content=notice)
+    await view.bind_to_interaction(interaction)
 
 class JobHubView(discord.ui.View):
     def __init__(self, *, sessionmaker, guild_id: int, user_id: int, vip: bool, selected_slot: int = 0, section: str = "overview", timeout: float = 900.0):
@@ -77,6 +79,7 @@ class JobHubView(discord.ui.View):
         self.vip = vip
         self.selected_slot = selected_slot
         self.section = section
+        self.message: discord.Message | None = None
         self._build_static_buttons()
 
     def _build_static_buttons(self) -> None:
@@ -136,6 +139,66 @@ class JobHubView(discord.ui.View):
             return False
         return True
 
+    async def bind_to_interaction(self, interaction: discord.Interaction) -> None:
+        try:
+            self.message = await interaction.original_response()
+        except Exception:
+            log.debug("Job Hub could not bind original response message", exc_info=True)
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+
+        if self.message is None:
+            return
+
+        try:
+            await self.message.edit(
+                content="This Job Hub expired. Run `/job` to open a fresh panel.",
+                view=self,
+            )
+        except (discord.NotFound, discord.HTTPException):
+            log.debug(
+                "Job Hub timeout cleanup could not edit message_id=%s user_id=%s",
+                getattr(self.message, "id", None),
+                self.user_id,
+                exc_info=True,
+            )
+
+    async def _safe_edit(
+        self,
+        interaction: discord.Interaction,
+        *,
+        embed: discord.Embed,
+        content: Optional[str],
+    ) -> None:
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self, content=content)
+            else:
+                await interaction.response.edit_message(embed=embed, view=self, content=content)
+            self.message = interaction.message or self.message
+            return
+        except discord.NotFound:
+            log.info(
+                "Stale Job Hub interaction encountered for user_id=%s message_id=%s; sending recovery prompt",
+                self.user_id,
+                getattr(interaction.message, "id", None),
+            )
+        except discord.HTTPException:
+            log.warning(
+                "Job Hub edit failed for user_id=%s message_id=%s",
+                self.user_id,
+                getattr(interaction.message, "id", None),
+                exc_info=True,
+            )
+
+        if not interaction.response.is_done():
+            await interaction.response.send_message("That Job Hub is stale. Please run `/job` to open a fresh panel.", ephemeral=True)
+            return
+
+        await interaction.followup.send("That Job Hub is stale. Please run `/job` to open a fresh panel.", ephemeral=True)
+
     async def refresh(self, interaction: discord.Interaction, notice: Optional[str] = None) -> None:
         async with self.sessionmaker() as session:
             async with session.begin():
@@ -144,10 +207,7 @@ class JobHubView(discord.ui.View):
         self._build_static_buttons()
         self._dynamic_refresh(slot_snap)
         embed = make_job_hub_embed(user=interaction.user, vip=self.vip, slot_snap=slot_snap, section=self.section)
-        if interaction.response.is_done():
-            await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self, content=notice)
-        else:
-            await interaction.response.edit_message(embed=embed, view=self, content=notice)
+        await self._safe_edit(interaction, embed=embed, content=notice)
 
     async def _update_after_deferred_interaction(
         self,
@@ -160,6 +220,10 @@ class JobHubView(discord.ui.View):
         self._build_static_buttons()
         self._dynamic_refresh(slot_snap)
         embed = make_job_hub_embed(user=interaction.user, vip=self.vip, slot_snap=slot_snap, section=self.section)
+        try:
+            self.message = await interaction.original_response()
+        except Exception:
+            self.message = interaction.message or self.message
         await interaction.edit_original_response(embed=embed, view=self, content=notice)
 
     async def handle_job_assignment(self, interaction: discord.Interaction, slot_index: int, job_key: str) -> None:

@@ -9,7 +9,12 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from services.error_logging import ErrorDumpWriter, build_context_from_command, build_context_from_interaction
+from services.error_logging import (
+    ErrorDumpWriter,
+    build_context_from_command,
+    build_context_from_interaction,
+    merge_logging_context,
+)
 
 log = logging.getLogger("error_monitor.cog")
 
@@ -43,7 +48,8 @@ class ErrorMonitor(commands.Cog):
                 bot = getattr(interaction.client, "error_monitor_cog", None)
                 if bot is not None:
                     extras = {"view_type": type(view).__name__, "item_type": type(item).__name__, "item_custom_id": getattr(item, "custom_id", None)}
-                    bot.log_exception(error, source="view", extras=extras, **build_context_from_interaction(interaction))
+                    context = merge_logging_context(build_context_from_interaction(interaction), extras=extras)
+                    bot.log_exception(error, source="view", **context)
                 await original_view_error(view, interaction, error, item)
 
             discord.ui.View.on_error = view_on_error
@@ -56,7 +62,8 @@ class ErrorMonitor(commands.Cog):
                 bot = getattr(interaction.client, "error_monitor_cog", None)
                 if bot is not None:
                     extras = {"modal_type": type(modal).__name__, "modal_title": getattr(modal, "title", None)}
-                    bot.log_exception(error, source="modal", extras=extras, **build_context_from_interaction(interaction))
+                    context = merge_logging_context(build_context_from_interaction(interaction), extras=extras)
+                    bot.log_exception(error, source="modal", **context)
                 await original_modal_error(modal, interaction, error)
 
             discord.ui.Modal.on_error = modal_on_error
