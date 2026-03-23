@@ -771,20 +771,59 @@ def _worker_candidate_color(candidate: object | None = None) -> discord.Color:
     return discord.Color.from_rgb(88, 170, 122)
 
 
+def _worker_embed_color(detail: BusinessManageSnapshot, slots: Sequence[WorkerAssignmentSlotSnapshot], candidate: object | None = None) -> discord.Color:
+    if candidate is not None:
+        return _worker_rarity_meta(getattr(candidate, "rarity", None))[2]
+    active_rarities = [getattr(slot, "rarity", None) for slot in slots if bool(getattr(slot, "is_active", False))]
+    if active_rarities:
+        top = max(active_rarities, key=lambda value: _worker_rarity_meta(value)[3])
+        top_color = _worker_rarity_meta(top)[2]
+        if _worker_rarity_meta(top)[3] >= 2:
+            return top_color
+    return _hub_color_for_business_key(getattr(detail, "key", None))
+
+
 def _worker_role_best_for(worker_type: object) -> str:
     kind = _safe_str(worker_type, "efficient").lower()
     mapping = {
-        "fast": "Speed runs",
-        "efficient": "Steady profit",
+        "fast": "Fast runs",
+        "efficient": "Income growth",
         "kind": "Event boosts",
     }
     return mapping.get(kind, "Balanced growth")
 
 
-def _worker_summary_line(candidate: object) -> str:
+def _worker_bonus_parts(candidate: object) -> list[str]:
+    parts: list[str] = []
     flat_bonus = int(getattr(candidate, "flat_profit_bonus", 0) or 0)
     percent_bp = int(getattr(candidate, "percent_profit_bonus_bp", 0) or 0)
-    return f"+{_fmt_int(flat_bonus)} Flat • +{_format_short_percent_from_bp(percent_bp)} Profit"
+    worker_type = _safe_str(getattr(candidate, "worker_type", None), "efficient").lower()
+    if flat_bonus > 0:
+        parts.append(f"Income +{_fmt_int(flat_bonus)}")
+    if percent_bp > 0:
+        label = {"fast": "Speed", "kind": "Event Boost"}.get(worker_type, "Output")
+        parts.append(f"{label} +{_format_short_percent_from_bp(percent_bp)}")
+    return parts or ["No bonus"]
+
+
+def _worker_summary_line(candidate: object) -> str:
+    return " • ".join(_worker_bonus_parts(candidate))
+
+
+def _worker_special_line(candidate: object) -> str | None:
+    worker_type = _safe_str(getattr(candidate, "worker_type", None), "efficient").lower()
+    mapping = {
+        "fast": "Best for shorter work cycles",
+        "efficient": "Best for steady income",
+        "kind": "Best for event-heavy runs",
+    }
+    return mapping.get(worker_type)
+
+
+def _worker_odds_lines() -> tuple[str, None]:
+    odds = (("common", 0.58), ("uncommon", 0.24), ("rare", 0.12), ("epic", 0.05), ("mythical", 0.01))
+    base = " • ".join(f"{_worker_rarity_badge(name)} {int(chance * 100)}%" for name, chance in odds)
+    return f"Base Odds: {base}", None
 
 
 def _worker_candidate_score(candidate: object | None) -> int:
@@ -878,10 +917,6 @@ def _manager_compare_tags(candidate: object, current_candidate: object | None = 
     if not tags and rarity_rank >= 1:
         tags.append("Strong Pull")
     return tags[:3]
-
-
-def _worker_odds_line() -> str:
-    return "Odds: • Common 58% • ◈ Uncommon 24% • ◆ Rare 12% • ⬢ Epic 5% • ✦ Mythic 1%"
 
 
 def _progress_bar(current: int, total: int, *, width: int = 8) -> str:
@@ -1368,6 +1403,52 @@ def _build_business_detail_embed(
     return e
 
 
+def _worker_highlight_map(slots: Sequence[WorkerAssignmentSlotSnapshot]) -> dict[int, str]:
+    active = [slot for slot in slots if bool(getattr(slot, "is_active", False))]
+    if not active:
+        return {}
+    highlights: dict[int, str] = {}
+    highest_rarity = max(active, key=lambda slot: _worker_rarity_meta(getattr(slot, "rarity", None))[3])
+    best_income = max(active, key=lambda slot: int(getattr(slot, "flat_profit_bonus", 0) or 0))
+    best_output = max(active, key=lambda slot: int(getattr(slot, "percent_profit_bonus_bp", 0) or 0))
+    fastest = max(active, key=lambda slot: (1 if _safe_str(getattr(slot, "worker_type", None), "").lower() == "fast" else 0, int(getattr(slot, "percent_profit_bonus_bp", 0) or 0)))
+    event_best = max(active, key=lambda slot: (1 if _safe_str(getattr(slot, "worker_type", None), "").lower() == "kind" else 0, int(getattr(slot, "percent_profit_bonus_bp", 0) or 0)))
+    highlights[int(getattr(highest_rarity, "slot_index", 0) or 0)] = "Highest Rarity"
+    if int(getattr(best_income, "slot_index", 0) or 0) not in highlights and int(getattr(best_income, "flat_profit_bonus", 0) or 0) > 0:
+        highlights[int(getattr(best_income, "slot_index", 0) or 0)] = "Best Income"
+    if int(getattr(best_output, "slot_index", 0) or 0) not in highlights and int(getattr(best_output, "percent_profit_bonus_bp", 0) or 0) > 0:
+        highlights[int(getattr(best_output, "slot_index", 0) or 0)] = "Best Output"
+    if _safe_str(getattr(fastest, "worker_type", None), "").lower() == "fast" and int(getattr(fastest, "slot_index", 0) or 0) not in highlights:
+        highlights[int(getattr(fastest, "slot_index", 0) or 0)] = "Fastest"
+    if _safe_str(getattr(event_best, "worker_type", None), "").lower() == "kind" and int(getattr(event_best, "slot_index", 0) or 0) not in highlights:
+        highlights[int(getattr(event_best, "slot_index", 0) or 0)] = "Event Specialist"
+    return highlights
+
+
+def _build_worker_summary_lines(slots: Sequence[WorkerAssignmentSlotSnapshot]) -> tuple[str, Optional[str], str]:
+    active = [slot for slot in slots if bool(getattr(slot, "is_active", False))]
+    income_total = sum(int(getattr(slot, "flat_profit_bonus", 0) or 0) for slot in active)
+    output_total = sum(int(getattr(slot, "percent_profit_bonus_bp", 0) or 0) for slot in active)
+    speed_total = sum(int(getattr(slot, "percent_profit_bonus_bp", 0) or 0) for slot in active if _safe_str(getattr(slot, "worker_type", None), "").lower() == "fast")
+    event_total = sum(int(getattr(slot, "percent_profit_bonus_bp", 0) or 0) for slot in active if _safe_str(getattr(slot, "worker_type", None), "").lower() == "kind")
+    highest = max((_worker_rarity_meta(getattr(slot, "rarity", None)) for slot in active), default=("•", "Common", EMBED_COLOR, 0), key=lambda item: item[3])
+    summary_parts = [f"{_fmt_int(len(active))} Active"]
+    if income_total > 0:
+        summary_parts.append(f"Income +{_fmt_int(income_total)}")
+    if speed_total > 0:
+        summary_parts.append(f"Speed +{_format_short_percent_from_bp(speed_total)}")
+    elif output_total > 0:
+        summary_parts.append(f"Output +{_format_short_percent_from_bp(output_total)}")
+    summary_parts.append(f"Best {highest[1]}")
+    special_parts: list[str] = []
+    if output_total > 0 and speed_total > 0:
+        special_parts.append(f"Total Output +{_format_short_percent_from_bp(output_total)}")
+    if event_total > 0:
+        special_parts.append(f"Event Boost +{_format_short_percent_from_bp(event_total)}")
+    fill = f"{_fmt_int(len(active))}/{_fmt_int(len(slots))} Workers Assigned"
+    return " • ".join(summary_parts), (" • ".join(special_parts[:2]) if special_parts else None), fill
+
+
 def _build_worker_assignments_embed(
     *,
     user: discord.abc.User,
@@ -1375,44 +1456,66 @@ def _build_worker_assignments_embed(
     slots: Sequence[WorkerAssignmentSlotSnapshot],
     page: int = 0,
 ) -> discord.Embed:
-    title = f"👷 Worker Panel • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}"
-    description = (
-        f"Slots in use: `{_slot_text(getattr(detail, 'worker_slots_used', 0), getattr(detail, 'worker_slots_total', 0))}`\n"
-        "Use **Hire Worker** to open recruitment, then **Reroll Worker** for a new candidate or **Cancel** to return."
-    )
-    e = _base_embed(title=title, description=description)
-    e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
-
     all_slots = list(slots or ())
     total_pages = max(1, (len(all_slots) + _ASSIGNMENTS_PAGE_SIZE - 1) // _ASSIGNMENTS_PAGE_SIZE)
     current_page = min(max(int(page), 0), total_pages - 1)
     start = current_page * _ASSIGNMENTS_PAGE_SIZE
     visible_slots = all_slots[start:start + _ASSIGNMENTS_PAGE_SIZE]
+    summary_line, special_line, slot_fill = _build_worker_summary_lines(all_slots)
+    odds_line, adjusted_odds_line = _worker_odds_lines()
+    color = _worker_embed_color(detail, all_slots)
+    title = f"Worker Roster • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}"
+    description = f"{slot_fill}\nHire, organize, and manage your workforce."
+    e = _base_embed(title=title, description=description, color=color)
+    e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
+
+    workforce_summary = [summary_line]
+    if special_line:
+        workforce_summary.append(special_line)
+    e.add_field(name="Workforce Summary", value="\n".join(workforce_summary), inline=False)
+
+    recruit_lines = [odds_line, f"Hire Cost: {_fmt_int(WORKER_CANDIDATE_REROLL_COST)} Silver • Reroll Cost: {_fmt_int(WORKER_CANDIDATE_REROLL_COST)} Silver"]
+    if adjusted_odds_line:
+        recruit_lines.insert(1, adjusted_odds_line)
+    e.add_field(name="Recruit / Odds Panel", value="\n".join(recruit_lines), inline=False)
 
     if total_pages > 1:
-        e.add_field(name="Page", value=f"Page **{_fmt_int(current_page + 1)}** of **{_fmt_int(total_pages)}**", inline=False)
+        e.add_field(name="Worker Roster", value=f"Page **{_fmt_int(current_page + 1)}** of **{_fmt_int(total_pages)}**", inline=False)
 
+    highlights = _worker_highlight_map(all_slots)
     lines: list[str] = []
     for slot in visible_slots:
-        slot_index = _fmt_int(getattr(slot, 'slot_index', 0))
+        slot_index = int(getattr(slot, 'slot_index', 0) or 0)
         is_active = bool(getattr(slot, 'is_active', False))
         if is_active:
-            lines.append(
-                f"`#{slot_index}` **{_safe_str(getattr(slot, 'worker_name', None), 'Worker')}** ({_safe_str(getattr(slot, 'rarity', None), 'common')})\n"
-                f"└ Type `{_safe_str(getattr(slot, 'worker_type', None), 'efficient')}` • Rarity `{_safe_str(getattr(slot, 'rarity', None), 'common')}` • +{_fmt_int(getattr(slot, 'flat_profit_bonus', 0))} flat • +{_fmt_int(getattr(slot, 'percent_profit_bonus_bp', 0))} bp • Status `Active`"
-            )
+            rarity_badge = _worker_rarity_badge(getattr(slot, 'rarity', None))
+            tag = highlights.get(slot_index)
+            line_one = f"**#{_fmt_int(slot_index)} {_safe_str(getattr(slot, 'worker_name', None), 'Worker')}** {rarity_badge}"
+            if tag:
+                line_one += f" • {tag}"
+            line_two = _worker_summary_line(slot)
+            special = _worker_special_line(slot)
+            line_three = "🟢 Active"
+            if special:
+                line_three += f" • {special}"
+            lines.append(f"{line_one}\n{line_two}\n{line_three}")
         else:
-            lines.append(f"`#{slot_index}` *(empty)*")
+            lines.append(
+                f"**#{_fmt_int(slot_index)} Empty Slot**\n"
+                "No worker assigned\n"
+                "➕ Hire a worker to improve this business"
+            )
 
-    empty_text = "No workers assigned yet." if getattr(detail, 'worker_slots_total', 0) else "No worker slots unlocked."
+    empty_text = "No worker slots unlocked." if not getattr(detail, 'worker_slots_total', 0) else "No workers assigned yet."
     if not lines:
-        e.add_field(name="Slots", value=empty_text, inline=False)
-        return e
+        e.add_field(name="Worker Roster", value=empty_text, inline=False)
+    else:
+        chunks = _chunk_field_lines(lines)
+        for idx, chunk in enumerate(chunks, start=1):
+            field_name = "Worker Roster" if len(chunks) == 1 else f"Worker Roster ({idx}/{len(chunks)})"
+            e.add_field(name=field_name, value=chunk, inline=False)
 
-    chunks = _chunk_field_lines(lines)
-    for idx, chunk in enumerate(chunks, start=1):
-        field_name = "Slots" if len(chunks) == 1 else f"Slots ({idx}/{len(chunks)})"
-        e.add_field(name=field_name, value=chunk, inline=False)
+    e.set_footer(text="Hire to grow your workforce • Reroll to refresh candidates • Remove to free a slot")
     return e
 
 
@@ -1505,29 +1608,25 @@ def _build_worker_hire_result_embed(
 ) -> discord.Embed:
     e = _base_embed(
         title=f"✅ Worker Hired • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}",
-        description="Your new worker has been assigned automatically.",
-        color=SUCCESS_COLOR,
+        description="Your new worker is now part of the roster.",
+        color=_worker_embed_color(detail, [], hired),
     )
     e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
     e.add_field(
-        name="Worker",
+        name="New Worker",
         value=(
-            f"**{_safe_str(hired.worker_name, 'Worker')}**\n"
-            f"Type `{_safe_str(hired.worker_type, 'efficient')}` • Rarity `{_safe_str(hired.rarity, 'common')}`"
+            f"**{_safe_str(hired.worker_name, 'Worker')}** {_worker_rarity_badge(hired.rarity)}\n"
+            f"{_worker_summary_line(hired)}\n"
+            f"🟢 Active • {_worker_special_line(hired) or _worker_role_best_for(hired.worker_type)}"
         ),
         inline=False,
     )
     e.add_field(
-        name="Bonuses",
-        value=f"+{_fmt_int(hired.flat_profit_bonus)} flat • +{_fmt_int(hired.percent_profit_bonus_bp)} bp",
-        inline=False,
-    )
-    e.add_field(
         name="Assignment",
-        value=f"Slot `#{_fmt_int(hired.slot_index)}` • Cost `Free`",
+        value=f"Slot **#{_fmt_int(hired.slot_index)}** • Cost **{_fmt_int(hired.hire_cost)} Silver**",
         inline=False,
     )
-    e.set_footer(text="Worker successfully assigned.")
+    e.set_footer(text="Your workforce just got stronger.")
     return e
 
 
@@ -1543,36 +1642,32 @@ def _build_worker_candidate_embed(
 ) -> discord.Embed:
     tags = _worker_compare_tags(candidate, current_candidate=current_candidate, slots=slots)
     rarity_badge = _worker_rarity_badge(candidate.rarity)
+    odds_line, adjusted_odds_line = _worker_odds_lines()
     e = _base_embed(
         title=f"{stage_label} • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}",
-        description=status_line or "A fresh worker just stepped out of the recruit line.",
-        color=_worker_candidate_color(candidate),
+        description=status_line or "A new recruit is ready to join your workforce.",
+        color=_worker_embed_color(detail, list(slots or []), candidate),
     )
     e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
-    e.add_field(
-        name="Recruit Panel",
-        value=(
-            f"{_worker_odds_line()}\n"
-            f"Reroll Cost: **{_fmt_int(getattr(candidate, 'reroll_cost', WORKER_CANDIDATE_REROLL_COST))} Silver**\n"
-            f"Hire Cost: **{_fmt_int(getattr(candidate, 'reroll_cost', WORKER_CANDIDATE_REROLL_COST))} Silver**"
-        ),
-        inline=False,
-    )
-    e.add_field(
-        name="Candidate",
-        value=(
-            f"**{_safe_str(candidate.worker_name, 'Worker')}** {rarity_badge}\n"
-            f"{_worker_summary_line(candidate)}\n"
-            f"Best For: {_worker_role_best_for(getattr(candidate, 'worker_type', None))}"
-        ),
-        inline=False,
-    )
+    recruit_lines = [odds_line]
+    if adjusted_odds_line:
+        recruit_lines.append(adjusted_odds_line)
+    recruit_lines.append(f"Reroll Cost: **{_fmt_int(getattr(candidate, 'reroll_cost', WORKER_CANDIDATE_REROLL_COST))} Silver**")
+    recruit_lines.append(f"Hire Cost: **{_fmt_int(getattr(candidate, 'reroll_cost', WORKER_CANDIDATE_REROLL_COST))} Silver**")
+    e.add_field(name="Recruit / Odds Panel", value="\n".join(recruit_lines), inline=False)
+    candidate_lines = [
+        f"**{_safe_str(candidate.worker_name, 'Worker')}** {rarity_badge}",
+        _worker_summary_line(candidate),
+        f"Best For: {_worker_role_best_for(getattr(candidate, 'worker_type', None))}",
+    ]
+    special = _worker_special_line(candidate)
+    if special:
+        candidate_lines.append(special)
+    e.add_field(name="Candidate Preview", value="\n".join(candidate_lines), inline=False)
     if tags:
         e.add_field(name="Highlights", value=" • ".join(tags), inline=False)
-    e.set_footer(text="Hire Worker locks this recruit in for free after the roll.")
+    e.set_footer(text="Hire Worker assigns this recruit right away after the roll.")
     return e
-
-
 
 
 def _build_manager_candidate_embed(
