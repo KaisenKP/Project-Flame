@@ -23,33 +23,55 @@ def fmt_seconds(seconds: int) -> str:
 
 def build_hub_embed(*, profile, cooldowns: list, guild_name: str) -> discord.Embed:
     embed = discord.Embed(
-        title="🏦 Bank Robbery Hub",
-        description="Premium multiplayer scores with prep, greed pressure, heat, and major Silver swings.",
-        color=discord.Color.dark_teal(),
+        title="💎 Heist Hub",
+        description=(
+            "Plan the run, manage your crew, and push the finale from one control panel.\n"
+            "Use the buttons below to create, join, prep, launch, and cash out."
+        ),
+        color=discord.Color.from_rgb(24, 164, 166),
     )
-    embed.add_field(name="Your Profile", value=f"Heist Rep: **{fmt_int(profile.heist_rep)}**\nHeat: **{fmt_int(profile.personal_heat)}**\nLifetime Take: **{fmt_int(profile.lifetime_bankrobbery_earnings)} Silver**", inline=False)
+    embed.add_field(
+        name="👤 Operator Profile",
+        value=(
+            f"**Rep** · {fmt_int(profile.heist_rep)}\n"
+            f"**Heat** · {fmt_int(profile.personal_heat)}\n"
+            f"**Lifetime Take** · {fmt_int(profile.lifetime_bankrobbery_earnings)} Silver"
+        ),
+        inline=False,
+    )
     cd_map = {row.robbery_id: row for row in cooldowns}
+    target_cards: list[str] = []
     for template in TEMPLATES.values():
         lock = "✅ Ready"
         if template.robbery_id in cd_map:
             lock = f"⏳ {cd_map[template.robbery_id].ends_at.strftime('%Y-%m-%d %H:%M UTC')}"
-        embed.add_field(
-            name=f"{template.display_name} • {template.tier.value.title()}",
-            value=(
-                f"Crew **{template.crew_min}-{template.crew_max}** • Entry **{fmt_int(template.entry_cost)} Silver**\n"
-                f"Payout **{fmt_int(template.payout_min)}-{fmt_int(template.payout_max)}**\n"
-                f"Rep **{fmt_int(template.recommended_rep)}** • Heat **+{template.heat_gain}** • Cooldown **{fmt_seconds(template.cooldown_seconds)}**\n"
-                f"Approaches: **{', '.join(a.value.title() for a in template.available_approaches)}**\n"
-                f"Status: {lock}"
-            ),
-            inline=False,
+        target_cards.append(
+            f"**{template.display_name}** · {template.tier.value.title()}\n"
+            f"↳ Crew {template.crew_min}-{template.crew_max} • Entry {fmt_int(template.entry_cost)}\n"
+            f"↳ Payout {fmt_int(template.payout_min)}-{fmt_int(template.payout_max)} • Heat +{template.heat_gain}\n"
+            f"↳ Status {lock}"
         )
-    embed.set_footer(text=f"{guild_name} • Use /bankrobbery board or /bankrobbery create")
+    embed.add_field(name="🎯 Active Targets", value="\n\n".join(target_cards), inline=False)
+    embed.add_field(
+        name="🕹️ Quick Flow",
+        value=(
+            "1. **Create** or **Join** a crew.\n"
+            "2. Tap **Auto Setup** to assign roles and fair cuts.\n"
+            "3. Clear prep with the prep selector.\n"
+            "4. Hit **Launch Finale** and run it with the action buttons."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text=f"{guild_name} • Centralized heist controls")
     return embed
 
 
 def build_board_embed() -> discord.Embed:
-    embed = discord.Embed(title="🎯 Robbery Board", color=discord.Color.blurple())
+    embed = discord.Embed(
+        title="🧭 Heist Target Board",
+        description="Every available score, tuned for a cleaner at-a-glance planning board.",
+        color=discord.Color.blurple(),
+    )
     for template in TEMPLATES.values():
         embed.add_field(
             name=template.display_name,
@@ -64,19 +86,34 @@ def build_board_embed() -> discord.Embed:
 
 
 def build_lobby_embed(*, lobby, template, participants, prep_rows) -> discord.Embed:
-    embed = discord.Embed(title=f"🚨 Crew Lobby • {template.display_name}", description=template.description, color=discord.Color.orange())
-    embed.add_field(name="Target", value=f"Approach: **{lobby.approach.title()}**\nStage: **{lobby.stage.title()}**\nEntry: **{fmt_int(template.entry_cost)} Silver**", inline=False)
+    embed = discord.Embed(
+        title=f"🚨 Crew Lobby • {template.display_name}",
+        description=template.description,
+        color=discord.Color.from_rgb(255, 170, 64),
+    )
+    embed.add_field(
+        name="🎯 Plan",
+        value=(
+            f"**Approach** · {lobby.approach.title()}\n"
+            f"**Stage** · {lobby.stage.title()}\n"
+            f"**Entry** · {fmt_int(template.entry_cost)} Silver"
+        ),
+        inline=False,
+    )
     crew_lines = []
     for member in participants:
-        crew_lines.append(f"<@{member.user_id}> • **{member.role.title()}** • Cut **{member.cut_percent}%** • {'✅' if member.ready else '❌'} Ready")
-    embed.add_field(name="Crew", value="\n".join(crew_lines) if crew_lines else "No crew yet.", inline=False)
+        crew_lines.append(
+            f"<@{member.user_id}> · **{member.role.title()}** · "
+            f"Cut **{member.cut_percent}%** · {'✅ Ready' if member.ready else '❌ Waiting'}"
+        )
+    embed.add_field(name="👥 Crew", value="\n".join(crew_lines) if crew_lines else "No crew yet.", inline=False)
     prep_lines = []
     for row in prep_rows:
         definition = PREP_DEFS[row.prep_key]
         who = f" by <@{row.completed_by_user_id}>" if row.completed_by_user_id else ""
         prep_lines.append(f"{'✅' if row.completed else '⬜'} **{definition.name}** — {definition.bonus_text}{who}")
-    embed.add_field(name="Prep Checklist", value="\n".join(prep_lines), inline=False)
-    embed.set_footer(text="Leader controls approach, roles, cuts, and launch.")
+    embed.add_field(name="🧰 Prep Checklist", value="\n".join(prep_lines), inline=False)
+    embed.set_footer(text="Run everything from the hub buttons below.")
     return embed
 
 
@@ -95,12 +132,21 @@ def build_prep_embed(*, template, prep_rows, prep_effects: dict[str, int]) -> di
 
 def build_finale_embed(*, lobby, template, state: dict, phase_result=None) -> discord.Embed:
     embed = discord.Embed(title=f"💥 Finale • {template.display_name}", color=discord.Color.red())
-    embed.add_field(name="Run State", value=f"Phase: **{lobby.current_phase.title()}**\nAlert: **{state.get('alert', 0)} / 100**\nSecured Loot: **{fmt_int(state.get('secured_cash', 0))} Silver**\nLoot Rounds: **{state.get('loot_round', 0)}**", inline=False)
-    embed.add_field(name="Active Modifiers", value="\n".join(state.get("active_modifiers", []) or ["No active temporary modifiers."]), inline=False)
+    embed.add_field(
+        name="📡 Run State",
+        value=(
+            f"**Phase** · {lobby.current_phase.title()}\n"
+            f"**Alert** · {state.get('alert', 0)} / 100\n"
+            f"**Secured Loot** · {fmt_int(state.get('secured_cash', 0))} Silver\n"
+            f"**Loot Rounds** · {state.get('loot_round', 0)}"
+        ),
+        inline=False,
+    )
+    embed.add_field(name="⚙️ Active Modifiers", value="\n".join(state.get("active_modifiers", []) or ["No active temporary modifiers."]), inline=False)
     if phase_result is not None:
         embed.add_field(name=phase_result.title, value=f"{phase_result.description}\nEvent: **{phase_result.event_name or 'None'}**", inline=False)
     timeline = state.get("timeline", [])[-4:]
-    embed.add_field(name="Crew Feed", value="\n".join(f"• {item.get('text', '')}" for item in timeline) if timeline else "Run just started.", inline=False)
+    embed.add_field(name="📰 Crew Feed", value="\n".join(f"• {item.get('text', '')}" for item in timeline) if timeline else "Run just started.", inline=False)
     return embed
 
 
@@ -126,11 +172,116 @@ def build_results_embed(*, template, outcome_payload, state: dict) -> discord.Em
     return embed
 
 
-class LobbyView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=600)
+class HeistTargetSelect(discord.ui.Select):
+    def __init__(self, cog, owner_id: int):
+        self.cog = cog
+        self.owner_id = owner_id
+        options = [
+            discord.SelectOption(
+                label=template.display_name[:100],
+                value=template.robbery_id,
+                description=f"{template.tier.value.title()} • Crew {template.crew_min}-{template.crew_max}",
+                emoji="🎯",
+            )
+            for template in TEMPLATES.values()
+        ]
+        super().__init__(placeholder="Choose a target to create a crew", min_values=1, max_values=1, options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.cog.handle_create_target(interaction, owner_id=self.owner_id, robbery_id=self.values[0])
 
 
-class FinaleView(discord.ui.View):
-    def __init__(self):
+class HeistApproachSelect(discord.ui.Select):
+    def __init__(self, cog, owner_id: int):
+        self.cog = cog
+        self.owner_id = owner_id
+        options = [
+            discord.SelectOption(label=approach.value.title(), value=approach.value, emoji="🛠️")
+            for approach in BankApproach
+        ]
+        super().__init__(placeholder="Choose your approach", min_values=1, max_values=1, options=options, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.cog.handle_set_approach(interaction, owner_id=self.owner_id, approach=self.values[0])
+
+
+class HeistPrepSelect(discord.ui.Select):
+    def __init__(self, cog, owner_id: int):
+        self.cog = cog
+        self.owner_id = owner_id
+        options = [
+            discord.SelectOption(label=definition.name[:100], value=key, description=definition.bonus_text[:100], emoji="🧰")
+            for key, definition in PREP_DEFS.items()
+        ]
+        super().__init__(placeholder="Mark a prep objective complete", min_values=1, max_values=1, options=options, row=2)
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.cog.handle_complete_prep(interaction, owner_id=self.owner_id, prep_key=self.values[0])
+
+
+class HeistJoinLeaderSelect(discord.ui.UserSelect):
+    def __init__(self, cog, owner_id: int):
+        self.cog = cog
+        self.owner_id = owner_id
+        super().__init__(placeholder="Choose a leader to join", min_values=1, max_values=1, row=3)
+
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
+        await self.cog.handle_join_lobby(interaction, owner_id=self.owner_id, leader_id=selected.id)
+
+
+class HeistHubView(discord.ui.View):
+    def __init__(self, cog, owner_id: int):
         super().__init__(timeout=600)
+        self.cog = cog
+        self.owner_id = owner_id
+        self.add_item(HeistTargetSelect(cog, owner_id))
+        self.add_item(HeistApproachSelect(cog, owner_id))
+        self.add_item(HeistPrepSelect(cog, owner_id))
+        self.add_item(HeistJoinLeaderSelect(cog, owner_id))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("This heist hub belongs to someone else.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Refresh Hub", style=discord.ButtonStyle.secondary, emoji="🔄", row=4)
+    async def refresh_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.cog.handle_refresh_hub(interaction, owner_id=self.owner_id)
+
+    @discord.ui.button(label="Lobby Status", style=discord.ButtonStyle.secondary, emoji="📋", row=4)
+    async def status_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.cog.handle_lobby_status(interaction, owner_id=self.owner_id)
+
+    @discord.ui.button(label="Auto Setup", style=discord.ButtonStyle.primary, emoji="⚙️", row=4)
+    async def auto_setup_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.cog.handle_auto_setup(interaction, owner_id=self.owner_id)
+
+    @discord.ui.button(label="Ready Toggle", style=discord.ButtonStyle.success, emoji="✅", row=4)
+    async def ready_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.cog.handle_toggle_ready(interaction, owner_id=self.owner_id)
+
+    @discord.ui.button(label="Leave Crew", style=discord.ButtonStyle.danger, emoji="🚪", row=4)
+    async def leave_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.cog.handle_leave_lobby(interaction, owner_id=self.owner_id)
+
+    @discord.ui.button(label="Launch Finale", style=discord.ButtonStyle.success, emoji="🚀", row=5)
+    async def launch_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.cog.handle_launch_finale(interaction, owner_id=self.owner_id)
+
+    @discord.ui.button(label="Push Loot", style=discord.ButtonStyle.primary, emoji="💰", row=5)
+    async def push_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.cog.handle_finale_action(interaction, owner_id=self.owner_id, action="push")
+
+    @discord.ui.button(label="Leave Now", style=discord.ButtonStyle.secondary, emoji="📦", row=5)
+    async def leave_now_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.cog.handle_finale_action(interaction, owner_id=self.owner_id, action="leave")
+
+    @discord.ui.button(label="Escape", style=discord.ButtonStyle.danger, emoji="🏃", row=5)
+    async def escape_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.cog.handle_finale_action(interaction, owner_id=self.owner_id, action="escape")
+
+    @discord.ui.button(label="Override", style=discord.ButtonStyle.primary, emoji="🧠", row=5)
+    async def override_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.cog.handle_finale_action(interaction, owner_id=self.owner_id, action="override")
