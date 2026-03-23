@@ -15,7 +15,8 @@ from services.job_hub import (
     tool_defs_for,
     unlocked_perks,
 )
-from services.jobs_core import JOB_DEFS, JOB_SWITCH_COST, JOB_UNLOCK_LEVEL, JobCategory, category_fail_bp, fmt_int
+from services.jobs_core import JOB_DEFS, JOB_SWITCH_COST, JobCategory, category_fail_bp, fmt_int, unlock_level_for
+from services.jobs_endgame import presentation_for
 
 VIP_WORK_COOLDOWN_SECONDS = 10
 
@@ -48,6 +49,7 @@ def make_job_hub_embed(*, user: discord.abc.User, vip: bool, slot_snap: SlotSnap
         return embed
 
     d = JOB_DEFS[slot_snap.job_key]
+    presentation = presentation_for(slot_snap.job_key)
     progress = slot_snap.progress
     assert progress is not None
     income_bp, xp_bp, stamina_bp, tool_name = tool_bonus_snapshot(slot_snap.job_key, slot_snap.selected_tool_key, slot_snap.tool_levels)
@@ -74,9 +76,23 @@ def make_job_hub_embed(*, user: discord.abc.User, vip: bool, slot_snap: SlotSnap
             buffs.append(f"• Stamina efficiency: **+{stamina_bp / 100:.0f}%**")
         if len(buffs) == 1:
             buffs.append("• No active buffs yet")
-        embed.add_field(name="Overview", value=f"• Current job: **{d.name}**\n• Category: **{d.category.value.title()}**\n• Active perks: **{len(unlocked)}**\n• Selected tool: **{tool_name or 'Starter'}**", inline=False)
+        overview_lines = [
+            f"• Current job: **{d.name}**",
+            f"• Category: **{d.category.value.title()}**",
+            f"• Active perks: **{len(unlocked)}**",
+            f"• Selected tool: **{tool_name or 'Starter'}**",
+        ]
+        if presentation is not None:
+            overview_lines.append(f"• Fantasy: {presentation.fantasy}")
+            overview_lines.append(f"• Payout style: {presentation.payout_style}")
+            overview_lines.append(f"• Risk: **{presentation.risk_level}**")
+            if presentation.can_trigger_danger:
+                overview_lines.append("• Danger Encounters: **Yes**")
+        embed.add_field(name="Overview", value="\n".join(overview_lines), inline=False)
         embed.add_field(name="Economy Fit", value=f"• Income range: **{fmt_int(lo)} - {fmt_int(hi)} Silver**\n• Stamina cost: **{fmt_int(stamina_cost)}**\n• Switch cost: **{fmt_int(JOB_SWITCH_COST[d.category])} Silver**", inline=True)
         embed.add_field(name="Buffs & Multipliers", value="\n".join(buffs), inline=True)
+        if presentation is not None:
+            embed.add_field(name="Capstone Identity", value=f"• {presentation.perk_summary}\n• {presentation.danger_summary}", inline=False)
     elif section == "tools":
         lines = []
         for tool in tool_defs_for(slot_snap.job_key):
@@ -97,6 +113,8 @@ def make_job_hub_embed(*, user: discord.abc.User, vip: bool, slot_snap: SlotSnap
         locked_lines = [f"🔒 **{perk.name}** at **Lv {perk.level_required}** — {perk.description}" for perk in locked] or ["All perks unlocked."]
         embed.add_field(name="Unlocked", value="\n".join(unlocked_lines), inline=False)
         embed.add_field(name="Locked", value="\n".join(locked_lines), inline=False)
+        if presentation is not None:
+            embed.add_field(name="Job Identity", value=f"• {presentation.perk_summary}\n• {presentation.danger_summary}", inline=False)
     elif section == "prestige":
         current_mult, next_mult, cost = prestige_preview(slot_snap.job_key, progress)
         embed.add_field(name="Prestige Preview", value=f"• Current earnings multiplier: **x{current_mult}**\n• Next earnings multiplier: **x{next_mult}**\n• Required level: **{progress.level_cap}**\n• Cost: **{fmt_int(cost)} Silver**", inline=False)
@@ -104,7 +122,7 @@ def make_job_hub_embed(*, user: discord.abc.User, vip: bool, slot_snap: SlotSnap
     elif section == "switch":
         lines = []
         for job in sorted(JOB_DEFS.values(), key=lambda item: item.name.lower()):
-            unlock = JOB_UNLOCK_LEVEL[job.category]
+            unlock = unlock_level_for(job.key, job.category)
             vip_lock = " • VIP" if job.vip_only else ""
             selected = "✅ " if job.key == slot_snap.job_key else ""
             lines.append(f"{selected}**{job.name}** — unlock **Lv {unlock}** • switch **{fmt_int(JOB_SWITCH_COST[job.category])}**{vip_lock}")
@@ -129,7 +147,12 @@ def make_job_info_embed(*, vip: bool, job_key: str, equipped: Optional[str]) -> 
     if d is None:
         return discord.Embed(title="Unknown job", description=f"I don’t recognize `{key}`.", color=discord.Color.red())
     fail_bp = category_fail_bp(d.category, d.fail_chance_bp)
-    return discord.Embed(title=d.name, description=f"Unlock **Lv {JOB_UNLOCK_LEVEL[d.category]}** • Switch **{fmt_int(JOB_SWITCH_COST[d.category])}** • Fail **{fail_bp/100:.2f}%**", color=discord.Color.gold() if vip else discord.Color.blurple())
+    unlock = unlock_level_for(d.key, d.category)
+    presentation = presentation_for(d.key)
+    extra = ""
+    if presentation is not None:
+        extra = f"\n{presentation.perk_summary}\n{presentation.danger_summary}"
+    return discord.Embed(title=d.name, description=f"Unlock **Lv {unlock}** • Switch **{fmt_int(JOB_SWITCH_COST[d.category])}** • Fail **{fail_bp/100:.2f}%**{extra}", color=discord.Color.gold() if vip else discord.Color.blurple())
 
 
 def make_rules_embed(*, vip: bool) -> discord.Embed:

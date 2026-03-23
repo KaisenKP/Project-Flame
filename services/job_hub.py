@@ -9,6 +9,7 @@ from db.models import JobRow, UserJobHubProgressRow, UserJobHubSlotRow, UserJobH
 from services.job_progression import level_cap_for, total_xp_from_state, xp_needed_for_level
 from services.jobs_balance import payout_for_work, prestige_cost, stamina_cost_for_work
 from services.jobs_core import JOB_DEFS, JOB_SWITCH_COST, fmt_int, tier_for_category
+from services.jobs_endgame import event_defs_for_endgame
 
 MAX_JOB_HUB_SLOTS = 3
 DEFAULT_UNLOCKED_SLOTS = 2
@@ -137,6 +138,9 @@ def perk_defs_for(job_key: str | None) -> tuple[PerkDefinition, ...]:
 def event_defs_for(job_key: str | None) -> tuple[RandomEventDefinition, ...]:
     if not job_key:
         return EVENT_CATALOG["default"]
+    endgame_defs = event_defs_for_endgame(job_key)
+    if endgame_defs:
+        return endgame_defs
     return EVENT_CATALOG.get(job_key, EVENT_CATALOG["default"])
 
 
