@@ -223,11 +223,41 @@ class JobHubView(discord.ui.View):
                     exc_info=True,
                 )
 
-        if response_open:
-            await interaction.response.send_message("That Job Hub is stale. Please run `/job` to open a fresh panel.", ephemeral=True)
-            return
+        stale_message = "That Job Hub is stale. Please run `/job` to open a fresh panel."
 
-        await interaction.followup.send("That Job Hub is stale. Please run `/job` to open a fresh panel.", ephemeral=True)
+        if response_open:
+            try:
+                await interaction.response.send_message(stale_message, ephemeral=True)
+                return
+            except discord.NotFound:
+                log.info(
+                    "Job Hub stale response send returned not found for user_id=%s message_id=%s",
+                    self.user_id,
+                    getattr(interaction.message, "id", None),
+                )
+            except discord.HTTPException:
+                log.warning(
+                    "Job Hub stale response send failed for user_id=%s message_id=%s",
+                    self.user_id,
+                    getattr(interaction.message, "id", None),
+                    exc_info=True,
+                )
+
+        try:
+            await interaction.followup.send(stale_message, ephemeral=True)
+        except discord.NotFound:
+            log.info(
+                "Job Hub stale followup send returned not found for user_id=%s message_id=%s",
+                self.user_id,
+                getattr(interaction.message, "id", None),
+            )
+        except discord.HTTPException:
+            log.warning(
+                "Job Hub stale followup send failed for user_id=%s message_id=%s",
+                self.user_id,
+                getattr(interaction.message, "id", None),
+                exc_info=True,
+            )
 
     async def refresh(self, interaction: discord.Interaction, notice: Optional[str] = None) -> None:
         async with self.sessionmaker() as session:
