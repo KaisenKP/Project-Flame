@@ -133,7 +133,7 @@ class ShopOffer:
 
 
 def _offer_from_item(it: ItemDef) -> ShopOffer:
-    desc = getattr(it, "description", "") if hasattr(it, "description") else ""
+    desc = (getattr(it, "description", "") or "") if hasattr(it, "description") else ""
     if not desc:
         payload = it.effect.payload
         if "stamina_add" in payload:

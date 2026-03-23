@@ -125,6 +125,10 @@ def _effect_summary(it: ItemDef) -> str:
     if meta:
         lines.append(" • ".join(meta))
 
+    extra = (getattr(it, "inventory_description", "") or getattr(it, "description", "") or "").strip()
+    if extra:
+        lines.append(f"📝 {extra}")
+
     if not lines:
         return "Temporary boost (catalog payload missing a summary key)."
     return "\n".join(lines)
