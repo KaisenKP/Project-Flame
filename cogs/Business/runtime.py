@@ -77,6 +77,7 @@ from .core import (
     RUN_STATUS_RUNNING,
     get_active_runs_for_processing,
 )
+from .systems import as_utc, summarize_active_events
 
 log = logging.getLogger(__name__)
 
@@ -363,120 +364,74 @@ async def process_single_run(
     run: BusinessRunRow,
     now: Optional[datetime] = None,
 ) -> ProcessRunResult:
-    """
-    Processes one active business run.
-
-    Rules:
-    - pay only for whole elapsed hours
-    - pay up to ends_at, never past it
-    - mark completed once ended and all whole-hour payouts are applied
-    """
     if now is None:
         now = _utc_now()
 
     if str(run.status) != RUN_STATUS_RUNNING:
-        return ProcessRunResult(
-            run_id=int(run.id),
-            business_key=str(run.business_key),
-            user_id=int(run.user_id),
-            guild_id=int(run.guild_id),
-            hours_paid=0,
-            silver_paid=0,
-            completed=False,
-            skipped=True,
-            note="Run is not in running state.",
-        )
+        return ProcessRunResult(int(run.id), str(run.business_key), int(run.user_id), int(run.guild_id), 0, 0, False, True, "Run is not in running state.")
 
     ownership = await _get_ownership_for_run(session, run)
     if ownership is None:
-        # Orphaned row. Mark cancelled so it stops clogging the pipe.
         run.status = RUN_STATUS_CANCELLED
         run.completed_at = now
-        run.report_json = {
-            "run_id": int(run.id),
-            "business_key": str(run.business_key),
-            "status": RUN_STATUS_CANCELLED,
-            "reason": "Missing ownership row.",
-            "completed_at_iso": now.isoformat(),
-        }
-        return ProcessRunResult(
-            run_id=int(run.id),
-            business_key=str(run.business_key),
-            user_id=int(run.user_id),
-            guild_id=int(run.guild_id),
-            hours_paid=0,
-            silver_paid=0,
-            completed=True,
-            skipped=False,
-            note="Ownership row missing. Run cancelled.",
-        )
+        run.report_json = {"run_id": int(run.id), "business_key": str(run.business_key), "status": RUN_STATUS_CANCELLED, "reason": "Missing ownership row.", "completed_at_iso": now.isoformat()}
+        return ProcessRunResult(int(run.id), str(run.business_key), int(run.user_id), int(run.guild_id), 0, 0, True, False, "Ownership row missing. Run cancelled.")
 
     anchor = _safe_run_anchor(run)
     effective_end = _min_dt(now, run.ends_at)
     whole_hours_due = _whole_hours_between(anchor, effective_end)
-
     hours_paid = 0
     silver_paid = 0
+    event_outcomes: list[RuntimeEventOutcome] = []
 
     if whole_hours_due > 0:
         hourly_profit = max(int(run.hourly_profit_snapshot or 0), 0)
-        event_outcomes: list[RuntimeEventOutcome] = []
-        for _ in range(whole_hours_due):
-            event = _roll_hourly_event(business_key=str(run.business_key))
-            multiplier_bp = int(event.multiplier_bp) if event is not None else 0
-            hour_profit = max(int(round(hourly_profit * (10_000 + multiplier_bp) / 10_000)), 0)
-            silver_paid += hour_profit
-            if event is not None:
-                event_outcomes.append(
-                    RuntimeEventOutcome(
-                        event_key=str(event.key),
-                        title=str(event.title),
-                        description=str(event.description),
-                        multiplier_bp=multiplier_bp,
-                        silver_delta=hour_profit - hourly_profit,
-                    )
-                )
+        snapshot = dict(run.snapshot_json or {})
+        plan = list(snapshot.get("event_plan", []))
+        report = dict(run.report_json or {})
+        triggered = list(report.get("runtime_events", []))
+        for hour_index in range(whole_hours_due):
+            hour_start = as_utc(anchor + timedelta(hours=hour_index))
+            hour_end = as_utc(hour_start + timedelta(hours=1))
+            active_bp = 0
+            pause_minutes = 0
+            instant_bonus = 0
+            for evt in plan:
+                evt_start = as_utc(datetime.fromisoformat(evt["starts_at_iso"]))
+                evt_end_raw = evt.get("ends_at_iso")
+                evt_end = as_utc(datetime.fromisoformat(evt_end_raw)) if evt_end_raw else None
+                if evt_start >= hour_end or (evt_end is not None and evt_end <= hour_start):
+                    continue
+                if not evt.get("resolved") and evt_start >= hour_start and evt_start < hour_end:
+                    evt["resolved"] = True
+                    triggered.append(evt)
+                    instant_bonus += int(round(hourly_profit * float(evt.get("instant_bonus_hours", 0.0))))
+                    pause_minutes = max(pause_minutes, int(evt.get("pause_minutes", 0) or 0))
+                    event_outcomes.append(RuntimeEventOutcome(str(evt.get("event_key","event")), str(evt.get("name","Business Event")), str(evt.get("description","")), int(evt.get("multiplier_bp",0) or 0), int(instant_bonus)))
+                if evt_start < hour_end and (evt_end is None or evt_end > hour_start):
+                    active_bp += int(evt.get("multiplier_bp", 0) or 0)
+            effective_hour_profit = max(int(round(hourly_profit * (10_000 + active_bp) / 10_000)), 0)
+            if pause_minutes > 0:
+                effective_hour_profit = int(round(effective_hour_profit * max(0.15, (60 - pause_minutes) / 60)))
+            silver_paid += effective_hour_profit + instant_bonus
         hours_paid = whole_hours_due
-
-        wallet = await _get_wallet(
-            session,
-            guild_id=int(run.guild_id),
-            user_id=int(run.user_id),
-        )
-
+        wallet = await _get_wallet(session, guild_id=int(run.guild_id), user_id=int(run.user_id))
         wallet.silver += silver_paid
         if hasattr(wallet, "silver_earned"):
             wallet.silver_earned += silver_paid
-
         ownership.total_earned = int(ownership.total_earned or 0) + silver_paid
-
         run.silver_paid_total = int(run.silver_paid_total or 0) + silver_paid
         run.hours_paid_total = int(run.hours_paid_total or 0) + hours_paid
         run.last_payout_at = anchor + timedelta(hours=whole_hours_due)
-        run_report = dict(run.report_json or {})
-        existing_events = list(run_report.get("runtime_events", []))
-        existing_events.extend(
-            {
-                "event_key": e.event_key,
-                "title": e.title,
-                "description": e.description,
-                "multiplier_bp": int(e.multiplier_bp),
-                "silver_delta": int(e.silver_delta),
-            }
-            for e in event_outcomes
-        )
-        run_report["runtime_events"] = existing_events
-        run.report_json = run_report
+        report["runtime_events"] = triggered
+        run.report_json = report
+        snapshot["event_plan"] = plan
+        run.snapshot_json = snapshot
 
     completed = False
-
-    # If the run has ended and there are no remaining whole unpaid hours,
-    # finalize it cleanly or consume one auto-restart charge.
     if _run_has_ended(run, now=now):
         post_anchor = _safe_run_anchor(run)
-        remaining_due_after_payment = _whole_hours_between(post_anchor, run.ends_at)
-
-        if remaining_due_after_payment <= 0:
+        if _whole_hours_between(post_anchor, run.ends_at) <= 0:
             auto_restart_remaining = max(int(run.auto_restart_remaining or 0), 0)
             if auto_restart_remaining > 0:
                 restarted = _spawn_auto_restart_run(session, run=run)
@@ -484,31 +439,12 @@ async def process_single_run(
                 run_report = dict(run.report_json or {})
                 run_report["auto_restarted"] = True
                 run_report["auto_restart_spawned_run_id"] = int(restarted.id)
-                run_report["auto_restart_charges_before_completion"] = auto_restart_remaining
-                run_report["auto_restart_charges_after_completion"] = int(restarted.auto_restart_remaining or 0)
                 run.report_json = run_report
             _finalize_run_in_place(run, now=now)
             completed = True
 
-    note = ""
-    if hours_paid > 0:
-        note = f"Paid {hours_paid}h / {silver_paid} silver."
-    elif completed:
-        note = "Run completed with no additional payout due this tick."
-    else:
-        note = "No whole hours due yet."
-
-    return ProcessRunResult(
-        run_id=int(run.id),
-        business_key=str(run.business_key),
-        user_id=int(run.user_id),
-        guild_id=int(run.guild_id),
-        hours_paid=hours_paid,
-        silver_paid=silver_paid,
-        completed=completed,
-        skipped=False,
-        note=note,
-    )
+    note = f"Paid {hours_paid}h / {silver_paid} silver." if hours_paid > 0 else ("Run completed with no additional payout due this tick." if completed else "No whole hours due yet.")
+    return ProcessRunResult(int(run.id), str(run.business_key), int(run.user_id), int(run.guild_id), hours_paid, silver_paid, completed, False, note)
 
 
 # =========================================================
