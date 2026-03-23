@@ -9,7 +9,10 @@ from pathlib import Path
 from typing import Iterable
 
 import discord
+from discord import app_commands
 from discord.ext import commands
+
+from services.error_logging import ErrorDumpWriter, build_context_from_interaction
 
 log = logging.getLogger("bot")
 
@@ -64,6 +67,20 @@ def _iter_extension_modules(cogs_dir: Path, cogs_package: str) -> list[str]:
     return exts
 
 
+
+
+class PulseCommandTree(app_commands.CommandTree["PulseBot"]):
+    async def on_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+        monitor = getattr(self.client, "error_monitor_cog", None)
+        if monitor is not None:
+            monitor.log_exception(error, source="app_command", **build_context_from_interaction(interaction))
+        else:
+            writer = getattr(self.client, "error_dump_writer", None)
+            if writer is not None:
+                writer.log_error(error, source="app_command", **build_context_from_interaction(interaction))
+        await super().on_error(interaction, error)
+
+
 class PulseBot(commands.Bot):
     def __init__(
         self,
@@ -87,6 +104,7 @@ class PulseBot(commands.Bot):
             command_prefix=commands.when_mentioned_or(prefix),
             intents=intents,
             help_command=None,
+            tree_cls=PulseCommandTree,
         )
 
         self.pulse_prefix = prefix
@@ -99,6 +117,8 @@ class PulseBot(commands.Bot):
 
         self._bg_tasks: set[asyncio.Task] = set()
         self._ready_once = asyncio.Event()
+        self.error_dump_writer = ErrorDumpWriter()
+        self.error_monitor_cog = None
 
     async def setup_hook(self) -> None:
         self.tree.interaction_check(self._interaction_restart_guard)
@@ -237,7 +257,12 @@ class PulseBot(commands.Bot):
                 _t.result()
             except asyncio.CancelledError:
                 pass
-            except Exception:
+            except Exception as exc:
+                monitor = getattr(self, "error_monitor_cog", None)
+                if monitor is not None:
+                    monitor.log_exception(exc, source="background_task", task_name=_t.get_name())
+                else:
+                    self.error_dump_writer.log_error(exc, source="background_task", task_name=_t.get_name())
                 log.exception("Background task crashed: %s", _t.get_name())
 
         task.add_done_callback(_done)
