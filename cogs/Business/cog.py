@@ -582,7 +582,7 @@ def _status_badge(running: bool, owned: bool) -> str:
         return "🔒 Locked"
     if running:
         return "🟢 Running"
-    return "⚪ Idle"
+    return "⚪ Stopped"
 
 
 def _slot_text(used: int, total: int) -> str:
@@ -675,6 +675,83 @@ def _showcase_image_from_defs(defs: Sequence[BusinessDef]) -> Optional[str]:
     return None
 
 
+def _hub_color_for_business_key(business_key: Optional[str]) -> discord.Color:
+    palette = {
+        "restaurant": discord.Color.from_rgb(220, 96, 52),
+        "farm": discord.Color.from_rgb(92, 163, 74),
+        "nightclub": discord.Color.from_rgb(108, 92, 231),
+    }
+    return palette.get(str(business_key or "").lower(), EMBED_COLOR)
+
+
+def _status_chip_for_card(card: BusinessCard) -> str:
+    if not card.owned:
+        return "🔒 Locked"
+    if card.running:
+        return "🟢 Running"
+    return "⬆ Ready"
+
+
+def _status_chip_for_snapshot(snap: BusinessManageSnapshot) -> str:
+    if not snap.owned:
+        return "🔒 Locked"
+    if snap.running:
+        return "🟢 Running"
+    return "⚪ Stopped"
+
+
+def _format_short_percent_from_bp(bp: int) -> str:
+    value = int(bp) / 100
+    if float(value).is_integer():
+        return f"{int(value)}%"
+    return f"{value:.1f}%"
+
+
+def _format_hours_short(hours: int) -> str:
+    total = max(int(hours or 0), 0)
+    if total <= 0:
+        return "0h"
+    days, rem = divmod(total, 24)
+    if days and rem:
+        return f"{days}d {rem}h"
+    if days:
+        return f"{days}d"
+    return f"{rem}h"
+
+
+def _compact_business_hint(card: BusinessCard) -> Optional[str]:
+    if card.running and getattr(card, "active_event_summary", None):
+        return f"⚡ {_trim(str(getattr(card, 'active_event_summary')), 28)}"
+    worker_bp = int(getattr(card, "worker_bonus_bp", 0) or 0)
+    if worker_bp > 0:
+        return f"+{_format_short_percent_from_bp(worker_bp)} workers"
+    synergy_bp = int(getattr(card, "synergy_bonus_bp", 0) or 0)
+    if synergy_bp > 0:
+        return f"+{_format_short_percent_from_bp(synergy_bp)} synergy"
+    if card.running:
+        return f"{_format_hours_short(card.runtime_remaining_hours)} left"
+    return "Ready to run"
+
+
+def _format_manager_summary(raw: object) -> Optional[str]:
+    text = _safe_str(raw, "").replace("Manager", "").strip(" |,-")
+    event_bp = int(getattr(raw, "event_bonus_bp", 0) or 0) if not isinstance(raw, str) else 0
+    if text and event_bp > 0:
+        return f"{_trim(text, 18)} | Events +{_format_short_percent_from_bp(event_bp)}"
+    if text:
+        return _trim(text, 36)
+    return None
+
+
+def _format_spotlight_line(label: str, value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return f"**{label}:** {text}"
+
+
 # =========================================================
 # EMBED BUILDERS
 # =========================================================
@@ -764,52 +841,100 @@ def _build_hub_embed(
     *,
     user: discord.abc.User,
     snap: BusinessHubSnapshot,
+    selected_business_key: Optional[str] = None,
 ) -> discord.Embed:
     owned_cards = [c for c in snap.cards if c.owned]
+    selected_card = next((c for c in owned_cards if c.key == selected_business_key), None) or (owned_cards[0] if owned_cards else None)
+    total_prestige = sum(max(int(getattr(card, "prestige", 0) or 0), 0) for card in owned_cards)
 
-    desc = (
-        f"`Silver` `{_fmt_int(snap.silver_balance)}` • "
-        f"`Active` `{_fmt_int(snap.total_hourly_income_active)}/hr` • "
-        f"`Owned` `{_fmt_int(snap.owned_count)}`"
+    summary_bits = [
+        f"Silver {_fmt_int(snap.silver_balance)}",
+        f"Active {_fmt_int(snap.total_hourly_income_active)}/hr",
+        f"Owned {_fmt_int(snap.owned_count)}",
+    ]
+    if owned_cards:
+        summary_bits.append(f"Prestige {_fmt_int(total_prestige)}")
+
+    e = _base_embed(
+        title="Empire Hub",
+        description=" • ".join(summary_bits),
+        color=_hub_color_for_business_key(selected_card.key if selected_card else None),
     )
-
-    e = _base_embed(title="🏢 Business Hub", description=desc)
     e.set_author(
         name=_safe_str(user),
         icon_url=_author_icon_url(user),
     )
 
-    showcase = _showcase_image_from_cards(owned_cards)
+    showcase = selected_card.image_url if selected_card and selected_card.image_url else _showcase_image_from_cards(owned_cards)
     if showcase:
         e.set_thumbnail(url=showcase)
 
     if not owned_cards:
         e.add_field(
-            name="No Businesses",
-            value="Use **Buy** to purchase your first business.",
+            name="Roster",
+            value="No businesses yet.\nUse **Buy** to purchase your first business.",
             inline=False,
         )
         return e
 
     rows: list[str] = []
     for c in owned_cards[:10]:
-        state = "Running" if c.running else "Stopped"
-        remaining = f"{_fmt_int(c.runtime_remaining_hours)}h" if c.running else "—"
-        approx_runtime = _estimated_cycle_hours_for_card(c)
-        cycle_profit = int(c.hourly_profit) * approx_runtime
-        rows.append(
-            f"{c.emoji} **{c.name}** • Lvl `{_fmt_int(c.level)}` • `{c.run_mode}`\n"
-            f"`Status` **{state}** • `Time Left` `{remaining}` • `Profit` `{_fmt_int(c.hourly_profit)}/hr` • `Projected` `{_fmt_int(c.projected_payout or cycle_profit)}`\n"
-            f"Workers `+{_fmt_int(c.worker_bonus_bp/100)}%` | Manager `{_trim(c.manager_summary, 40)}`\n"
-            f"Event `{_trim(c.active_event_summary, 42)}` | Synergy `{_trim(c.synergy_summary, 38)}`"
+        marker = "▶" if selected_card and c.key == selected_card.key else "•"
+        top_line = (
+            f"{marker} {c.emoji} {c.name} • P{_fmt_int(c.prestige)} • "
+            f"Lv{_fmt_int(c.visible_level)} • {_status_chip_for_card(c)}"
         )
+        details = [f"{_fmt_int(c.hourly_profit)}/hr"]
+        if c.running:
+            details.append(f"{_format_hours_short(c.runtime_remaining_hours)} left")
+        else:
+            details.append("Ready to run")
+        hint = _compact_business_hint(c)
+        if hint:
+            details.append(hint)
+        rows.append(
+            f"{top_line}\n" + " • ".join(_trim(part, 32) for part in details[:3])
+        )
+    e.add_field(name="Roster", value="\n\n".join(rows), inline=False)
 
-    e.add_field(name="Overview", value="\n\n".join(rows), inline=False)
-    e.add_field(
-        name="Quick Actions",
-        value="Pick a business below, then choose **Run**, **Stop**, **Manage**, **Workers**, **Managers**, or **Upgrade**.",
-        inline=False,
-    )
+    if selected_card:
+        projected_total = int(getattr(selected_card, "projected_payout", int(selected_card.hourly_profit) * _estimated_cycle_hours_for_card(selected_card)))
+        manager_summary = _format_manager_summary(getattr(selected_card, "manager_summary", None))
+        worker_bp = int(getattr(selected_card, "worker_bonus_bp", 0) or 0)
+        worker_summary = f"+{_format_short_percent_from_bp(worker_bp)} income" if worker_bp > 0 else None
+        event_summary = _safe_str(getattr(selected_card, "active_event_summary", ""), "")
+        synergy_summary = _safe_str(getattr(selected_card, "synergy_summary", ""), "")
+        run_mode = _safe_str(getattr(selected_card, "run_mode", ""), "")
+        next_hint = "Tap Stop to cash out or Manage for deeper control." if selected_card.running else "Tap Run to start the next payout cycle."
+
+        spotlight_lines = [
+            f"{selected_card.emoji} **{selected_card.name}** • P{_fmt_int(selected_card.prestige)} • Lv{_fmt_int(selected_card.visible_level)}",
+            f"**Status:** {_status_chip_for_card(selected_card)}",
+        ]
+        if selected_card.running:
+            spotlight_lines.append(f"**Projected Take:** {_fmt_int(projected_total)}")
+        else:
+            spotlight_lines.append(f"**Next Run Estimate:** {_fmt_int(projected_total)}")
+        spotlight_lines.extend(
+            line for line in [
+                _format_spotlight_line("Workers", worker_summary),
+                _format_spotlight_line("Manager", manager_summary),
+                _format_spotlight_line("Event", _trim(event_summary, 60) if event_summary else None),
+                _format_spotlight_line("Synergy", _trim(synergy_summary, 60) if synergy_summary else None),
+                _format_spotlight_line("Run Mode", _trim(run_mode, 24) if run_mode and run_mode.lower() != "standard" else None),
+                _format_spotlight_line("Next", next_hint),
+            ]
+            if line is not None
+        )
+        e.add_field(name=f"Spotlight • {selected_card.name}", value="\n".join(spotlight_lines), inline=False)
+        e.add_field(
+            name="Actions",
+            value=(
+                f"Selected: {selected_card.emoji} **{selected_card.name}**\n"
+                "Buttons below act on the selected business only."
+            ),
+            inline=False,
+        )
     return e
 
 
@@ -1546,13 +1671,13 @@ class HubBusinessSelect(discord.ui.Select):
                 discord.SelectOption(
                     label=_trim(c.name, 100),
                     value=c.key,
-                    description=_trim(f"Lvl {_fmt_int(c.level)} • {_status_badge(c.running, c.owned)} • {_fmt_int(c.hourly_profit)}/hr", 100),
+                    description=_trim(f"P{_fmt_int(c.prestige)} • Lv{_fmt_int(c.visible_level)} • {_fmt_int(c.hourly_profit)}/hr", 100),
                     emoji=c.emoji,
                     default=(c.key == view.selected_business_key),
                 )
             )
         super().__init__(
-            placeholder="Select business for controls...",
+            placeholder="Select spotlight business...",
             min_values=1,
             max_values=1,
             options=options or [discord.SelectOption(label="No owned businesses", value="__none__")],
@@ -1570,7 +1695,7 @@ class HubBusinessSelect(discord.ui.Select):
         async with self.hub_view.cog.sessionmaker() as session:
             async with session.begin():
                 snap = await get_business_hub_snapshot(session, guild_id=self.hub_view.guild_id, user_id=self.hub_view.owner_id)
-        embed = _build_hub_embed(user=interaction.user, snap=snap)
+        embed = _build_hub_embed(user=interaction.user, snap=snap, selected_business_key=picked)
         view = BusinessHubView(
             cog=self.hub_view.cog,
             owner_id=self.hub_view.owner_id,
@@ -1623,7 +1748,7 @@ class BusinessHubView(BusinessBaseView):
                     business_key=self.selected_business_key,
                 )
 
-    @discord.ui.button(label="Manage Business", style=discord.ButtonStyle.secondary, emoji="🛠️", row=1)
+    @discord.ui.button(label="Manage", style=discord.ButtonStyle.secondary, emoji="🛠️", row=1)
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await _safe_defer(interaction)
@@ -1635,7 +1760,7 @@ class BusinessHubView(BusinessBaseView):
         view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=detail.key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
-    @discord.ui.button(label="Run Business", style=discord.ButtonStyle.success, emoji="▶️", row=1)
+    @discord.ui.button(label="Run", style=discord.ButtonStyle.success, emoji="▶️", row=1)
     async def run_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await _safe_defer(interaction)
@@ -1654,7 +1779,7 @@ class BusinessHubView(BusinessBaseView):
         view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.selected_business_key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
-    @discord.ui.button(label="Stop Business", style=discord.ButtonStyle.danger, emoji="⏹️", row=1)
+    @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, emoji="⏹️", row=1)
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await _safe_defer(interaction)
@@ -1673,7 +1798,7 @@ class BusinessHubView(BusinessBaseView):
         view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.selected_business_key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
-    @discord.ui.button(label="View Workers", style=discord.ButtonStyle.secondary, emoji="👷", row=2)
+    @discord.ui.button(label="Workers", style=discord.ButtonStyle.secondary, emoji="👷", row=2)
     async def workers_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await _safe_defer(interaction)
@@ -1693,7 +1818,7 @@ class BusinessHubView(BusinessBaseView):
         view._sync_pagination_buttons(total_slots=len(slots))
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
-    @discord.ui.button(label="View Managers", style=discord.ButtonStyle.secondary, emoji="🧑‍💼", row=2)
+    @discord.ui.button(label="Manager", style=discord.ButtonStyle.secondary, emoji="🧑‍💼", row=2)
     async def managers_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await _safe_defer(interaction)
@@ -1713,7 +1838,7 @@ class BusinessHubView(BusinessBaseView):
         view._sync_pagination_buttons(total_slots=len(slots))
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
-    @discord.ui.button(label="Upgrade Business", style=discord.ButtonStyle.primary, emoji="⬆️", row=2)
+    @discord.ui.button(label="Upgrade", style=discord.ButtonStyle.primary, emoji="⬆️", row=2)
     async def upgrade_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await _safe_defer(interaction)
@@ -1752,7 +1877,7 @@ class BusinessHubView(BusinessBaseView):
         async with self.cog.sessionmaker() as session:
             async with session.begin():
                 snap = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
-        embed = _build_hub_embed(user=interaction.user, snap=snap)
+        embed = _build_hub_embed(user=interaction.user, snap=snap, selected_business_key=self.selected_business_key)
         view = BusinessHubView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, hub_snapshot=snap, selected_business_key=self.selected_business_key)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
@@ -2187,7 +2312,7 @@ class BusinessDetailView(BusinessBaseView):
         async with self.cog.sessionmaker() as session:
             async with session.begin():
                 hub = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
-        embed = _build_hub_embed(user=interaction.user, snap=hub)
+        embed = _build_hub_embed(user=interaction.user, snap=hub, selected_business_key=self.business_key)
         view = BusinessHubView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, hub_snapshot=hub, selected_business_key=self.business_key)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
