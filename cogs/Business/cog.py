@@ -48,6 +48,7 @@ Must provide:
 - ensure_user_rows(...)
 """
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -743,6 +744,152 @@ def _format_manager_summary(raw: object) -> Optional[str]:
     return None
 
 
+
+
+def _worker_rarity_meta(rarity: object) -> tuple[str, str, discord.Color, int]:
+    key = _safe_str(rarity, "common").strip().lower()
+    table = {
+        "common": ("•", "Common", discord.Color.from_rgb(125, 133, 145), 0),
+        "uncommon": ("◈", "Uncommon", discord.Color.from_rgb(78, 186, 114), 1),
+        "rare": ("◆", "Rare", discord.Color.from_rgb(78, 141, 255), 2),
+        "epic": ("⬢", "Epic", discord.Color.from_rgb(163, 92, 255), 3),
+        "legendary": ("✹", "Legendary", discord.Color.from_rgb(255, 170, 64), 4),
+        "mythic": ("✦", "Mythic", discord.Color.from_rgb(255, 84, 164), 5),
+        "mythical": ("✦", "Mythical", discord.Color.from_rgb(255, 84, 164), 5),
+    }
+    return table.get(key, table["common"])
+
+
+def _worker_rarity_badge(rarity: object) -> str:
+    marker, label, _color, _rank = _worker_rarity_meta(rarity)
+    return f"{marker} {label}"
+
+
+def _worker_candidate_color(candidate: object | None = None) -> discord.Color:
+    if candidate is not None:
+        return _worker_rarity_meta(getattr(candidate, "rarity", None))[2]
+    return discord.Color.from_rgb(88, 170, 122)
+
+
+def _worker_role_best_for(worker_type: object) -> str:
+    kind = _safe_str(worker_type, "efficient").lower()
+    mapping = {
+        "fast": "Speed runs",
+        "efficient": "Steady profit",
+        "kind": "Event boosts",
+    }
+    return mapping.get(kind, "Balanced growth")
+
+
+def _worker_summary_line(candidate: object) -> str:
+    flat_bonus = int(getattr(candidate, "flat_profit_bonus", 0) or 0)
+    percent_bp = int(getattr(candidate, "percent_profit_bonus_bp", 0) or 0)
+    return f"+{_fmt_int(flat_bonus)} Flat • +{_format_short_percent_from_bp(percent_bp)} Profit"
+
+
+def _worker_candidate_score(candidate: object | None) -> int:
+    if candidate is None:
+        return -1
+    rarity_rank = _worker_rarity_meta(getattr(candidate, "rarity", None))[3]
+    flat_bonus = int(getattr(candidate, "flat_profit_bonus", 0) or 0)
+    percent_bp = int(getattr(candidate, "percent_profit_bonus_bp", 0) or 0)
+    return rarity_rank * 100000 + flat_bonus * 10 + percent_bp
+
+
+def _manager_candidate_score(candidate: object | None) -> int:
+    if candidate is None:
+        return -1
+    rarity_rank = _manager_rarity_meta(getattr(candidate, "rarity", None))[3]
+    runtime = int(getattr(candidate, "runtime_bonus_hours", 0) or 0)
+    power = int(getattr(candidate, "profit_bonus_bp", 0) or 0)
+    auto_run = int(getattr(candidate, "auto_restart_charges", 0) or 0)
+    return rarity_rank * 100000 + runtime * 1000 + power * 10 + auto_run * 250
+
+
+def _worker_compare_tags(candidate: object, current_candidate: object | None = None, slots: Sequence[WorkerAssignmentSlotSnapshot] | None = None) -> list[str]:
+    tags: list[str] = []
+    rarity_key = _safe_str(getattr(candidate, "rarity", None), "common").lower()
+    rarity_rank = _worker_rarity_meta(rarity_key)[3]
+    if rarity_rank >= 3:
+        tags.append("Rare Pull")
+    if rarity_key in {"mythic", "mythical"}:
+        tags.append("Mythical Pull")
+    score = _worker_candidate_score(candidate)
+    if current_candidate is not None:
+        current_score = _worker_candidate_score(current_candidate)
+        if score > current_score:
+            tags.append("Upgrade")
+        elif score == current_score:
+            tags.append("Sidegrade")
+        else:
+            tags.append("Weaker than Current")
+    active = [slot for slot in (slots or []) if bool(getattr(slot, "is_active", False))]
+    if active:
+        best_owned = max(active, key=_worker_candidate_score)
+        best_score = _worker_candidate_score(best_owned)
+        if score > best_score:
+            tags.append("New Best")
+        else:
+            best_type = _safe_str(getattr(best_owned, "worker_type", None), "efficient").lower()
+            if _safe_str(getattr(candidate, "worker_type", None), "efficient").lower() == best_type and score > (best_score * 8 // 10):
+                tags.append("Close to Best")
+    flat_bonus = int(getattr(candidate, "flat_profit_bonus", 0) or 0)
+    percent_bp = int(getattr(candidate, "percent_profit_bonus_bp", 0) or 0)
+    if slots and active:
+        if flat_bonus >= max(int(getattr(slot, "flat_profit_bonus", 0) or 0) for slot in active):
+            tags.append("Best Flat")
+        if percent_bp >= max(int(getattr(slot, "percent_profit_bonus_bp", 0) or 0) for slot in active):
+            tags.append("Best Profit")
+    if not tags and rarity_rank >= 2:
+        tags.append("Solid Pull")
+    return tags[:3]
+
+
+def _manager_compare_tags(candidate: object, current_candidate: object | None = None, slots: Sequence[ManagerAssignmentSlotSnapshot] | None = None) -> list[str]:
+    tags: list[str] = []
+    rarity_key = _safe_str(getattr(candidate, "rarity", None), "common").lower()
+    rarity_rank = _manager_rarity_meta(rarity_key)[3]
+    if rarity_rank >= 2:
+        tags.append("Rare Pull")
+    if rarity_key == "mythical":
+        tags.append("Mythical Pull")
+    score = _manager_candidate_score(candidate)
+    if current_candidate is not None:
+        current_score = _manager_candidate_score(current_candidate)
+        if score > current_score:
+            tags.append("Better than Current")
+        elif score == current_score:
+            tags.append("Sidegrade")
+        else:
+            tags.append("Weaker than Current")
+    active = [slot for slot in (slots or []) if bool(getattr(slot, "is_active", False))]
+    if active:
+        best_owned = max(active, key=_manager_candidate_score)
+        best_score = _manager_candidate_score(best_owned)
+        if score > best_score:
+            tags.append("New Best")
+    runtime = int(getattr(candidate, "runtime_bonus_hours", 0) or 0)
+    power = int(getattr(candidate, "profit_bonus_bp", 0) or 0)
+    if active:
+        if runtime >= max(int(getattr(slot, "runtime_bonus_hours", 0) or 0) for slot in active):
+            tags.append("Longest Runtime")
+        if power >= max(int(getattr(slot, "profit_bonus_bp", 0) or 0) for slot in active):
+            tags.append("Best Power")
+    if not tags and rarity_rank >= 1:
+        tags.append("Strong Pull")
+    return tags[:3]
+
+
+def _worker_odds_line() -> str:
+    return "Odds: • Common 58% • ◈ Uncommon 24% • ◆ Rare 12% • ⬢ Epic 5% • ✦ Mythic 1%"
+
+
+def _progress_bar(current: int, total: int, *, width: int = 8) -> str:
+    total = max(int(total), 1)
+    current = min(max(int(current), 0), total)
+    filled = round((current / total) * width)
+    return "█" * filled + "░" * (width - filled)
+
 def _manager_rarity_meta(rarity: object) -> tuple[str, str, discord.Color, int]:
     key = _safe_str(rarity, "common").strip().lower()
     table = {
@@ -1389,18 +1536,40 @@ def _build_worker_candidate_embed(
     user: discord.abc.User,
     detail: BusinessManageSnapshot,
     candidate: WorkerCandidateSnapshot,
+    current_candidate: WorkerCandidateSnapshot | None = None,
+    slots: Sequence[WorkerAssignmentSlotSnapshot] | None = None,
+    stage_label: str = "New Candidate Found",
+    status_line: str | None = None,
 ) -> discord.Embed:
+    tags = _worker_compare_tags(candidate, current_candidate=current_candidate, slots=slots)
+    rarity_badge = _worker_rarity_badge(candidate.rarity)
     e = _base_embed(
-        title="👷 Worker Candidate",
-        description="Review this worker before hiring.",
+        title=f"{stage_label} • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}",
+        description=status_line or "A fresh worker just stepped out of the recruit line.",
+        color=_worker_candidate_color(candidate),
     )
     e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
-    e.add_field(name="Name", value=f"**{_safe_str(candidate.worker_name, 'Worker')}**", inline=False)
-    e.add_field(name="Worker Type", value=f"`{_safe_str(candidate.worker_type, 'efficient')}`", inline=True)
-    e.add_field(name="Rarity", value=f"`{_safe_str(candidate.rarity, 'common')}`", inline=True)
-    e.add_field(name="Flat Profit Bonus", value=f"+{_fmt_int(getattr(candidate, 'flat_profit_bonus', 0))}", inline=True)
-    e.add_field(name="Percent Profit Bonus", value=f"+{_fmt_int(getattr(candidate, 'percent_profit_bonus_bp', 0))} bp", inline=True)
-    e.set_footer(text=f"Reroll Cost: {_fmt_int(getattr(candidate, 'reroll_cost', WORKER_CANDIDATE_REROLL_COST))} Silver")
+    e.add_field(
+        name="Recruit Panel",
+        value=(
+            f"{_worker_odds_line()}\n"
+            f"Reroll Cost: **{_fmt_int(getattr(candidate, 'reroll_cost', WORKER_CANDIDATE_REROLL_COST))} Silver**\n"
+            f"Hire Cost: **{_fmt_int(getattr(candidate, 'reroll_cost', WORKER_CANDIDATE_REROLL_COST))} Silver**"
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="Candidate",
+        value=(
+            f"**{_safe_str(candidate.worker_name, 'Worker')}** {rarity_badge}\n"
+            f"{_worker_summary_line(candidate)}\n"
+            f"Best For: {_worker_role_best_for(getattr(candidate, 'worker_type', None))}"
+        ),
+        inline=False,
+    )
+    if tags:
+        e.add_field(name="Highlights", value=" • ".join(tags), inline=False)
+    e.set_footer(text="Hire Worker locks this recruit in for free after the roll.")
     return e
 
 
@@ -1411,26 +1580,31 @@ def _build_manager_candidate_embed(
     user: discord.abc.User,
     detail: BusinessManageSnapshot,
     candidate: ManagerCandidateSnapshot,
+    current_candidate: ManagerCandidateSnapshot | None = None,
+    slots: Sequence[ManagerAssignmentSlotSnapshot] | None = None,
+    stage_label: str = "New Candidate Found",
+    status_line: str | None = None,
 ) -> discord.Embed:
     odds_line, adjusted_odds_line = _manager_odds_lines()
-    color = _manager_embed_color(detail, [], candidate)
+    color = _manager_embed_color(detail, list(slots or []), candidate)
     rarity_badge = _manager_rarity_badge(candidate.rarity)
     power = int(getattr(candidate, 'profit_bonus_bp', 0) or 0)
     runtime = int(getattr(candidate, 'runtime_bonus_hours', 0) or 0)
     auto_run = int(getattr(candidate, 'auto_restart_charges', 0) or 0)
     best_for = 'Power spikes and long runs' if power >= 300 or runtime >= 10 else ('Balanced automation' if auto_run > 0 else 'Reliable early growth')
+    tags = _manager_compare_tags(candidate, current_candidate=current_candidate, slots=slots)
     e = _base_embed(
-        title=f"Recruit Preview • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}",
-        description="Premium recruitment board for your next manager.",
+        title=f"{stage_label} • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}",
+        description=status_line or "Premium recruitment board for your next manager.",
         color=color,
     )
     e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
     recruit_lines = [odds_line]
     if adjusted_odds_line:
         recruit_lines.append(adjusted_odds_line)
-    recruit_lines.append(f"Mythical Chance: **1%**")
     recruit_lines.append(f"Reroll Cost: **{_fmt_int(getattr(candidate, 'reroll_cost', MANAGER_CANDIDATE_REROLL_COST))} Silver**")
-    e.add_field(name="Recruit Odds", value="\n".join(recruit_lines), inline=False)
+    recruit_lines.append(f"Hire Cost: **{_fmt_int(getattr(candidate, 'reroll_cost', MANAGER_CANDIDATE_REROLL_COST))} Silver**")
+    e.add_field(name="Recruit Panel", value="\n".join(recruit_lines), inline=False)
     e.add_field(
         name="Candidate",
         value=(
@@ -1440,6 +1614,8 @@ def _build_manager_candidate_embed(
         ),
         inline=False,
     )
+    if tags:
+        e.add_field(name="Highlights", value=" • ".join(tags), inline=False)
     e.set_footer(text="Hire Manager assigns this candidate for free after the roll.")
     return e
 
@@ -2713,11 +2889,25 @@ class ConfirmWorkerAutoHireView(discord.ui.View):
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await interaction.response.defer(ephemeral=True)
+        progress = discord.Embed(
+            title="VIP Auto-Hiring Started",
+            description="Rolling until worker slots are filled...",
+            color=discord.Color.gold(),
+        )
+        progress.add_field(name="Progress", value=f"Filled: **0/?**\nRolls: **0/{_fmt_int(self.rerolls)}**\nSpent: **0 Silver**", inline=False)
+        progress.add_field(name="Best Hit", value="None yet", inline=False)
+        await interaction.edit_original_response(embed=progress, view=None)
         hires, rerolls_used, slots_full = 0, 0, False
         last_error = ""
+        best_hit = "None yet"
+        best_score = -1
+        latest_hit = "None yet"
+        filled_total = 0
 
         async with self.parent_view.cog.sessionmaker() as session:
             async with session.begin():
+                slots_before = await get_worker_assignment_slots(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key)
+                open_slots = sum(1 for slot in slots_before if not bool(getattr(slot, "is_active", False)))
                 for _ in range(self.rerolls):
                     roll_result = await roll_worker_candidate(
                         session,
@@ -2731,7 +2921,23 @@ class ConfirmWorkerAutoHireView(discord.ui.View):
                         break
                     rerolls_used += 1
                     c = roll_result.worker_candidate
+                    tags = _worker_compare_tags(c)
+                    hit_line = f"{_safe_str(getattr(c, 'worker_name', None), 'Worker')} {_worker_rarity_badge(getattr(c, 'rarity', None))}"
+                    candidate_score = _worker_candidate_score(c)
+                    if candidate_score > best_score:
+                        best_score = candidate_score
+                        best_hit = hit_line
                     if str(getattr(c, "rarity", "common")).strip().lower() not in self.allowed_rarities:
+                        if rerolls_used == 1 or rerolls_used % 4 == 0 or "Mythical Pull" in tags or "Rare Pull" in tags:
+                            progress = discord.Embed(
+                                title="VIP Auto-Hiring In Progress",
+                                description="Scanning workers and snapping up matching hires...",
+                                color=discord.Color.gold(),
+                            )
+                            progress.add_field(name="Progress", value=f"Filled: **{_fmt_int(hires)}/{_fmt_int(open_slots or max(hires,1))}**\nRolls: **{_fmt_int(rerolls_used)}/{_fmt_int(self.rerolls)}**\nSpent: **{_fmt_int(rerolls_used * WORKER_CANDIDATE_REROLL_COST)} Silver**", inline=False)
+                            progress.add_field(name="Best Hit", value=best_hit, inline=False)
+                            progress.add_field(name="Latest Hit", value=hit_line, inline=False)
+                            await interaction.edit_original_response(embed=progress, view=None)
                         continue
                     hire_result = await hire_worker_manual(
                         session,
@@ -2750,11 +2956,31 @@ class ConfirmWorkerAutoHireView(discord.ui.View):
                         slots_full = "slots are full" in str(hire_result.message).lower()
                         break
                     hires += 1
+                    filled_total = open_slots
+                    latest_hit = hit_line + (" • " + " • ".join(tags[:2]) if tags else "")
+                    progress = discord.Embed(
+                        title="VIP Auto-Hiring In Progress",
+                        description="Rolling live results into your roster...",
+                        color=discord.Color.gold(),
+                    )
+                    progress.add_field(name="Progress", value=f"Filled: **{_fmt_int(hires)}/{_fmt_int(open_slots or hires)}**\nRolls: **{_fmt_int(rerolls_used)}/{_fmt_int(self.rerolls)}**\nSpent: **{_fmt_int(rerolls_used * WORKER_CANDIDATE_REROLL_COST)} Silver**", inline=False)
+                    progress.add_field(name="Best Hit", value=best_hit, inline=False)
+                    progress.add_field(name="Latest Hit", value=latest_hit, inline=False)
+                    await interaction.edit_original_response(embed=progress, view=None)
 
         self.parent_view.current_candidate = None
         suffix = " Worker slots are full." if slots_full else (f" {last_error}" if last_error else "")
         await self.parent_view._show_recruitment_board(interaction, action_message=f"✅ Auto-Hire complete: hired **{_fmt_int(hires)}** workers in **{_fmt_int(rerolls_used)}** rerolls.{suffix}")
-        await interaction.followup.send(f"Auto-Hire finished. Spent **{_fmt_int(rerolls_used * WORKER_CANDIDATE_REROLL_COST)} Silver**.", ephemeral=True)
+        done = discord.Embed(
+            title="VIP Auto-Hiring Complete",
+            description="Your worker rush is finished.",
+            color=SUCCESS_COLOR,
+        )
+        done.add_field(name="Results", value=f"Filled **{_fmt_int(hires)}/{_fmt_int(filled_total or hires)}** slots\nRolls Used: **{_fmt_int(rerolls_used)}**\nSpent: **{_fmt_int(rerolls_used * WORKER_CANDIDATE_REROLL_COST)} Silver**", inline=False)
+        done.add_field(name="Best Pull", value=best_hit, inline=False)
+        if latest_hit != "None yet":
+            done.add_field(name="Final Hit", value=latest_hit, inline=False)
+        await interaction.edit_original_response(embed=done, view=None)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -2779,11 +3005,25 @@ class ConfirmManagerAutoHireView(discord.ui.View):
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await interaction.response.defer(ephemeral=True)
+        progress = discord.Embed(
+            title="VIP Auto-Hiring Started",
+            description="Rolling until manager slots are filled...",
+            color=discord.Color.gold(),
+        )
+        progress.add_field(name="Progress", value=f"Filled: **0/?**\nRolls: **0/{_fmt_int(self.rerolls)}**\nSpent: **0 Silver**", inline=False)
+        progress.add_field(name="Best Hit", value="None yet", inline=False)
+        await interaction.edit_original_response(embed=progress, view=None)
         hires, rerolls_used, slots_full = 0, 0, False
         last_error = ""
+        best_hit = "None yet"
+        best_score = -1
+        latest_hit = "None yet"
+        filled_total = 0
 
         async with self.parent_view.cog.sessionmaker() as session:
             async with session.begin():
+                slots_before = await get_manager_assignment_slots(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key)
+                open_slots = sum(1 for slot in slots_before if not bool(getattr(slot, "is_active", False)))
                 for _ in range(self.rerolls):
                     roll_result = await roll_manager_candidate(
                         session,
@@ -2797,7 +3037,23 @@ class ConfirmManagerAutoHireView(discord.ui.View):
                         break
                     rerolls_used += 1
                     c = roll_result.manager_candidate
+                    tags = _manager_compare_tags(c)
+                    hit_line = f"{_safe_str(getattr(c, 'manager_name', None), 'Manager')} {_manager_rarity_badge(getattr(c, 'rarity', None))}"
+                    candidate_score = _manager_candidate_score(c)
+                    if candidate_score > best_score:
+                        best_score = candidate_score
+                        best_hit = hit_line
                     if str(getattr(c, "rarity", "common")).strip().lower() not in self.allowed_rarities:
+                        if rerolls_used == 1 or rerolls_used % 4 == 0 or "Mythical Pull" in tags or "Rare Pull" in tags:
+                            progress = discord.Embed(
+                                title="VIP Auto-Hiring In Progress",
+                                description="Rolling live manager reveals...",
+                                color=discord.Color.gold(),
+                            )
+                            progress.add_field(name="Progress", value=f"Filled: **{_fmt_int(hires)}/{_fmt_int(open_slots or max(hires,1))}**\nRolls: **{_fmt_int(rerolls_used)}/{_fmt_int(self.rerolls)}**\nSpent: **{_fmt_int(rerolls_used * MANAGER_CANDIDATE_REROLL_COST)} Silver**", inline=False)
+                            progress.add_field(name="Best Hit", value=best_hit, inline=False)
+                            progress.add_field(name="Latest Hit", value=hit_line, inline=False)
+                            await interaction.edit_original_response(embed=progress, view=None)
                         continue
                     hire_result = await hire_manager_manual(
                         session,
@@ -2816,11 +3072,31 @@ class ConfirmManagerAutoHireView(discord.ui.View):
                         slots_full = "slots are full" in str(hire_result.message).lower()
                         break
                     hires += 1
+                    filled_total = open_slots
+                    latest_hit = hit_line + (" • " + " • ".join(tags[:2]) if tags else "")
+                    progress = discord.Embed(
+                        title="VIP Auto-Hiring In Progress",
+                        description="Live recruiting in progress...",
+                        color=discord.Color.gold(),
+                    )
+                    progress.add_field(name="Progress", value=f"Filled: **{_fmt_int(hires)}/{_fmt_int(open_slots or hires)}**\nRolls: **{_fmt_int(rerolls_used)}/{_fmt_int(self.rerolls)}**\nSpent: **{_fmt_int(rerolls_used * MANAGER_CANDIDATE_REROLL_COST)} Silver**", inline=False)
+                    progress.add_field(name="Best Hit", value=best_hit, inline=False)
+                    progress.add_field(name="Latest Hit", value=latest_hit, inline=False)
+                    await interaction.edit_original_response(embed=progress, view=None)
 
         self.parent_view.current_candidate = None
         suffix = " Manager slots are full." if slots_full else (f" {last_error}" if last_error else "")
         await self.parent_view._show_recruitment_board(interaction, action_message=f"✅ Auto-Hire complete: hired **{_fmt_int(hires)}** managers in **{_fmt_int(rerolls_used)}** rerolls.{suffix}")
-        await interaction.followup.send(f"Auto-Hire finished. Spent **{_fmt_int(rerolls_used * MANAGER_CANDIDATE_REROLL_COST)} Silver**.", ephemeral=True)
+        done = discord.Embed(
+            title="VIP Auto-Hiring Complete",
+            description="Your manager session is complete.",
+            color=SUCCESS_COLOR,
+        )
+        done.add_field(name="Results", value=f"Filled **{_fmt_int(hires)}/{_fmt_int(filled_total or hires)}** slots\nRolls Used: **{_fmt_int(rerolls_used)}**\nSpent: **{_fmt_int(rerolls_used * MANAGER_CANDIDATE_REROLL_COST)} Silver**", inline=False)
+        done.add_field(name="Best Pull", value=best_hit, inline=False)
+        if latest_hit != "None yet":
+            done.add_field(name="Final Hit", value=latest_hit, inline=False)
+        await interaction.edit_original_response(embed=done, view=None)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -2851,6 +3127,7 @@ class WorkerAssignmentsView(BusinessBaseView):
                 member = guild.get_member(self.owner_id)
         self.is_vip = is_vip_member(member)
         self.auto_hire_button.disabled = not self.is_vip
+        self.is_processing = False
         self._sync_pagination_buttons(total_slots=0)
 
     def _sync_pagination_buttons(self, *, total_slots: int) -> None:
@@ -2893,11 +3170,11 @@ class WorkerAssignmentsView(BusinessBaseView):
         payload = await self._refresh_assignments_embed(interaction)
         if payload is None:
             return
-        detail, _slots, assignments_embed = payload
+        detail, slots, assignments_embed = payload
         if self.current_candidate is None:
             assignments_embed.add_field(
-                name="Recruitment Board",
-                value=f"Press **Hire Worker** to generate a candidate for **{_fmt_int(WORKER_CANDIDATE_REROLL_COST)} Silver**.",
+                name="Recruit Station",
+                value=f"Press **Hire Worker** to start a reveal for **{_fmt_int(WORKER_CANDIDATE_REROLL_COST)} Silver**.",
                 inline=False,
             )
             if action_message:
@@ -2905,7 +3182,7 @@ class WorkerAssignmentsView(BusinessBaseView):
             await _safe_edit_panel(interaction, embed=assignments_embed, view=self, message_id=self.panel_message_id)
             return
 
-        candidate_embed = _build_worker_candidate_embed(user=interaction.user, detail=detail, candidate=self.current_candidate)
+        candidate_embed = _build_worker_candidate_embed(user=interaction.user, detail=detail, candidate=self.current_candidate, slots=slots)
         if action_message:
             candidate_embed.add_field(name="Action", value=action_message, inline=False)
         await _safe_edit_panel(interaction, embeds=[candidate_embed, assignments_embed], view=self, message_id=self.panel_message_id)
@@ -2916,6 +3193,20 @@ class WorkerAssignmentsView(BusinessBaseView):
         await _safe_defer(interaction)
 
         if self.current_candidate is None:
+            payload = await self._refresh_assignments_embed(interaction)
+            if payload is None:
+                return
+            detail, slots, assignments_embed = payload
+            rolling = _build_worker_candidate_embed(
+                user=interaction.user,
+                detail=detail,
+                candidate=WorkerCandidateSnapshot(worker_name="Searching...", worker_type="efficient", rarity="common", flat_profit_bonus=0, percent_profit_bonus_bp=0, reroll_cost=WORKER_CANDIDATE_REROLL_COST),
+                slots=slots,
+                stage_label="Re-rolling Candidate...",
+                status_line="Searching for a better hire...",
+            )
+            await _safe_edit_panel(interaction, embeds=[rolling, assignments_embed], view=self, message_id=self.panel_message_id)
+            await asyncio.sleep(0.4)
             async with self.cog.sessionmaker() as session:
                 async with session.begin():
                     result = await roll_worker_candidate(
@@ -2929,7 +3220,7 @@ class WorkerAssignmentsView(BusinessBaseView):
                 await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
                 return
             self.current_candidate = result.worker_candidate
-            await self._show_recruitment_board(interaction, action_message="✅ Candidate generated. Hiring is free.")
+            await self._show_recruitment_board(interaction, action_message="✨ New candidate found. Hire now for free.")
             return
 
         candidate = self.current_candidate
@@ -2965,6 +3256,24 @@ class WorkerAssignmentsView(BusinessBaseView):
     async def reroll_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await _safe_defer(interaction)
+        previous_candidate = self.current_candidate
+        payload = await self._refresh_assignments_embed(interaction)
+        if payload is None:
+            return
+        detail, slots, assignments_embed = payload
+        stages = ("Re-rolling candidate...", "Scanning candidates...", "Rare...", "Revealing final candidate...")
+        for idx, line in enumerate(stages):
+            rolling = _build_worker_candidate_embed(
+                user=interaction.user,
+                detail=detail,
+                candidate=WorkerCandidateSnapshot(worker_name="Recruit Scan", worker_type="efficient", rarity=("common" if idx < 2 else "rare"), flat_profit_bonus=0, percent_profit_bonus_bp=0, reroll_cost=WORKER_CANDIDATE_REROLL_COST),
+                slots=slots,
+                current_candidate=previous_candidate,
+                stage_label="Recruit Spin",
+                status_line=line,
+            )
+            await _safe_edit_panel(interaction, embeds=[rolling, assignments_embed], view=self, message_id=self.panel_message_id)
+            await asyncio.sleep(0.18)
         async with self.cog.sessionmaker() as session:
             async with session.begin():
                 result = await roll_worker_candidate(
@@ -2978,7 +3287,7 @@ class WorkerAssignmentsView(BusinessBaseView):
             await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
             return
         self.current_candidate = result.worker_candidate
-        await self._show_recruitment_board(interaction, action_message="✅ Candidate rerolled.")
+        await self._show_recruitment_board(interaction, action_message="✨ Recruit reveal complete.")
 
     @discord.ui.button(label="Auto-Hire (VIP)", style=discord.ButtonStyle.secondary, emoji="⭐", row=1)
     async def auto_hire_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -3041,6 +3350,7 @@ class ManagerAssignmentsView(BusinessBaseView):
                 member = guild.get_member(self.owner_id)
         self.is_vip = is_vip_member(member)
         self.auto_hire_button.disabled = not self.is_vip
+        self.is_processing = False
         self._sync_pagination_buttons(total_slots=0)
 
     def _sync_pagination_buttons(self, *, total_slots: int) -> None:
@@ -3083,11 +3393,11 @@ class ManagerAssignmentsView(BusinessBaseView):
         payload = await self._refresh_assignments_embed(interaction)
         if payload is None:
             return
-        detail, _slots, assignments_embed = payload
+        detail, slots, assignments_embed = payload
         if self.current_candidate is None:
             assignments_embed.add_field(
-                name="Recruitment Board",
-                value=f"Press **Hire Manager** to generate a candidate for **{_fmt_int(MANAGER_CANDIDATE_REROLL_COST)} Silver**.",
+                name="Recruit Station",
+                value=f"Press **Hire Manager** to start a reveal for **{_fmt_int(MANAGER_CANDIDATE_REROLL_COST)} Silver**.",
                 inline=False,
             )
             if action_message:
@@ -3095,7 +3405,7 @@ class ManagerAssignmentsView(BusinessBaseView):
             await _safe_edit_panel(interaction, embed=assignments_embed, view=self, message_id=self.panel_message_id)
             return
 
-        candidate_embed = _build_manager_candidate_embed(user=interaction.user, detail=detail, candidate=self.current_candidate)
+        candidate_embed = _build_manager_candidate_embed(user=interaction.user, detail=detail, candidate=self.current_candidate, slots=slots)
         if action_message:
             candidate_embed.add_field(name="Action", value=action_message, inline=False)
         await _safe_edit_panel(interaction, embeds=[candidate_embed, assignments_embed], view=self, message_id=self.panel_message_id)
@@ -3106,6 +3416,20 @@ class ManagerAssignmentsView(BusinessBaseView):
         await _safe_defer(interaction)
 
         if self.current_candidate is None:
+            payload = await self._refresh_assignments_embed(interaction)
+            if payload is None:
+                return
+            detail, slots, assignments_embed = payload
+            rolling = _build_manager_candidate_embed(
+                user=interaction.user,
+                detail=detail,
+                candidate=ManagerCandidateSnapshot(manager_name="Searching...", rarity="common", runtime_bonus_hours=0, profit_bonus_bp=0, auto_restart_charges=0, reroll_cost=MANAGER_CANDIDATE_REROLL_COST),
+                slots=slots,
+                stage_label="Re-rolling Candidate...",
+                status_line="Searching for a better hire...",
+            )
+            await _safe_edit_panel(interaction, embeds=[rolling, assignments_embed], view=self, message_id=self.panel_message_id)
+            await asyncio.sleep(0.4)
             async with self.cog.sessionmaker() as session:
                 async with session.begin():
                     result = await roll_manager_candidate(
@@ -3119,7 +3443,7 @@ class ManagerAssignmentsView(BusinessBaseView):
                 await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
                 return
             self.current_candidate = result.manager_candidate
-            await self._show_recruitment_board(interaction, action_message="✅ Candidate generated. Hiring is free.")
+            await self._show_recruitment_board(interaction, action_message="✨ New candidate found. Hire now for free.")
             return
 
         candidate = self.current_candidate
@@ -3155,6 +3479,24 @@ class ManagerAssignmentsView(BusinessBaseView):
     async def reroll_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await _safe_defer(interaction)
+        previous_candidate = self.current_candidate
+        payload = await self._refresh_assignments_embed(interaction)
+        if payload is None:
+            return
+        detail, slots, assignments_embed = payload
+        stages = (("common", "Re-rolling candidate..."), ("rare", "Scanning candidates..."), ("epic", "Epic..."), ("mythical", "Revealing final candidate..."))
+        for rarity, line in stages:
+            rolling = _build_manager_candidate_embed(
+                user=interaction.user,
+                detail=detail,
+                candidate=ManagerCandidateSnapshot(manager_name="Recruit Scan", rarity=rarity, runtime_bonus_hours=0, profit_bonus_bp=0, auto_restart_charges=0, reroll_cost=MANAGER_CANDIDATE_REROLL_COST),
+                slots=slots,
+                current_candidate=previous_candidate,
+                stage_label="Recruit Spin",
+                status_line=line,
+            )
+            await _safe_edit_panel(interaction, embeds=[rolling, assignments_embed], view=self, message_id=self.panel_message_id)
+            await asyncio.sleep(0.18)
         async with self.cog.sessionmaker() as session:
             async with session.begin():
                 result = await roll_manager_candidate(
@@ -3168,7 +3510,7 @@ class ManagerAssignmentsView(BusinessBaseView):
             await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
             return
         self.current_candidate = result.manager_candidate
-        await self._show_recruitment_board(interaction, action_message="✅ Candidate rerolled.")
+        await self._show_recruitment_board(interaction, action_message="✨ Recruit reveal complete.")
 
     @discord.ui.button(label="Auto-Hire (VIP)", style=discord.ButtonStyle.secondary, emoji="⭐", row=1)
     async def auto_hire_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
