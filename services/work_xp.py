@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 BASE_XP_MULTIPLIER = 1.75
 WEEKEND_XP_MULTIPLIER = 2.0
 
 
 def utc_now(*, now: datetime | None = None) -> datetime:
-    return now or datetime.utcnow()
+    return now or datetime.now(UTC)
 
 
 def is_weekend(*, now: datetime | None = None) -> bool:
