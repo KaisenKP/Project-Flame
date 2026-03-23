@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from sqlalchemy import select
@@ -13,6 +14,8 @@ MAX_JOB_HUB_SLOTS = 3
 DEFAULT_UNLOCKED_SLOTS = 2
 VIP_UNLOCKED_SLOTS = 3
 JOB_HUB_SWITCH_COOLDOWN_SECONDS = 30
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -350,21 +353,62 @@ def prestige_preview(job_key: str, progress: SlotProgress) -> tuple[int, int, in
     return current_mult, next_mult, cost
 
 
-async def prestige_slot(session, *, guild_id: int, user_id: int, slot_index: int, job_key: str) -> tuple[bool, str]:
+async def prestige_slot(
+    session,
+    *,
+    guild_id: int,
+    user_id: int,
+    slot_index: int,
+    job_key: str,
+    vip: bool,
+) -> tuple[bool, str, SlotSnapshot | None]:
     progress = await get_or_create_progress(session, guild_id=guild_id, user_id=user_id, slot_index=slot_index, job_key=job_key)
     cap = level_cap_for(progress.prestige)
     if progress.level < cap:
-        return False, f"Reach **Lv {cap}** before prestiging this slot."
+        return False, f"Reach **Lv {cap}** before prestiging this slot.", None
     cost = prestige_cost(progress.prestige)
     wallet = await get_wallet(session, guild_id=guild_id, user_id=user_id)
     if int(wallet.silver) < cost:
-        return False, f"Need **{fmt_int(cost)}** Silver to prestige this slot."
+        return False, f"Need **{fmt_int(cost)}** Silver to prestige this slot.", None
+
+    old_prestige = int(progress.prestige)
+    old_level = int(progress.level)
+    log.debug(
+        "Starting job hub prestige: guild_id=%s user_id=%s slot_index=%s job_key=%s old_prestige=%s old_level=%s cost=%s",
+        guild_id,
+        user_id,
+        slot_index,
+        job_key,
+        old_prestige,
+        old_level,
+        cost,
+    )
+
     wallet.silver -= cost
     wallet.silver_spent += cost
     progress.prestige += 1
     progress.level = 1
     progress.xp = 0
-    return True, f"Prestiged **{JOB_DEFS[job_key].name}** to **P{progress.prestige}** for **{fmt_int(cost)}** Silver."
+    progress.total_xp = total_xp_from_state(
+        tier=tier_for_category(JOB_DEFS[job_key].category),
+        prestige=progress.prestige,
+        level=progress.level,
+        xp_into=progress.xp,
+    )
+    await session.flush()
+    log.debug(
+        "Prestige DB flush complete: guild_id=%s user_id=%s slot_index=%s job_key=%s new_prestige=%s level=%s xp=%s total_xp=%s",
+        guild_id,
+        user_id,
+        slot_index,
+        job_key,
+        int(progress.prestige),
+        int(progress.level),
+        int(progress.xp),
+        int(progress.total_xp),
+    )
+    snapshot = await get_slot_snapshot(session, guild_id=guild_id, user_id=user_id, vip=vip, slot_index=slot_index)
+    return True, f"🔥 You prestiged **{JOB_DEFS[job_key].name}**! You're now **Prestige {progress.prestige}**.", snapshot
 
 
 async def set_slot_progress(
