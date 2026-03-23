@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import discord
@@ -18,8 +19,10 @@ from services.job_hub import (
     slot_label,
     tool_defs_for,
 )
-from services.jobs_core import JOB_DEFS, JOB_UNLOCK_LEVEL, fmt_int, get_level
+from services.jobs_core import JOB_DEFS, JOB_SWITCH_COST, JOB_UNLOCK_LEVEL, fmt_int, get_level
 from services.jobs_embeds import make_job_hub_embed
+
+log = logging.getLogger(__name__)
 
 
 class JobPicker(Select):
@@ -66,7 +69,7 @@ async def open_job_hub(*, interaction: discord.Interaction, sessionmaker, guild_
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True if interaction.guild is not None else False, content=notice)
 
 class JobHubView(discord.ui.View):
-    def __init__(self, *, sessionmaker, guild_id: int, user_id: int, vip: bool, selected_slot: int = 0, section: str = "overview", timeout: float = 180.0):
+    def __init__(self, *, sessionmaker, guild_id: int, user_id: int, vip: bool, selected_slot: int = 0, section: str = "overview", timeout: float = 900.0):
         super().__init__(timeout=timeout)
         self.sessionmaker = sessionmaker
         self.guild_id = guild_id
@@ -134,6 +137,19 @@ class JobHubView(discord.ui.View):
         else:
             await interaction.response.edit_message(embed=embed, view=self, content=notice)
 
+    async def _update_after_deferred_interaction(
+        self,
+        interaction: discord.Interaction,
+        *,
+        slot_snap,
+        notice: Optional[str] = None,
+    ) -> None:
+        self.clear_items()
+        self._build_static_buttons()
+        self._dynamic_refresh(slot_snap)
+        embed = make_job_hub_embed(user=interaction.user, vip=self.vip, slot_snap=slot_snap, section=self.section)
+        await interaction.edit_original_response(embed=embed, view=self, content=notice)
+
     async def handle_job_assignment(self, interaction: discord.Interaction, slot_index: int, job_key: str) -> None:
         async with self.sessionmaker() as session:
             async with session.begin():
@@ -190,14 +206,81 @@ class JobHubView(discord.ui.View):
 
     @discord.ui.button(label="Prestige Slot", style=discord.ButtonStyle.danger, row=3)
     async def prestige_btn(self, interaction: discord.Interaction, _: discord.ui.Button):
-        async with self.sessionmaker() as session:
-            async with session.begin():
-                snap = await get_slot_snapshot(session, guild_id=self.guild_id, user_id=self.user_id, vip=self.vip, slot_index=self.selected_slot)
+        log.debug(
+            "Prestige button clicked: guild_id=%s user_id=%s actor_id=%s slot_index=%s message_id=%s",
+            self.guild_id,
+            self.user_id,
+            interaction.user.id,
+            self.selected_slot,
+            getattr(interaction.message, "id", None),
+        )
+        await interaction.response.defer()
+        try:
+            async with self.sessionmaker() as session:
+                snap = await get_slot_snapshot(
+                    session,
+                    guild_id=self.guild_id,
+                    user_id=self.user_id,
+                    vip=self.vip,
+                    slot_index=self.selected_slot,
+                )
                 if not snap.job_key:
-                    await interaction.response.send_message("Assign a job first.", ephemeral=True)
+                    await interaction.followup.send("Assign a job first.", ephemeral=True)
                     return
-                ok, message = await prestige_slot(session, guild_id=self.guild_id, user_id=self.user_id, slot_index=self.selected_slot, job_key=snap.job_key)
-        if not ok:
-            await interaction.response.send_message(message, ephemeral=True)
-            return
-        await self.refresh(interaction, notice=f"✅ {message}")
+
+                ok, message, updated_snap = await prestige_slot(
+                    session,
+                    guild_id=self.guild_id,
+                    user_id=self.user_id,
+                    slot_index=self.selected_slot,
+                    job_key=snap.job_key,
+                    vip=self.vip,
+                )
+                if not ok:
+                    await session.rollback()
+                    await interaction.followup.send(message, ephemeral=True)
+                    return
+
+                log.debug(
+                    "Prestige commit starting: guild_id=%s user_id=%s slot_index=%s job_key=%s",
+                    self.guild_id,
+                    self.user_id,
+                    self.selected_slot,
+                    snap.job_key,
+                )
+                await session.commit()
+                log.debug(
+                    "Prestige DB commit complete: guild_id=%s user_id=%s slot_index=%s job_key=%s",
+                    self.guild_id,
+                    self.user_id,
+                    self.selected_slot,
+                    snap.job_key,
+                )
+
+                refreshed_snap = updated_snap
+                if refreshed_snap is None:
+                    refreshed_snap = await get_slot_snapshot(
+                        session,
+                        guild_id=self.guild_id,
+                        user_id=self.user_id,
+                        vip=self.vip,
+                        slot_index=self.selected_slot,
+                    )
+
+            await self._update_after_deferred_interaction(
+                interaction,
+                slot_snap=refreshed_snap,
+                notice=f"✅ {message}",
+            )
+        except Exception:
+            log.exception(
+                "Prestige button failed: guild_id=%s user_id=%s actor_id=%s slot_index=%s",
+                self.guild_id,
+                self.user_id,
+                interaction.user.id,
+                self.selected_slot,
+            )
+            await interaction.followup.send(
+                "Something went wrong while applying prestige. Please try again.",
+                ephemeral=True,
+            )
