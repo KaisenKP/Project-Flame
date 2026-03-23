@@ -11,13 +11,15 @@ from discord.ext import commands
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import ActiveEffectRow, ItemInventoryRow, StaminaRow
+from db.models import ActiveEffectRow, ItemInventoryRow, StaminaRow, UserJobHubSlotRow, WalletRow
 from services.db import sessions
 from services.stamina import StaminaService
 from services.users import ensure_user_rows
 
 from services.items_catalog import EffectStacking, ITEMS, ItemDef
+from services.job_hub import award_slot_job_xp
 from services.jobs_core import clamp_int, fmt_int
+from services.xp_award import award_xp
 
 
 UTC = timezone.utc
@@ -93,6 +95,10 @@ def _effect_summary(it: ItemDef) -> str:
         lines.append(f"⚡ +{fmt_int(_payload_int(p, 'stamina_add'))} stamina (instant)")
     if "silver_add" in p:
         lines.append(f"💰 +{fmt_int(_payload_int(p, 'silver_add'))} silver (instant)")
+    if "job_xp_add" in p:
+        lines.append(f"🧰 +{fmt_int(_payload_int(p, 'job_xp_add'))} job XP (instant)")
+    if "user_xp_add" in p:
+        lines.append(f"🧠 +{fmt_int(_payload_int(p, 'user_xp_add'))} user XP (instant)")
 
     if "payout_bonus_bp" in p:
         lines.append(f"💸 +{_payload_int(p, 'payout_bonus_bp')/100:.2f}% payout")
@@ -238,10 +244,16 @@ async def _apply_item_use(
 
     stamina_add = _payload_int(payload, "stamina_add", 0)
     silver_add = _payload_int(payload, "silver_add", 0)
+    job_xp_add = _payload_int(payload, "job_xp_add", 0)
+    user_xp_add = _payload_int(payload, "user_xp_add", 0)
 
-    is_instant = (duration_seconds is None) and (charges is None) and (stamina_add != 0 or silver_add != 0)
+    is_instant = (duration_seconds is None) and (charges is None) and any(
+        value != 0 for value in (stamina_add, silver_add, job_xp_add, user_xp_add)
+    )
 
     if is_instant:
+        detail_parts: list[str] = []
+
         if stamina_add != 0:
             srow = await _get_or_create_stamina_row(session, guild_id=guild_id, user_id=user_id)
 
@@ -251,15 +263,75 @@ async def _apply_item_use(
 
             srow.current_stamina = int(new_cur)
             srow.last_regen_at = now
+            detail_parts.append(f"⚡ +{fmt_int(int(stamina_add))} stamina")
 
         if silver_add != 0:
-            # Intentionally not supporting silver_add right now unless you add it to your economy rules.
-            # If you do want it, wire WalletRow here.
-            pass
+            wrow = await session.scalar(
+                select(WalletRow).where(
+                    WalletRow.guild_id == guild_id,
+                    WalletRow.user_id == user_id,
+                )
+            )
+            if wrow is None:
+                wrow = WalletRow(guild_id=guild_id, user_id=user_id, silver=0, diamonds=0, silver_earned=0, silver_spent=0)
+                session.add(wrow)
+                await session.flush()
+            wrow.silver = max(int(getattr(wrow, "silver", 0) or 0) + int(silver_add), 0)
+            wrow.silver_earned = max(int(getattr(wrow, "silver_earned", 0) or 0) + int(silver_add), 0)
+            detail_parts.append(f"💰 +{fmt_int(int(silver_add))} silver")
+
+        if user_xp_add != 0:
+            await award_xp(
+                session,
+                guild_id=guild_id,
+                user_id=user_id,
+                amount=int(user_xp_add),
+                apply_weekend_multiplier=False,
+            )
+            detail_parts.append(f"🧠 +{fmt_int(int(user_xp_add))} user XP")
+
+        if job_xp_add != 0:
+            active_slot = await session.scalar(
+                select(UserJobHubSlotRow)
+                .where(
+                    UserJobHubSlotRow.guild_id == guild_id,
+                    UserJobHubSlotRow.user_id == user_id,
+                    UserJobHubSlotRow.is_active.is_(True),
+                    UserJobHubSlotRow.job_key.is_not(None),
+                )
+                .order_by(UserJobHubSlotRow.slot_index.asc())
+            )
+            if active_slot is None or not getattr(active_slot, "job_key", None):
+                fallback_slot = await session.scalar(
+                    select(UserJobHubSlotRow)
+                    .where(
+                        UserJobHubSlotRow.guild_id == guild_id,
+                        UserJobHubSlotRow.user_id == user_id,
+                        UserJobHubSlotRow.job_key.is_not(None),
+                    )
+                    .order_by(UserJobHubSlotRow.is_active.desc(), UserJobHubSlotRow.slot_index.asc())
+                )
+                active_slot = fallback_slot
+            if active_slot is None or not getattr(active_slot, "job_key", None):
+                return _ApplyResult(
+                    ok=False,
+                    title="❌ No job selected",
+                    detail="Equip a job in /job before using this instant job XP item.",
+                )
+            await award_slot_job_xp(
+                session,
+                guild_id=guild_id,
+                user_id=user_id,
+                slot_index=int(active_slot.slot_index),
+                job_key=str(active_slot.job_key),
+                amount=int(job_xp_add),
+            )
+            detail_parts.append(f"🧰 +{fmt_int(int(job_xp_add))} job XP")
 
         _ = stamina_service  # keep param stable if you want to route through service later
 
-        return _ApplyResult(ok=True, title=f"✅ Used {item.name}", detail="Instant effect applied.")
+        detail = "Instant effect applied." if not detail_parts else "Applied: " + " • ".join(detail_parts) + "."
+        return _ApplyResult(ok=True, title=f"✅ Used {item.name}", detail=detail)
 
     if duration_seconds is None and charges is None:
         return _ApplyResult(
