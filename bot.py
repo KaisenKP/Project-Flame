@@ -172,6 +172,12 @@ class PulseBot(commands.Bot):
         log.info("Guilds: %d", len(self.guilds))
 
     async def close(self) -> None:
+        backup_cog = self.get_cog("EconomyBackupsCog")
+        if backup_cog is not None and hasattr(backup_cog, "run_pre_restart_backup"):
+            try:
+                await backup_cog.run_pre_restart_backup(reason="shutdown")
+            except Exception:
+                log.exception("Pre-shutdown economy backup failed")
         await self.stop_background_tasks()
         await super().close()
 
