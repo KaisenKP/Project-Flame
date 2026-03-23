@@ -743,6 +743,89 @@ def _format_manager_summary(raw: object) -> Optional[str]:
     return None
 
 
+def _manager_rarity_meta(rarity: object) -> tuple[str, str, discord.Color, int]:
+    key = _safe_str(rarity, "common").strip().lower()
+    table = {
+        "common": ("•", "Common", discord.Color.from_rgb(120, 130, 144), 0),
+        "rare": ("◆", "Rare", discord.Color.from_rgb(78, 141, 255), 1),
+        "epic": ("⬢", "Epic", discord.Color.from_rgb(163, 92, 255), 2),
+        "legendary": ("✹", "Legendary", discord.Color.from_rgb(255, 170, 64), 3),
+        "mythical": ("✦", "Mythical", discord.Color.from_rgb(255, 84, 164), 4),
+    }
+    return table.get(key, table["common"])
+
+
+def _manager_rarity_badge(rarity: object) -> str:
+    marker, label, _color, _rank = _manager_rarity_meta(rarity)
+    return f"{marker} {label}"
+
+
+def _manager_embed_color(detail: BusinessManageSnapshot, slots: Sequence[ManagerAssignmentSlotSnapshot], candidate: Optional[ManagerCandidateSnapshot] = None) -> discord.Color:
+    if candidate is not None:
+        return _manager_rarity_meta(getattr(candidate, "rarity", None))[2]
+    active_rarities = [getattr(slot, "rarity", None) for slot in slots if bool(getattr(slot, "is_active", False))]
+    if active_rarities:
+        top = max(active_rarities, key=lambda value: _manager_rarity_meta(value)[3])
+        top_color = _manager_rarity_meta(top)[2]
+        if _manager_rarity_meta(top)[3] >= 2:
+            return top_color
+    return _hub_color_for_business_key(getattr(detail, "key", None))
+
+
+def _manager_odds_lines() -> tuple[str, Optional[str]]:
+    odds = (("common", 0.60), ("rare", 0.25), ("epic", 0.10), ("legendary", 0.04), ("mythical", 0.01))
+    base = " • ".join(f"{_manager_rarity_badge(name)} {int(chance * 100)}%" for name, chance in odds)
+    return f"Base Odds: {base}", None
+
+
+def _roman_auto_run(level: int) -> str:
+    numerals = {0: "0", 1: "I", 2: "II", 3: "III", 4: "IV", 5: "V"}
+    value = max(int(level or 0), 0)
+    return numerals.get(value, str(value))
+
+
+def _format_manager_special_effects(slot: ManagerAssignmentSlotSnapshot) -> list[str]:
+    effects: list[str] = []
+    power_bp = int(getattr(slot, "profit_bonus_bp", 0) or 0)
+    if power_bp > 0:
+        effects.append(f"Productivity +{_format_short_percent_from_bp(power_bp)}")
+    return effects
+
+
+def _manager_highlight_map(slots: Sequence[ManagerAssignmentSlotSnapshot]) -> dict[int, str]:
+    active = [slot for slot in slots if bool(getattr(slot, "is_active", False))]
+    if not active:
+        return {}
+    highlights: dict[int, str] = {}
+    highest_rarity = max(active, key=lambda slot: _manager_rarity_meta(getattr(slot, "rarity", None))[3])
+    highest_power = max(active, key=lambda slot: int(getattr(slot, "profit_bonus_bp", 0) or 0))
+    longest_runtime = max(active, key=lambda slot: int(getattr(slot, "runtime_bonus_hours", 0) or 0))
+    best_auto = max(active, key=lambda slot: int(getattr(slot, "auto_restart_charges", 0) or 0))
+    highlights[int(getattr(highest_rarity, "slot_index", 0) or 0)] = "Highest Rarity"
+    if int(getattr(highest_power, "slot_index", 0) or 0) not in highlights:
+        highlights[int(getattr(highest_power, "slot_index", 0) or 0)] = "Best Power"
+    if int(getattr(longest_runtime, "slot_index", 0) or 0) not in highlights:
+        highlights[int(getattr(longest_runtime, "slot_index", 0) or 0)] = "Longest Runtime"
+    if int(getattr(best_auto, "slot_index", 0) or 0) not in highlights and int(getattr(best_auto, "auto_restart_charges", 0) or 0) > 0:
+        highlights[int(getattr(best_auto, "slot_index", 0) or 0)] = "Best Auto Run"
+    return highlights
+
+
+def _build_manager_summary_lines(slots: Sequence[ManagerAssignmentSlotSnapshot]) -> tuple[str, Optional[str], str]:
+    active = [slot for slot in slots if bool(getattr(slot, "is_active", False))]
+    runtime_total = sum(int(getattr(slot, "runtime_bonus_hours", 0) or 0) for slot in active)
+    power_total = sum(int(getattr(slot, "profit_bonus_bp", 0) or 0) for slot in active)
+    auto_total = sum(int(getattr(slot, "auto_restart_charges", 0) or 0) for slot in active)
+    highest = max((_manager_rarity_meta(getattr(slot, "rarity", None)) for slot in active), default=("•", "Common", EMBED_COLOR, 0), key=lambda item: item[3])
+    summary = f"{_fmt_int(len(active))} Active • Runtime +{_fmt_int(runtime_total)}h • Power +{_fmt_int(power_total)} • Best {highest[1]}"
+    special = []
+    if auto_total > 0:
+        special.append(f"Auto Run {_roman_auto_run(auto_total) if auto_total <= 5 else auto_total}")
+    if power_total > 0:
+        special.append(f"Productivity +{_format_short_percent_from_bp(power_total)}")
+    return summary, (" • ".join(special[:2]) if special else None), f"{_fmt_int(len(active))}/{_fmt_int(len(slots))} Slots Filled"
+
+
 def _format_spotlight_line(label: str, value: Optional[str]) -> Optional[str]:
     if not value:
         return None
@@ -1193,44 +1276,69 @@ def _build_manager_assignments_embed(
     slots: Sequence[ManagerAssignmentSlotSnapshot],
     page: int = 0,
 ) -> discord.Embed:
-    title = f"🧑‍💼 Manager Panel • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}"
-    description = (
-        f"Slots in use: `{_slot_text(getattr(detail, 'manager_slots_used', 0), getattr(detail, 'manager_slots_total', 0))}`\n"
-        "Use **Hire Manager** to generate a candidate, **Reroll Manager** to refresh for 1,000 Silver, or **Remove Manager** to deactivate an assigned manager."
-    )
-    e = _base_embed(title=title, description=description)
-    e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
-
     all_slots = list(slots or ())
     total_pages = max(1, (len(all_slots) + _ASSIGNMENTS_PAGE_SIZE - 1) // _ASSIGNMENTS_PAGE_SIZE)
     current_page = min(max(int(page), 0), total_pages - 1)
     start = current_page * _ASSIGNMENTS_PAGE_SIZE
     visible_slots = all_slots[start:start + _ASSIGNMENTS_PAGE_SIZE]
+    summary_line, special_line, slot_fill = _build_manager_summary_lines(all_slots)
+    odds_line, adjusted_odds_line = _manager_odds_lines()
+    color = _manager_embed_color(detail, all_slots)
+    title = f"Manager Roster • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}"
+    description = f"{slot_fill}\nHire, reroll, and manage staff for this business."
+    e = _base_embed(title=title, description=description, color=color)
+    e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
+
+    roster_summary = [summary_line]
+    if special_line:
+        roster_summary.append(special_line)
+    e.add_field(name="Roster Summary", value="\n".join(roster_summary), inline=False)
+
+    recruit_lines = [odds_line, f"Hire Cost: { _fmt_int(MANAGER_CANDIDATE_REROLL_COST) } Silver • Reroll Cost: { _fmt_int(MANAGER_CANDIDATE_REROLL_COST) } Silver"]
+    if adjusted_odds_line:
+        recruit_lines.insert(1, adjusted_odds_line)
+    e.add_field(name="Recruit / Odds Panel", value="\n".join(recruit_lines), inline=False)
 
     if total_pages > 1:
-        e.add_field(name="Page", value=f"Page **{_fmt_int(current_page + 1)}** of **{_fmt_int(total_pages)}**", inline=False)
+        e.add_field(name="Manager Roster", value=f"Page **{_fmt_int(current_page + 1)}** of **{_fmt_int(total_pages)}**", inline=False)
 
+    highlights = _manager_highlight_map(all_slots)
     lines: list[str] = []
     for slot in visible_slots:
-        slot_index = _fmt_int(getattr(slot, 'slot_index', 0))
+        slot_index = int(getattr(slot, 'slot_index', 0) or 0)
         is_active = bool(getattr(slot, 'is_active', False))
         if is_active:
-            lines.append(
-                f"`#{slot_index}` **{_safe_str(getattr(slot, 'manager_name', None), 'Manager')}** ({_safe_str(getattr(slot, 'rarity', None), 'common')})\n"
-                f"└ Rarity `{_safe_str(getattr(slot, 'rarity', None), 'common')}` • +{_fmt_int(getattr(slot, 'runtime_bonus_hours', 0))}h runtime • +{_fmt_int(getattr(slot, 'profit_bonus_bp', 0))} bp • auto `{_fmt_int(getattr(slot, 'auto_restart_charges', 0))}` • Status `Active`"
+            tag = highlights.get(slot_index)
+            line_one = f"**#{_fmt_int(slot_index)} {_safe_str(getattr(slot, 'manager_name', None), 'Manager')}** {_manager_rarity_badge(getattr(slot, 'rarity', None))}"
+            if tag:
+                line_one += f" • {tag}"
+            line_two = (
+                f"+{_fmt_int(getattr(slot, 'runtime_bonus_hours', 0))}h Runtime • "
+                f"+{_fmt_int(getattr(slot, 'profit_bonus_bp', 0))} Power • "
+                f"Auto Run {_roman_auto_run(getattr(slot, 'auto_restart_charges', 0))}"
             )
+            special_effects = _format_manager_special_effects(slot)
+            status_line = "🟢 Active"
+            if special_effects:
+                status_line += f" • {special_effects[0]}"
+            lines.append(f"{line_one}\n{line_two}\n{status_line}")
         else:
-            lines.append(f"`#{slot_index}` *(empty)*")
+            lines.append(
+                f"**#{_fmt_int(slot_index)} Empty Slot**\n"
+                "No manager assigned\n"
+                "➕ Hire a manager to unlock new bonuses"
+            )
 
-    empty_text = "No managers assigned yet." if getattr(detail, 'manager_slots_total', 0) else "No manager slots unlocked."
+    empty_text = "No manager slots unlocked." if not getattr(detail, 'manager_slots_total', 0) else "No managers assigned yet."
     if not lines:
-        e.add_field(name="Slots", value=empty_text, inline=False)
-        return e
+        e.add_field(name="Manager Roster", value=empty_text, inline=False)
+    else:
+        chunks = _chunk_field_lines(lines)
+        for idx, chunk in enumerate(chunks, start=1):
+            field_name = "Manager Roster" if len(chunks) == 1 else f"Manager Roster ({idx}/{len(chunks)})"
+            e.add_field(name=field_name, value=chunk, inline=False)
 
-    chunks = _chunk_field_lines(lines)
-    for idx, chunk in enumerate(chunks, start=1):
-        field_name = "Slots" if len(chunks) == 1 else f"Slots ({idx}/{len(chunks)})"
-        e.add_field(name=field_name, value=chunk, inline=False)
+    e.set_footer(text="Hire to recruit new staff • Reroll to refresh the offer • Remove to free a slot")
     return e
 
 
@@ -1304,18 +1412,37 @@ def _build_manager_candidate_embed(
     detail: BusinessManageSnapshot,
     candidate: ManagerCandidateSnapshot,
 ) -> discord.Embed:
+    odds_line, adjusted_odds_line = _manager_odds_lines()
+    color = _manager_embed_color(detail, [], candidate)
+    rarity_badge = _manager_rarity_badge(candidate.rarity)
+    power = int(getattr(candidate, 'profit_bonus_bp', 0) or 0)
+    runtime = int(getattr(candidate, 'runtime_bonus_hours', 0) or 0)
+    auto_run = int(getattr(candidate, 'auto_restart_charges', 0) or 0)
+    best_for = 'Power spikes and long runs' if power >= 300 or runtime >= 10 else ('Balanced automation' if auto_run > 0 else 'Reliable early growth')
     e = _base_embed(
-        title="🧑‍💼 Manager Candidate",
-        description="Review this manager before hiring.",
+        title=f"Recruit Preview • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}",
+        description="Premium recruitment board for your next manager.",
+        color=color,
     )
     e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
-    e.add_field(name="Name", value=f"**{_safe_str(candidate.manager_name, 'Manager')}**", inline=False)
-    e.add_field(name="Rarity", value=f"`{_safe_str(candidate.rarity, 'common')}`", inline=True)
-    e.add_field(name="Runtime Bonus", value=f"+{_fmt_int(getattr(candidate, 'runtime_bonus_hours', 0))}h", inline=True)
-    e.add_field(name="Profit Bonus", value=f"+{_fmt_int(getattr(candidate, 'profit_bonus_bp', 0))} bp", inline=True)
-    e.add_field(name="Auto Restarts", value=f"{_fmt_int(getattr(candidate, 'auto_restart_charges', 0))}", inline=True)
-    e.set_footer(text=f"Reroll Cost: {_fmt_int(getattr(candidate, 'reroll_cost', MANAGER_CANDIDATE_REROLL_COST))} Silver")
+    recruit_lines = [odds_line]
+    if adjusted_odds_line:
+        recruit_lines.append(adjusted_odds_line)
+    recruit_lines.append(f"Mythical Chance: **1%**")
+    recruit_lines.append(f"Reroll Cost: **{_fmt_int(getattr(candidate, 'reroll_cost', MANAGER_CANDIDATE_REROLL_COST))} Silver**")
+    e.add_field(name="Recruit Odds", value="\n".join(recruit_lines), inline=False)
+    e.add_field(
+        name="Candidate",
+        value=(
+            f"**{_safe_str(candidate.manager_name, 'Manager')}** {rarity_badge}\n"
+            f"+{_fmt_int(runtime)}h Runtime • +{_fmt_int(power)} Power • Auto Run {_roman_auto_run(auto_run)}\n"
+            f"Best For: {best_for}"
+        ),
+        inline=False,
+    )
+    e.set_footer(text="Hire Manager assigns this candidate for free after the roll.")
     return e
+
 
 def _build_manager_hire_result_embed(
     *,
@@ -1325,29 +1452,27 @@ def _build_manager_hire_result_embed(
 ) -> discord.Embed:
     e = _base_embed(
         title=f"✅ Manager Hired • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}",
-        description="Your new manager has been assigned automatically.",
-        color=SUCCESS_COLOR,
+        description="Your roster just gained a new collectible manager.",
+        color=_manager_embed_color(detail, [], hired),
     )
     e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
     e.add_field(
-        name="Manager",
-        value=f"**{_safe_str(hired.manager_name, 'Manager')}**\nRarity `{_safe_str(hired.rarity, 'common')}`",
-        inline=False,
-    )
-    e.add_field(
-        name="Bonuses",
+        name="New Manager",
         value=(
-            f"+{_fmt_int(hired.runtime_bonus_hours)}h runtime • +{_fmt_int(hired.profit_bonus_bp)} bp • "
-            f"auto `{_fmt_int(hired.auto_restart_charges)}`"
+            f"**{_safe_str(hired.manager_name, 'Manager')}** {_manager_rarity_badge(hired.rarity)}\n"
+            f"+{_fmt_int(hired.runtime_bonus_hours)}h Runtime • +{_fmt_int(hired.profit_bonus_bp)} Power • Auto Run {_roman_auto_run(hired.auto_restart_charges)}"
         ),
         inline=False,
     )
     e.add_field(
         name="Assignment",
-        value=f"Slot `#{_fmt_int(hired.slot_index)}` • Cost `{_fmt_int(hired.hire_cost)} Silver`",
+        value=f"Slot **#{_fmt_int(hired.slot_index)}** • Cost **{_fmt_int(hired.hire_cost)} Silver**",
         inline=False,
     )
+    e.set_footer(text="Open the roster to compare rarities, bonuses, and active staff at a glance.")
     return e
+
+
 
 
 # =========================================================
