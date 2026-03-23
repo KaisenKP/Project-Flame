@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import discord
 from discord.ext import commands
@@ -239,6 +239,8 @@ def build_context_from_interaction(interaction: discord.Interaction) -> dict[str
         "extras": {
             "interaction_id": interaction.id,
             "command_failed": getattr(interaction, "command_failed", None),
+            "message_id": getattr(interaction.message, "id", None),
+            "custom_id": getattr(getattr(interaction, "data", None), "get", lambda _key, _default=None: None)("custom_id"),
         },
     }
 
@@ -263,3 +265,33 @@ def build_context_from_command(ctx: commands.Context[Any]) -> dict[str, Any]:
             "invoked_with": ctx.invoked_with,
         },
     }
+
+
+def merge_logging_context(
+    base: Mapping[str, Any] | None = None,
+    *,
+    extras: Mapping[str, Any] | None = None,
+    **extra_fields: Any,
+) -> dict[str, Any]:
+    context = dict(base or {})
+    merged_extras: dict[str, Any] = {}
+
+    existing_extras = context.get("extras")
+    if isinstance(existing_extras, Mapping):
+        merged_extras.update(existing_extras)
+    elif existing_extras is not None:
+        merged_extras["context_extras"] = existing_extras
+
+    if extras:
+        merged_extras.update(dict(extras))
+
+    for key, value in extra_fields.items():
+        if value is not None:
+            merged_extras[key] = value
+
+    if merged_extras:
+        context["extras"] = merged_extras
+    else:
+        context.pop("extras", None)
+
+    return context
