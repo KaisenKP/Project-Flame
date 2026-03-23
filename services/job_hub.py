@@ -391,6 +391,7 @@ async def prestige_slot(
     progress.xp = 0
     progress.total_xp = total_xp_from_state(
         tier=tier_for_category(JOB_DEFS[job_key].category),
+        job_key=job_key,
         prestige=progress.prestige,
         level=progress.level,
         xp_into=progress.xp,
@@ -436,6 +437,7 @@ async def set_slot_progress(
     progress.xp = max(min(int(xp), need), 0)
     progress.total_xp = total_xp_from_state(
         tier=tier_for_category(JOB_DEFS[job_key].category),
+        job_key=job_key,
         prestige=progress.prestige,
         level=progress.level,
         xp_into=progress.xp,
