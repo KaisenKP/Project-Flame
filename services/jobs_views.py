@@ -90,6 +90,18 @@ class JobHubView(discord.ui.View):
             btn.callback = self._make_section_callback(section)
             self.add_item(btn)
 
+        work_btn = Button(label="Work", style=discord.ButtonStyle.success, emoji="💼", row=3)
+        work_btn.callback = self.work_now
+        self.add_item(work_btn)
+
+        upgrade_btn = Button(label="Upgrade Selected Tool", style=discord.ButtonStyle.primary, row=3)
+        upgrade_btn.callback = self.upgrade_tool
+        self.add_item(upgrade_btn)
+
+        prestige_btn = Button(label="Prestige Slot", style=discord.ButtonStyle.danger, row=3)
+        prestige_btn.callback = self.prestige_btn
+        self.add_item(prestige_btn)
+
     def _dynamic_refresh(self, slot_snap) -> None:
         for item in list(self.children):
             if isinstance(item, Select):
@@ -176,8 +188,7 @@ class JobHubView(discord.ui.View):
         self.section = "overview"
         await self.refresh(interaction, notice=f"✅ {slot_label(slot_index)} set to **{JOB_DEFS[job_key].name}**.")
 
-    @discord.ui.button(label="Work", style=discord.ButtonStyle.success, emoji="💼", row=3)
-    async def work_now(self, interaction: discord.Interaction, _: discord.ui.Button):
+    async def work_now(self, interaction: discord.Interaction):
         if interaction.guild is None or interaction.guild.id != self.guild_id:
             await interaction.response.send_message("This button only works in the original server.", ephemeral=True)
             return
@@ -190,8 +201,7 @@ class JobHubView(discord.ui.View):
 
         await cmd.callback(cog, interaction)
 
-    @discord.ui.button(label="Upgrade Selected Tool", style=discord.ButtonStyle.primary, row=3)
-    async def upgrade_tool(self, interaction: discord.Interaction, _: discord.ui.Button):
+    async def upgrade_tool(self, interaction: discord.Interaction):
         async with self.sessionmaker() as session:
             async with session.begin():
                 snap = await get_slot_snapshot(session, guild_id=self.guild_id, user_id=self.user_id, vip=self.vip, slot_index=self.selected_slot)
@@ -204,8 +214,7 @@ class JobHubView(discord.ui.View):
             return
         await self.refresh(interaction, notice=f"✅ {message}")
 
-    @discord.ui.button(label="Prestige Slot", style=discord.ButtonStyle.danger, row=3)
-    async def prestige_btn(self, interaction: discord.Interaction, _: discord.ui.Button):
+    async def prestige_btn(self, interaction: discord.Interaction):
         log.debug(
             "Prestige button clicked: guild_id=%s user_id=%s actor_id=%s slot_index=%s message_id=%s",
             self.guild_id,
