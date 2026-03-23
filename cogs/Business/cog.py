@@ -3012,8 +3012,23 @@ class BusinessCog(commands.Cog):
 
     async def _run_one_time_upgrade_refund(self) -> None:
         state = self._load_runtime_state()
+        refund_migration_action = "business_upgrade_refund_migration_v1"
+
         if bool(state.get("refund_migration_ran", False)):
             return
+
+        async with self.sessionmaker() as session:
+            existing_marker = await session.scalar(
+                select(AdminAuditLogRow).where(
+                    AdminAuditLogRow.action == refund_migration_action,
+                    AdminAuditLogRow.table_name == "business_ownership",
+                )
+            )
+            if existing_marker is not None:
+                state["refund_migration_ran"] = True
+                self._save_runtime_state(state)
+                log.info("Business refund migration already marked in database; skipping rerun.")
+                return
 
         refunded_total = 0
         refunded_rows = 0
@@ -3061,6 +3076,25 @@ class BusinessCog(commands.Cog):
                     row.total_spent = max(int(row.total_spent or 0) - refund, 0)
                     refunded_total += refund
                     refunded_rows += 1
+
+                session.add(
+                    AdminAuditLogRow(
+                        guild_id=0,
+                        actor_user_id=0,
+                        target_user_id=None,
+                        action=refund_migration_action,
+                        table_name="business_ownership",
+                        pk_json=json.dumps({"migration": refund_migration_action}),
+                        before_json=None,
+                        after_json=json.dumps(
+                            {
+                                "refunded_rows": refunded_rows,
+                                "refunded_total": refunded_total,
+                            }
+                        ),
+                        reason="One-time business upgrade refund migration completed.",
+                    )
+                )
 
         state["refund_migration_ran"] = True
         self._save_runtime_state(state)
