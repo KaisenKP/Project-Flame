@@ -150,6 +150,12 @@ def _offer_from_item(it: ItemDef) -> ShopOffer:
             desc = f"Boost Job XP by **+{payload['job_xp_bonus_bp'] / 100:.2f}%**."
         elif "user_xp_bonus_bp" in payload:
             desc = f"Boost User XP by **+{payload['user_xp_bonus_bp'] / 100:.2f}%**."
+        elif "job_xp_add" in payload:
+            desc = f"Gain **+{int(payload['job_xp_add'])}** Job XP instantly for your active job slot."
+        elif "user_xp_add" in payload:
+            desc = f"Gain **+{int(payload['user_xp_add'])}** User XP instantly."
+        elif "silver_add" in payload:
+            desc = f"Gain **+{int(payload['silver_add'])}** silver instantly."
         elif "double_payout_chance_bp" in payload:
             desc = f"Add **+{payload['double_payout_chance_bp'] / 100:.2f}%** chance to 2x payout."
         elif "stamina_cap_add" in payload:
