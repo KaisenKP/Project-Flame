@@ -51,6 +51,23 @@ from decimal import Decimal, ROUND_HALF_UP
 import random
 from typing import Dict, List, Optional, Sequence
 
+from .systems import (
+    RUN_MODE_STANDARD,
+    calc_synergy_bonus_bp,
+    diminishing_worker_bonus_bp,
+    format_duration_minutes,
+    get_business_trait,
+    get_run_mode_for_level,
+    manager_downtime_reduction_bp,
+    manager_instant_reward_bonus_bp,
+    manager_negative_reduction_bp,
+    manager_positive_bonus_bp,
+    manager_role_label,
+    summarize_active_events,
+    worker_role_label,
+    build_run_event_plan,
+)
+
 from .prestige import (
     MAX_BUSINESS_PRESTIGE,
     PrestigeConfig,
@@ -118,6 +135,14 @@ class BusinessCard:
     worker_slots_total: int
     manager_slots_used: int
     manager_slots_total: int
+    projected_payout: int = 0
+    worker_bonus_bp: int = 0
+    manager_summary: str = "None"
+    active_event_summary: str = "No active events"
+    run_mode: str = "Standard"
+    synergy_summary: str = "No synergy"
+    trait_summary: str = "Balanced"
+    risk_badge: str = "Medium"
     purchase_cost: int = 0
     image_url: Optional[str] = None
 
@@ -161,6 +186,19 @@ class BusinessManageSnapshot:
     worker_slots_total: int
     manager_slots_used: int
     manager_slots_total: int
+    projected_payout: int = 0
+    worker_bonus_bp: int = 0
+    worker_summary: str = "No workers assigned"
+    manager_summary: str = "No managers assigned"
+    active_event_summary: str = "No active events"
+    active_event_lines: Optional[List[str]] = None
+    synergy_bonus_bp: int = 0
+    synergy_summary: str = "No synergy"
+    run_mode: str = "Standard"
+    run_mode_key: str = "standard"
+    trait_summary: str = "Balanced"
+    stability_label: str = "Stable"
+    next_unlock: Optional[str] = None
     image_url: Optional[str] = None
     banner_url: Optional[str] = None
     notes: Optional[List[str]] = None
@@ -1007,6 +1045,93 @@ async def _sum_active_worker_percent_bonus_bp_for_ownership(
     return int(value or 0)
 
 
+async def _get_active_worker_rows_for_ownership(session, *, ownership_id: int) -> list[BusinessWorkerAssignmentRow]:
+    rows = await session.scalars(
+        select(BusinessWorkerAssignmentRow).where(
+            BusinessWorkerAssignmentRow.ownership_id == int(ownership_id),
+            BusinessWorkerAssignmentRow.is_active.is_(True),
+        ).order_by(BusinessWorkerAssignmentRow.slot_index.asc())
+    )
+    return list(rows)
+
+
+async def _get_active_manager_rows_for_ownership(session, *, ownership_id: int) -> list[BusinessManagerAssignmentRow]:
+    rows = await session.scalars(
+        select(BusinessManagerAssignmentRow).where(
+            BusinessManagerAssignmentRow.ownership_id == int(ownership_id),
+            BusinessManagerAssignmentRow.is_active.is_(True),
+        ).order_by(BusinessManagerAssignmentRow.slot_index.asc())
+    )
+    return list(rows)
+
+
+async def _worker_bonus_snapshot(session, *, ownership: BusinessOwnershipRow) -> tuple[int, str]:
+    rows = await _get_active_worker_rows_for_ownership(session, ownership_id=int(ownership.id))
+    if not rows:
+        return 0, "No workers assigned"
+    total_bp = diminishing_worker_bonus_bp(sum(int(row.percent_profit_bonus_bp or 0) for row in rows))
+    parts = []
+    for row in rows[:3]:
+        parts.append(f"{worker_role_label(str(row.worker_type), str(ownership.business_key))} +{int(row.percent_profit_bonus_bp or 0)/100:.0f}%")
+    suffix = f" | +{len(rows)-3} more" if len(rows) > 3 else ""
+    return total_bp, ", ".join(parts) + suffix
+
+
+async def _manager_summary_snapshot(session, *, ownership: BusinessOwnershipRow) -> tuple[str, int, int, int]:
+    rows = await _get_active_manager_rows_for_ownership(session, ownership_id=int(ownership.id))
+    if not rows:
+        return "No managers assigned", 0, 0, 0
+    positive_bp = manager_positive_bonus_bp(rows)
+    negative_bp = manager_negative_reduction_bp(rows)
+    downtime_bp = manager_downtime_reduction_bp(rows)
+    labels = []
+    for row in rows[:2]:
+        labels.append(f"{manager_role_label(str(ownership.business_key), int(row.slot_index))} Δ-{manager_downtime_reduction_bp([row])/100:.0f}%")
+    return ", ".join(labels), positive_bp, negative_bp, downtime_bp
+
+
+async def _get_run_mode_key_for_ownership(session, *, ownership: BusinessOwnershipRow) -> str:
+    running = await _get_running_run_for_business(session, guild_id=int(ownership.guild_id), user_id=int(ownership.user_id), business_key=str(ownership.business_key))
+    if running is not None:
+        return str((running.snapshot_json or {}).get("run_mode", RUN_MODE_STANDARD))
+    return str((await _get_active_manager_rows_for_ownership(session, ownership_id=int(ownership.id)) and RUN_MODE_STANDARD) or RUN_MODE_STANDARD)
+
+
+async def _compute_run_state_summary(session, *, ownership: BusinessOwnershipRow, defn: BusinessDef, running_row: Optional[BusinessRunRow]) -> dict:
+    level, _ = await _resolve_effective_business_progress(session, ownership=ownership)
+    worker_rows = await _get_active_worker_rows_for_ownership(session, ownership_id=int(ownership.id))
+    manager_rows = await _get_active_manager_rows_for_ownership(session, ownership_id=int(ownership.id))
+    worker_bp, worker_summary = await _worker_bonus_snapshot(session, ownership=ownership)
+    manager_summary, _, _, _ = await _manager_summary_snapshot(session, ownership=ownership)
+    run_mode_key = RUN_MODE_STANDARD
+    active_event_summary = "No active events"
+    active_event_lines: list[str] = []
+    if running_row is not None:
+        run_mode_key = str((running_row.snapshot_json or {}).get("run_mode", RUN_MODE_STANDARD))
+        active_bp, active_lines = summarize_active_events(list((running_row.snapshot_json or {}).get("event_plan", [])), now=_utc_now())
+        if active_lines:
+            active_event_summary = active_lines[0]
+            active_event_lines = active_lines
+    run_mode = get_run_mode_for_level(level, run_mode_key)
+    owned_rows = await _get_owned_rows_for_user(session, guild_id=int(ownership.guild_id), user_id=int(ownership.user_id))
+    running_map = await _get_running_run_map_for_user(session, guild_id=int(ownership.guild_id), user_id=int(ownership.user_id))
+    synergy_bp, synergy_labels = calc_synergy_bonus_bp(str(ownership.business_key), running_map.keys(), [row.business_key for row in owned_rows])
+    trait = get_business_trait(defn.key)
+    return {
+        "worker_bp": worker_bp,
+        "worker_summary": worker_summary,
+        "manager_summary": manager_summary,
+        "active_event_summary": active_event_summary,
+        "active_event_lines": active_event_lines,
+        "synergy_bp": synergy_bp,
+        "synergy_summary": synergy_labels[0] if synergy_labels else "No synergy active",
+        "run_mode_key": run_mode.key,
+        "run_mode_label": run_mode.label,
+        "trait_summary": trait.positive_bias,
+        "stability_label": f"Stability {trait.stability}/100",
+    }
+
+
 # =========================================================
 # PUBLIC CATALOG API
 # =========================================================
@@ -1042,16 +1167,27 @@ async def _calc_display_hourly_profit_for_owned_business(
     """
     level, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
 
+    trait = get_business_trait(defn.key)
+    running_row = await _get_running_run_for_business(
+        session,
+        guild_id=int(ownership.guild_id),
+        user_id=int(ownership.user_id),
+        business_key=str(defn.key),
+    )
+    state = await _compute_run_state_summary(session, ownership=ownership, defn=defn, running_row=running_row)
+
     base_after_scaling = _effective_base_income(defn, level=level, prestige=prestige)
+    base_after_scaling = _apply_bp(base_after_scaling, trait.base_profit_multiplier_bp - 10_000)
 
     flat_bonus = await _sum_active_worker_flat_bonus_for_ownership(
         session,
         ownership_id=int(ownership.id),
     )
-    percent_bonus_bp = await _sum_active_worker_percent_bonus_bp_for_ownership(
+    raw_percent_bonus_bp = await _sum_active_worker_percent_bonus_bp_for_ownership(
         session,
         ownership_id=int(ownership.id),
     )
+    percent_bonus_bp = max(state["worker_bp"], diminishing_worker_bonus_bp(raw_percent_bonus_bp))
     manager_bonus_bp = await _sum_active_manager_profit_bonus_bp_for_ownership(
         session,
         ownership_id=int(ownership.id),
@@ -1060,6 +1196,10 @@ async def _calc_display_hourly_profit_for_owned_business(
     value = base_after_scaling + flat_bonus
     value = _apply_bp(value, percent_bonus_bp)
     value = _apply_bp(value, manager_bonus_bp)
+    value = _apply_bp(value, state["synergy_bp"])
+    if running_row is not None:
+        active_event_bp, _ = summarize_active_events(list((running_row.snapshot_json or {}).get("event_plan", [])), now=_utc_now())
+        value = _apply_bp(value, active_event_bp)
     return max(value, 0)
 
 
@@ -1069,12 +1209,14 @@ async def _calc_total_runtime_hours_for_owned_business(
     ownership: BusinessOwnershipRow,
     defn: BusinessDef,
 ) -> int:
+    trait = get_business_trait(defn.key)
     base = _base_runtime_hours_for_key(defn.key)
     bonus = await _sum_active_manager_runtime_bonus_for_ownership(
         session,
         ownership_id=int(ownership.id),
     )
     total = base + bonus
+    total = int(round(total * (trait.max_run_duration_modifier_bp / 10_000)))
     return _clamp_int(total, 1, MAX_RUNTIME_HOURS)
 
 
@@ -1125,12 +1267,14 @@ async def _build_business_card_for_user(
         session,
         ownership_id=int(owned_row.id),
     )
+    state = await _compute_run_state_summary(session, ownership=owned_row, defn=defn, running_row=running_row)
 
     hourly_profit = await _calc_display_hourly_profit_for_owned_business(
         session,
         ownership=owned_row,
         defn=defn,
     )
+    runtime_total = await _calc_total_runtime_hours_for_owned_business(session, ownership=owned_row, defn=defn)
 
     return BusinessCard(
         key=defn.key,
@@ -1149,6 +1293,14 @@ async def _build_business_card_for_user(
         worker_slots_total=_worker_slots_for_business_key_and_level(defn.key, level),
         manager_slots_used=manager_used,
         manager_slots_total=_manager_slots_for_level(level),
+        projected_payout=int(hourly_profit * runtime_total),
+        worker_bonus_bp=int(state["worker_bp"]),
+        manager_summary=str(state["manager_summary"]),
+        active_event_summary=str(state["active_event_summary"]),
+        run_mode=str(state["run_mode_label"]),
+        synergy_summary=str(state["synergy_summary"]),
+        trait_summary=str(state["trait_summary"]),
+        risk_badge=str(state["stability_label"]),
         purchase_cost=int(defn.cost_silver),
         image_url=defn.image_url,
     )
@@ -1209,131 +1361,79 @@ async def get_business_manage_snapshot(
     if defn is None:
         return None
 
-    ownership = await _get_ownership_row(
-        session,
-        guild_id=guild_id,
-        user_id=user_id,
-        business_key=business_key,
-    )
-    running_row = await _get_running_run_for_business(
-        session,
-        guild_id=guild_id,
-        user_id=user_id,
-        business_key=business_key,
-    )
+    ownership = await _get_ownership_row(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    running_row = await _get_running_run_for_business(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    trait = get_business_trait(business_key)
 
     if ownership is None:
         level = 0
         prestige = 0
-        max_level = max_visible_level_for_prestige(prestige)
-        worker_used = 0
-        manager_used = 0
         runtime_total = _base_runtime_hours_for_key(defn.key)
-        runtime_remaining = 0
-        hourly_profit = int(defn.base_hourly_income)
-        notes = [
-            "You do not own this business yet.",
-            "Buy it from the Business Hub to unlock upgrades and staffing later.",
-        ]
         return BusinessManageSnapshot(
-            key=defn.key,
-            name=defn.name,
-            emoji=defn.emoji,
-            description=defn.description,
-            flavor=defn.flavor,
-            owned=False,
-            running=False,
-            level=level,
-            visible_level=visible_level_for(level),
+            key=defn.key, name=defn.name, emoji=defn.emoji, description=defn.description, flavor=defn.flavor,
+            owned=False, running=False, level=level, visible_level=visible_level_for(level),
             total_visible_level=total_visible_level_for(stored_level=level, prestige=prestige),
-            max_level=max_level,
-            prestige=prestige,
-            hourly_profit=hourly_profit,
-            base_hourly_income=int(defn.base_hourly_income),
-            upgrade_cost=int(_upgrade_cost(defn, level)),
-            prestige_cost=int(_prestige_cost(defn, prestige)),
-            can_prestige=at_level_cap(stored_level=level, prestige=prestige),
-            prestige_multiplier=prestige_multiplier_display(prestige),
-            bulk_upgrade_1_unlocked=True,
-            bulk_upgrade_5_unlocked=bulk_option_for(prestige, 5).unlocked,
-            bulk_upgrade_10_unlocked=bulk_option_for(prestige, 10).unlocked,
-            runtime_remaining_hours=runtime_remaining,
-            total_runtime_hours=runtime_total,
-            worker_slots_used=worker_used,
-            worker_slots_total=_worker_slots_for_business_key_and_level(defn.key, level),
-            manager_slots_used=manager_used,
-            manager_slots_total=_manager_slots_for_level(level),
-            image_url=defn.image_url,
-            banner_url=defn.banner_url,
-            notes=notes,
+            max_level=max_visible_level_for_prestige(prestige), prestige=prestige, hourly_profit=int(defn.base_hourly_income),
+            base_hourly_income=int(defn.base_hourly_income), upgrade_cost=int(_upgrade_cost(defn, level)),
+            prestige_cost=int(_prestige_cost(defn, prestige)), can_prestige=False,
+            prestige_multiplier=prestige_multiplier_display(prestige), bulk_upgrade_1_unlocked=True,
+            bulk_upgrade_5_unlocked=bulk_option_for(prestige, 5).unlocked, bulk_upgrade_10_unlocked=bulk_option_for(prestige, 10).unlocked,
+            runtime_remaining_hours=0, total_runtime_hours=runtime_total, worker_slots_used=0,
+            worker_slots_total=_worker_slots_for_business_key_and_level(defn.key, level), manager_slots_used=0,
+            manager_slots_total=_manager_slots_for_level(level), projected_payout=int(defn.base_hourly_income * runtime_total),
+            worker_bonus_bp=0, worker_summary="No workers assigned", manager_summary="No managers assigned",
+            active_event_summary="No active events", active_event_lines=[], synergy_bonus_bp=0, synergy_summary="No synergy active",
+            run_mode="Standard", run_mode_key=RUN_MODE_STANDARD, trait_summary=trait.positive_bias,
+            stability_label=f"Stability {trait.stability}/100", next_unlock="Own the business to unlock staffing, modes, and synergies.",
+            image_url=defn.image_url, banner_url=defn.banner_url,
+            notes=["You do not own this business yet.", "Buy it from the Business Hub to unlock upgrades and staffing later."]
         )
 
     level, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
-
-    worker_used = await _count_active_workers_for_ownership(
-        session,
-        ownership_id=int(ownership.id),
-    )
-    manager_used = await _count_active_managers_for_ownership(
-        session,
-        ownership_id=int(ownership.id),
-    )
-
-    hourly_profit = await _calc_display_hourly_profit_for_owned_business(
-        session,
-        ownership=ownership,
-        defn=defn,
-    )
-    runtime_total = await _calc_total_runtime_hours_for_owned_business(
-        session,
-        ownership=ownership,
-        defn=defn,
-    )
-
-    running = running_row is not None
+    worker_used = await _count_active_workers_for_ownership(session, ownership_id=int(ownership.id))
+    manager_used = await _count_active_managers_for_ownership(session, ownership_id=int(ownership.id))
+    runtime_total = await _calc_total_runtime_hours_for_owned_business(session, ownership=ownership, defn=defn)
+    hourly_profit = await _calc_display_hourly_profit_for_owned_business(session, ownership=ownership, defn=defn)
     runtime_remaining = _hours_remaining(running_row.ends_at) if running_row is not None else 0
-    max_level = max_visible_level_for_prestige(prestige)
+    state = await _compute_run_state_summary(session, ownership=ownership, defn=defn, running_row=running_row)
 
-    notes: list[str] = []
-    notes.append(f"Base runtime: {int(_base_runtime_hours_for_key(defn.key))}h")
-    if manager_used > 0:
-        notes.append("Manager bonuses are included in total runtime.")
-    if worker_used > 0:
-        notes.append("Assigned workers are included in displayed hourly profit.")
+    next_unlock = None
+    if level < 25:
+        next_unlock = "Level 25 unlocks stronger event scaling and deeper staffing value."
+    elif level < 50:
+        next_unlock = "Level 50 unlocks Aggressive mode for this business."
+    elif level < 75:
+        next_unlock = "Level 75 slightly improves rare event quality and payout variance."
+    else:
+        next_unlock = "Keep prestiging to expand level cap and improve event ceilings."
+
+    notes = [
+        f"Identity: {trait.positive_bias} • {trait.risk_label}",
+        f"Workers +{int(state['worker_bp'])/100:.0f}% | Manager: {state['manager_summary']}",
+        f"Mode: {state['run_mode_label']} | Synergy: {state['synergy_summary']}",
+    ]
     if running_row is not None:
-        notes.append("This business currently has an active run.")
+        notes.append(f"Event: {state['active_event_summary']}")
 
     return BusinessManageSnapshot(
-        key=defn.key,
-        name=defn.name,
-        emoji=defn.emoji,
-        description=defn.description,
-        flavor=defn.flavor,
-        owned=True,
-        running=running,
-        level=level,
-        visible_level=visible_level_for(level),
+        key=defn.key, name=defn.name, emoji=defn.emoji, description=defn.description, flavor=defn.flavor,
+        owned=True, running=running_row is not None, level=level, visible_level=visible_level_for(level),
         total_visible_level=total_visible_level_for(stored_level=level, prestige=prestige),
-        max_level=max_level,
-        prestige=prestige,
-        hourly_profit=hourly_profit,
+        max_level=max_visible_level_for_prestige(prestige), prestige=prestige, hourly_profit=hourly_profit,
         base_hourly_income=int(defn.base_hourly_income),
         upgrade_cost=None if at_level_cap(stored_level=level, prestige=prestige) else int(_upgrade_cost(defn, level)),
         prestige_cost=int(_prestige_cost(defn, prestige)) if at_level_cap(stored_level=level, prestige=prestige) and prestige < MAX_BUSINESS_PRESTIGE else None,
         can_prestige=at_level_cap(stored_level=level, prestige=prestige) and prestige < MAX_BUSINESS_PRESTIGE,
-        prestige_multiplier=prestige_multiplier_display(prestige),
-        bulk_upgrade_1_unlocked=True,
-        bulk_upgrade_5_unlocked=bulk_option_for(prestige, 5).unlocked,
-        bulk_upgrade_10_unlocked=bulk_option_for(prestige, 10).unlocked,
-        runtime_remaining_hours=runtime_remaining,
-        total_runtime_hours=runtime_total,
-        worker_slots_used=worker_used,
-        worker_slots_total=_worker_slots_for_business_key_and_level(defn.key, level),
-        manager_slots_used=manager_used,
-        manager_slots_total=_manager_slots_for_level(level),
-        image_url=defn.image_url,
-        banner_url=defn.banner_url,
-        notes=notes,
+        prestige_multiplier=prestige_multiplier_display(prestige), bulk_upgrade_1_unlocked=True,
+        bulk_upgrade_5_unlocked=bulk_option_for(prestige, 5).unlocked, bulk_upgrade_10_unlocked=bulk_option_for(prestige, 10).unlocked,
+        runtime_remaining_hours=runtime_remaining, total_runtime_hours=runtime_total, worker_slots_used=worker_used,
+        worker_slots_total=_worker_slots_for_business_key_and_level(defn.key, level), manager_slots_used=manager_used,
+        manager_slots_total=_manager_slots_for_level(level), projected_payout=int(hourly_profit * runtime_total),
+        worker_bonus_bp=int(state['worker_bp']), worker_summary=str(state['worker_summary']), manager_summary=str(state['manager_summary']),
+        active_event_summary=str(state['active_event_summary']), active_event_lines=list(state['active_event_lines']),
+        synergy_bonus_bp=int(state['synergy_bp']), synergy_summary=str(state['synergy_summary']),
+        run_mode=str(state['run_mode_label']), run_mode_key=str(state['run_mode_key']), trait_summary=str(state['trait_summary']),
+        stability_label=str(state['stability_label']), next_unlock=next_unlock, image_url=defn.image_url, banner_url=defn.banner_url, notes=notes
     )
 
 
@@ -1452,6 +1552,7 @@ async def start_business_run(
     guild_id: int,
     user_id: int,
     business_key: str,
+    run_mode_key: str = RUN_MODE_STANDARD,
 ) -> BusinessActionResult:
     defn = _def_for_key(business_key)
     if defn is None:
@@ -1499,6 +1600,8 @@ async def start_business_run(
             manage_snapshot=manage,
         )
 
+    level, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
+    run_mode = get_run_mode_for_level(level, run_mode_key)
     total_runtime_hours = await _calc_total_runtime_hours_for_owned_business(
         session,
         ownership=ownership,
@@ -1509,6 +1612,7 @@ async def start_business_run(
         ownership=ownership,
         defn=defn,
     )
+    hourly_profit = _apply_bp(hourly_profit, run_mode.profit_bp)
 
     now = _utc_now()
     ends_at = now + timedelta(hours=total_runtime_hours)
@@ -1517,8 +1621,17 @@ async def start_business_run(
         session,
         ownership_id=int(ownership.id),
     )
-
-    level, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
+    manager_rows = await _get_active_manager_rows_for_ownership(session, ownership_id=int(ownership.id))
+    event_plan = build_run_event_plan(
+        run_id=random.randint(1, 2_147_483_647),
+        business_key=defn.key,
+        level=level,
+        worker_count=await _count_active_workers_for_ownership(session, ownership_id=int(ownership.id)),
+        manager_rows=manager_rows,
+        started_at=now,
+        ends_at=ends_at,
+        run_mode_key=run_mode.key,
+    )
 
     run = BusinessRunRow(
         ownership_id=int(ownership.id),
@@ -1543,6 +1656,9 @@ async def start_business_run(
             "auto_restart_remaining": int(auto_restart_remaining),
             "started_at_iso": now.isoformat(),
             "ends_at_iso": ends_at.isoformat(),
+            "run_mode": run_mode.key,
+            "run_mode_label": run_mode.label,
+            "event_plan": event_plan,
         },
         report_json=None,
         silver_paid_total=0,
