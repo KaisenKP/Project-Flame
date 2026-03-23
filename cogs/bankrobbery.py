@@ -1,28 +1,22 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands
-from sqlalchemy import select
 
-from db.models import BankRobberyHistoryRow, BankRobberyLobbyRow, BankRobberyParticipantRow
-from services.db import sessions
-from services.users import ensure_user_rows
-from services.bankrobbery.catalog import BankApproach, CrewRole, FinalePhase, PREP_DEFS, TEMPLATES, get_template
+from db.models import BankRobberyHistoryRow, BankRobberyLobbyRow
+from services.bankrobbery.catalog import BankApproach, FinalePhase, get_template
 from services.bankrobbery.finale import calculate_outcome, run_entry, run_escape, run_loot_round, run_vault, use_override
 from services.bankrobbery.lobby import (
-    assign_role,
-    confirm_cuts,
+    auto_configure_crew,
     create_lobby,
     finalize_lobby,
     get_active_lobby_for_user,
     join_lobby,
     leave_lobby,
     list_participants,
-    set_cuts,
     set_ready,
     start_finale,
 )
@@ -30,13 +24,15 @@ from services.bankrobbery.prep import complete_prep, prep_summary
 from services.bankrobbery.progression import get_cooldowns, get_or_create_profile
 from services.bankrobbery.rewards import get_or_create_crowns_wallet, get_or_create_wallet, grant_lootbox
 from services.bankrobbery.ui import (
-    build_board_embed,
+    HeistHubView,
     build_finale_embed,
     build_hub_embed,
     build_lobby_embed,
     build_prep_embed,
     build_results_embed,
 )
+from services.db import sessions
+from services.users import ensure_user_rows
 
 
 def utc_now() -> datetime:
@@ -44,8 +40,6 @@ def utc_now() -> datetime:
 
 
 class BankRobberyCog(commands.Cog):
-    bankrobbery = app_commands.Group(name="bankrobbery", description="Premium heist-style robbery mode.")
-
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.sessionmaker = sessions()
@@ -53,7 +47,7 @@ class BankRobberyCog(commands.Cog):
     async def _resolve_lobby(self, session, guild_id: int, user_id: int) -> BankRobberyLobbyRow:
         lobby = await get_active_lobby_for_user(session, guild_id=guild_id, user_id=user_id)
         if lobby is None:
-            raise ValueError("You are not in an active Bank Robbery lobby.")
+            raise ValueError("You are not in an active heist crew.")
         return lobby
 
     async def _apply_outcome(self, session, *, lobby: BankRobberyLobbyRow):
@@ -119,243 +113,218 @@ class BankRobberyCog(commands.Cog):
         await finalize_lobby(session, lobby=lobby)
         return outcome
 
-    @bankrobbery.command(name="hub", description="Open the Bank Robbery hub.")
-    async def hub_cmd(self, interaction: discord.Interaction):
+    async def _send_panel(self, interaction: discord.Interaction, *, embed: discord.Embed, ephemeral: bool = True):
+        view = HeistHubView(self, interaction.user.id)
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, view=view, ephemeral=ephemeral)
+        else:
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=ephemeral)
+
+    async def _show_hub(self, interaction: discord.Interaction):
         if interaction.guild is None:
-            await interaction.response.send_message("Server only.", ephemeral=True)
+            await self._send_error(interaction, "Server only.")
             return
-        await interaction.response.defer(ephemeral=True)
         async with self.sessionmaker() as session:
             async with session.begin():
                 profile = await get_or_create_profile(session, guild_id=interaction.guild.id, user_id=interaction.user.id)
                 cooldowns = await get_cooldowns(session, guild_id=interaction.guild.id, user_id=interaction.user.id)
-        await interaction.followup.send(embed=build_hub_embed(profile=profile, cooldowns=cooldowns, guild_name=interaction.guild.name), ephemeral=True)
+        await self._send_panel(
+            interaction,
+            embed=build_hub_embed(profile=profile, cooldowns=cooldowns, guild_name=interaction.guild.name),
+        )
 
-    @bankrobbery.command(name="board", description="View the robbery board.")
-    async def board_cmd(self, interaction: discord.Interaction):
-        await interaction.response.send_message(embed=build_board_embed(), ephemeral=True)
-
-    @bankrobbery.command(name="create", description="Create a robbery lobby.")
-    @app_commands.describe(robbery_id="Target id", approach="Approach to use")
-    @app_commands.choices(
-        robbery_id=[app_commands.Choice(name=t.display_name, value=k) for k, t in TEMPLATES.items()],
-        approach=[app_commands.Choice(name=a.value.title(), value=a.value) for a in BankApproach],
-    )
-    async def create_cmd(self, interaction: discord.Interaction, robbery_id: str, approach: str):
+    async def _show_lobby(self, interaction: discord.Interaction):
         if interaction.guild is None:
-            await interaction.response.send_message("Server only.", ephemeral=True)
+            await self._send_error(interaction, "Server only.")
+            return
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                lobby = await self._resolve_lobby(session, interaction.guild.id, interaction.user.id)
+                template = get_template(lobby.robbery_id)
+                if lobby.stage == "finale":
+                    state = dict(lobby.state_json or {})
+                    embed = build_finale_embed(lobby=lobby, template=template, state=state)
+                else:
+                    participants = await list_participants(session, lobby_id=lobby.id)
+                    prep_rows, _ = await prep_summary(session, lobby)
+                    embed = build_lobby_embed(lobby=lobby, template=template, participants=participants, prep_rows=prep_rows)
+        await self._send_panel(interaction, embed=embed)
+
+    async def _send_error(self, interaction: discord.Interaction, message: str):
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+
+    @app_commands.command(name="heist", description="Open the all-in-one heist hub.")
+    async def heist_cmd(self, interaction: discord.Interaction):
+        await self._show_hub(interaction)
+
+    async def cog_load(self) -> None:
+        self.bot.tree.add_command(self.heist_cmd)
+
+    async def cog_unload(self) -> None:
+        self.bot.tree.remove_command(self.heist_cmd.name, type=self.heist_cmd.type)
+
+    async def handle_refresh_hub(self, interaction: discord.Interaction, *, owner_id: int):
+        await interaction.response.defer(ephemeral=True)
+        await self._show_hub(interaction)
+
+    async def handle_lobby_status(self, interaction: discord.Interaction, *, owner_id: int):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await self._show_lobby(interaction)
+        except Exception as e:
+            await self._send_error(interaction, str(e))
+
+    async def handle_create_target(self, interaction: discord.Interaction, *, owner_id: int, robbery_id: str):
+        if interaction.guild is None:
+            await self._send_error(interaction, "Server only.")
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        approach = BankApproach.SILENT
+        try:
+            async with self.sessionmaker() as session:
+                async with session.begin():
+                    lobby = await create_lobby(session, guild_id=interaction.guild.id, leader_user_id=interaction.user.id, robbery_id=robbery_id, approach=approach)
+                    await auto_configure_crew(session, lobby=lobby)
+                    participants = await list_participants(session, lobby_id=lobby.id)
+                    prep_rows, _ = await prep_summary(session, lobby)
+                    template = get_template(robbery_id)
+            await self._send_panel(interaction, embed=build_lobby_embed(lobby=lobby, template=template, participants=participants, prep_rows=prep_rows))
+        except Exception as e:
+            await self._send_error(interaction, str(e))
+
+    async def handle_set_approach(self, interaction: discord.Interaction, *, owner_id: int, approach: str):
+        if interaction.guild is None:
+            await self._send_error(interaction, "Server only.")
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            async with self.sessionmaker() as session:
+                async with session.begin():
+                    lobby = await self._resolve_lobby(session, interaction.guild.id, interaction.user.id)
+                    if interaction.user.id != lobby.leader_user_id:
+                        raise ValueError("Only the leader can change the approach.")
+                    lobby.approach = BankApproach(approach).value
+                    state = dict(lobby.state_json or {})
+                    state["approach"] = lobby.approach
+                    lobby.state_json = state
+                    participants = await list_participants(session, lobby_id=lobby.id)
+                    prep_rows, _ = await prep_summary(session, lobby)
+                    template = get_template(lobby.robbery_id)
+            await self._send_panel(interaction, embed=build_lobby_embed(lobby=lobby, template=template, participants=participants, prep_rows=prep_rows))
+        except Exception as e:
+            await self._send_error(interaction, str(e))
+
+    async def handle_join_lobby(self, interaction: discord.Interaction, *, owner_id: int, leader_id: int):
+        if interaction.guild is None:
+            await self._send_error(interaction, "Server only.")
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             async with self.sessionmaker() as session:
                 async with session.begin():
-                    lobby = await create_lobby(session, guild_id=interaction.guild.id, leader_user_id=interaction.user.id, robbery_id=robbery_id, approach=BankApproach(approach))
+                    lobby = await join_lobby(session, guild_id=interaction.guild.id, user_id=interaction.user.id, leader_user_id=leader_id)
+                    await auto_configure_crew(session, lobby=lobby)
                     participants = await list_participants(session, lobby_id=lobby.id)
                     prep_rows, _ = await prep_summary(session, lobby)
-                    template = get_template(robbery_id)
-            await interaction.followup.send(embed=build_lobby_embed(lobby=lobby, template=template, participants=participants, prep_rows=prep_rows), ephemeral=True)
+                    template = get_template(lobby.robbery_id)
+            await self._send_panel(interaction, embed=build_lobby_embed(lobby=lobby, template=template, participants=participants, prep_rows=prep_rows))
         except Exception as e:
-            await interaction.followup.send(str(e), ephemeral=True)
+            await self._send_error(interaction, str(e))
 
-    @bankrobbery.command(name="join", description="Join a leader's robbery lobby.")
-    @app_commands.describe(leader="Leader whose lobby you want to join")
-    async def join_cmd(self, interaction: discord.Interaction, leader: discord.Member):
+    async def handle_complete_prep(self, interaction: discord.Interaction, *, owner_id: int, prep_key: str):
         if interaction.guild is None:
-            await interaction.response.send_message("Server only.", ephemeral=True)
+            await self._send_error(interaction, "Server only.")
             return
         await interaction.response.defer(ephemeral=True)
         try:
             async with self.sessionmaker() as session:
                 async with session.begin():
-                    lobby = await join_lobby(session, guild_id=interaction.guild.id, user_id=interaction.user.id, leader_user_id=leader.id)
+                    lobby = await self._resolve_lobby(session, interaction.guild.id, interaction.user.id)
+                    await complete_prep(session, lobby=lobby, prep_key=prep_key, user_id=interaction.user.id)
+                    prep_rows, prep_effects = await prep_summary(session, lobby)
+                    template = get_template(lobby.robbery_id)
+            await self._send_panel(interaction, embed=build_prep_embed(template=template, prep_rows=prep_rows, prep_effects=prep_effects))
+        except Exception as e:
+            await self._send_error(interaction, str(e))
+
+    async def handle_toggle_ready(self, interaction: discord.Interaction, *, owner_id: int):
+        if interaction.guild is None:
+            await self._send_error(interaction, "Server only.")
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            async with self.sessionmaker() as session:
+                async with session.begin():
+                    lobby = await self._resolve_lobby(session, interaction.guild.id, interaction.user.id)
+                    participants = await list_participants(session, lobby_id=lobby.id)
+                    current = next((member for member in participants if int(member.user_id) == int(interaction.user.id)), None)
+                    if current is None:
+                        raise ValueError("You are not in this crew.")
+                    lobby = await set_ready(session, guild_id=interaction.guild.id, user_id=interaction.user.id, ready=not bool(current.ready))
                     participants = await list_participants(session, lobby_id=lobby.id)
                     prep_rows, _ = await prep_summary(session, lobby)
                     template = get_template(lobby.robbery_id)
-            await interaction.followup.send(embed=build_lobby_embed(lobby=lobby, template=template, participants=participants, prep_rows=prep_rows), ephemeral=True)
+            await self._send_panel(interaction, embed=build_lobby_embed(lobby=lobby, template=template, participants=participants, prep_rows=prep_rows))
         except Exception as e:
-            await interaction.followup.send(str(e), ephemeral=True)
+            await self._send_error(interaction, str(e))
 
-    @bankrobbery.command(name="leave", description="Leave your current robbery lobby.")
-    async def leave_cmd(self, interaction: discord.Interaction):
+    async def handle_auto_setup(self, interaction: discord.Interaction, *, owner_id: int):
         if interaction.guild is None:
-            await interaction.response.send_message("Server only.", ephemeral=True)
+            await self._send_error(interaction, "Server only.")
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            async with self.sessionmaker() as session:
+                async with session.begin():
+                    lobby = await self._resolve_lobby(session, interaction.guild.id, interaction.user.id)
+                    if int(lobby.leader_user_id) != int(interaction.user.id):
+                        raise ValueError("Only the leader can auto-configure the crew.")
+                    await auto_configure_crew(session, lobby=lobby)
+                    participants = await list_participants(session, lobby_id=lobby.id)
+                    prep_rows, _ = await prep_summary(session, lobby)
+                    template = get_template(lobby.robbery_id)
+            await self._send_panel(interaction, embed=build_lobby_embed(lobby=lobby, template=template, participants=participants, prep_rows=prep_rows))
+        except Exception as e:
+            await self._send_error(interaction, str(e))
+
+    async def handle_leave_lobby(self, interaction: discord.Interaction, *, owner_id: int):
+        if interaction.guild is None:
+            await self._send_error(interaction, "Server only.")
             return
         await interaction.response.defer(ephemeral=True)
         async with self.sessionmaker() as session:
             async with session.begin():
                 lobby, disbanded = await leave_lobby(session, guild_id=interaction.guild.id, user_id=interaction.user.id)
         if lobby is None:
-            await interaction.followup.send("You are not in a robbery lobby.", ephemeral=True)
+            await self._send_error(interaction, "You are not in a heist crew.")
             return
-        await interaction.followup.send("Lobby disbanded." if disbanded else "You left the robbery crew.", ephemeral=True)
+        await self._send_error(interaction, "Crew disbanded." if disbanded else "You left the crew.")
 
-    @bankrobbery.command(name="roles", description="Assign or review robbery roles.")
-    @app_commands.describe(member="Crew member", role="Role to assign")
-    @app_commands.choices(role=[app_commands.Choice(name=r.value.title(), value=r.value) for r in CrewRole if r != CrewRole.FLEX])
-    async def roles_cmd(self, interaction: discord.Interaction, member: Optional[discord.Member] = None, role: Optional[str] = None):
+    async def handle_launch_finale(self, interaction: discord.Interaction, *, owner_id: int):
         if interaction.guild is None:
-            await interaction.response.send_message("Server only.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            async with self.sessionmaker() as session:
-                async with session.begin():
-                    lobby = await self._resolve_lobby(session, interaction.guild.id, interaction.user.id)
-                    if member is not None and role is not None:
-                        await assign_role(session, lobby=lobby, actor_user_id=interaction.user.id, target_user_id=member.id, role=CrewRole(role))
-                    participants = await list_participants(session, lobby_id=lobby.id)
-                    prep_rows, _ = await prep_summary(session, lobby)
-                    template = get_template(lobby.robbery_id)
-            await interaction.followup.send(embed=build_lobby_embed(lobby=lobby, template=template, participants=participants, prep_rows=prep_rows), ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(str(e), ephemeral=True)
-
-    @bankrobbery.command(name="cuts", description="Set, confirm, or review cut splits.")
-    @app_commands.describe(split="Format: @user=40,@user=30,@user=30")
-    async def cuts_cmd(self, interaction: discord.Interaction, split: Optional[str] = None):
-        if interaction.guild is None:
-            await interaction.response.send_message("Server only.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            async with self.sessionmaker() as session:
-                async with session.begin():
-                    lobby = await self._resolve_lobby(session, interaction.guild.id, interaction.user.id)
-                    if split:
-                        parts = [part.strip() for part in split.split(",") if part.strip()]
-                        cuts: dict[int, int] = {}
-                        for part in parts:
-                            left, right = [s.strip() for s in part.split("=", 1)]
-                            user_id = int(left.replace("<@", "").replace(">", "").replace("!", ""))
-                            cuts[user_id] = int(right)
-                        await set_cuts(session, lobby=lobby, actor_user_id=interaction.user.id, cuts=cuts)
-                    else:
-                        lobby = await confirm_cuts(session, guild_id=interaction.guild.id, user_id=interaction.user.id)
-                    participants = await list_participants(session, lobby_id=lobby.id)
-                    prep_rows, _ = await prep_summary(session, lobby)
-                    template = get_template(lobby.robbery_id)
-            await interaction.followup.send(embed=build_lobby_embed(lobby=lobby, template=template, participants=participants, prep_rows=prep_rows), ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(str(e), ephemeral=True)
-
-    @bankrobbery.command(name="prep", description="Complete or review robbery prep jobs.")
-    @app_commands.describe(prep_key="Prep key to complete")
-    @app_commands.choices(prep_key=[app_commands.Choice(name=v.name, value=k) for k, v in PREP_DEFS.items()])
-    async def prep_cmd(self, interaction: discord.Interaction, prep_key: Optional[str] = None):
-        if interaction.guild is None:
-            await interaction.response.send_message("Server only.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            async with self.sessionmaker() as session:
-                async with session.begin():
-                    lobby = await self._resolve_lobby(session, interaction.guild.id, interaction.user.id)
-                    if prep_key:
-                        await complete_prep(session, lobby=lobby, prep_key=prep_key, user_id=interaction.user.id)
-                    prep_rows, prep_effects = await prep_summary(session, lobby)
-                    template = get_template(lobby.robbery_id)
-            await interaction.followup.send(embed=build_prep_embed(template=template, prep_rows=prep_rows, prep_effects=prep_effects), ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(str(e), ephemeral=True)
-
-    @bankrobbery.command(name="start", description="Launch the robbery finale.")
-    async def start_cmd(self, interaction: discord.Interaction):
-        if interaction.guild is None:
-            await interaction.response.send_message("Server only.", ephemeral=True)
+            await self._send_error(interaction, "Server only.")
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             async with self.sessionmaker() as session:
                 async with session.begin():
                     lobby = await self._resolve_lobby(session, interaction.guild.id, interaction.user.id)
+                    await auto_configure_crew(session, lobby=lobby)
                     await start_finale(session, lobby=lobby, actor_user_id=interaction.user.id)
-                    result = await run_entry(session, lobby)
-                    result2 = await run_vault(session, lobby)
+                    await run_entry(session, lobby)
+                    result = await run_vault(session, lobby)
                     template = get_template(lobby.robbery_id)
                     state = dict(lobby.state_json or {})
-            await interaction.followup.send(embed=build_finale_embed(lobby=lobby, template=template, state=state, phase_result=result2), ephemeral=True)
+            await self._send_panel(interaction, embed=build_finale_embed(lobby=lobby, template=template, state=state, phase_result=result))
         except Exception as e:
-            await interaction.followup.send(str(e), ephemeral=True)
+            await self._send_error(interaction, str(e))
 
-    @bankrobbery.command(name="status", description="View your current robbery status or set ready state.")
-    @app_commands.describe(ready="Optional ready toggle for your current lobby")
-    async def status_cmd(self, interaction: discord.Interaction, ready: Optional[bool] = None):
+    async def handle_finale_action(self, interaction: discord.Interaction, *, owner_id: int, action: str):
         if interaction.guild is None:
-            await interaction.response.send_message("Server only.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            async with self.sessionmaker() as session:
-                async with session.begin():
-                    lobby = await self._resolve_lobby(session, interaction.guild.id, interaction.user.id)
-                    if ready is not None:
-                        lobby = await set_ready(session, guild_id=interaction.guild.id, user_id=interaction.user.id, ready=ready)
-                    template = get_template(lobby.robbery_id)
-                    if lobby.stage == "finale":
-                        state = dict(lobby.state_json or {})
-                        await interaction.followup.send(embed=build_finale_embed(lobby=lobby, template=template, state=state), ephemeral=True)
-                        return
-                    participants = await list_participants(session, lobby_id=lobby.id)
-                    prep_rows, _ = await prep_summary(session, lobby)
-            await interaction.followup.send(embed=build_lobby_embed(lobby=lobby, template=template, participants=participants, prep_rows=prep_rows), ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(str(e), ephemeral=True)
-
-    @bankrobbery.command(name="loadout", description="Review your role XP loadout bonuses.")
-    async def loadout_cmd(self, interaction: discord.Interaction):
-        if interaction.guild is None:
-            await interaction.response.send_message("Server only.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        async with self.sessionmaker() as session:
-            async with session.begin():
-                profile = await get_or_create_profile(session, guild_id=interaction.guild.id, user_id=interaction.user.id)
-        embed = discord.Embed(title="🛠️ Bank Robbery Loadout", color=discord.Color.blurple())
-        embed.add_field(name="Leader XP", value=f"**{profile.leader_xp:,}** — stronger Override and cleaner team stability.", inline=False)
-        embed.add_field(name="Hacker XP", value=f"**{profile.hacker_xp:,}** — faster vault access and security delay.", inline=False)
-        embed.add_field(name="Driver XP", value=f"**{profile.driver_xp:,}** — less loot loss during escape.", inline=False)
-        embed.add_field(name="Enforcer XP", value=f"**{profile.enforcer_xp:,}** — lower penalty severity during bad events.", inline=False)
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @bankrobbery.command(name="cooldowns", description="View your robbery cooldowns.")
-    async def cooldowns_cmd(self, interaction: discord.Interaction):
-        if interaction.guild is None:
-            await interaction.response.send_message("Server only.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        async with self.sessionmaker() as session:
-            async with session.begin():
-                rows = await get_cooldowns(session, guild_id=interaction.guild.id, user_id=interaction.user.id)
-        if not rows:
-            await interaction.followup.send("No active Bank Robbery cooldowns.", ephemeral=True)
-            return
-        embed = discord.Embed(title="⏳ Bank Robbery Cooldowns", color=discord.Color.orange())
-        for row in rows:
-            if row.ends_at <= utc_now():
-                continue
-            embed.add_field(name=get_template(row.robbery_id).display_name, value=f"Ready at **{row.ends_at.strftime('%Y-%m-%d %H:%M UTC')}**", inline=False)
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @bankrobbery.command(name="history", description="View your recent Bank Robbery history.")
-    async def history_cmd(self, interaction: discord.Interaction):
-        if interaction.guild is None:
-            await interaction.response.send_message("Server only.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        async with self.sessionmaker() as session:
-            async with session.begin():
-                rows = list((await session.execute(select(BankRobberyHistoryRow).where(BankRobberyHistoryRow.guild_id == interaction.guild.id, BankRobberyHistoryRow.leader_user_id == interaction.user.id).order_by(BankRobberyHistoryRow.created_at.desc()).limit(5))).scalars())
-        embed = discord.Embed(title="📜 Bank Robbery History", color=discord.Color.dark_teal())
-        if not rows:
-            embed.description = "No completed scores yet."
-        else:
-            for row in rows:
-                embed.add_field(name=f"{get_template(row.robbery_id).display_name} • {row.outcome.replace('_', ' ').title()}", value=f"Approach: **{row.approach.title()}**\nFinal Take: **{row.final_take:,} Silver**\nHeat: **+{row.heat_delta}** • Rep: **+{row.rep_delta}**", inline=False)
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    async def _finale_step(self, interaction: discord.Interaction, action: str):
-        if interaction.guild is None:
-            await interaction.response.send_message("Server only.", ephemeral=True)
+            await self._send_error(interaction, "Server only.")
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
@@ -368,39 +337,28 @@ class BankRobberyCog(commands.Cog):
                     if action == "push":
                         result = await run_loot_round(session, lobby, push=True)
                     elif action == "leave":
-                        result = await run_loot_round(session, lobby, push=False)
+                        await run_loot_round(session, lobby, push=False)
                         result = await run_escape(session, lobby)
                     elif action == "escape":
                         result = await run_escape(session, lobby)
                     elif action == "override":
                         used = await use_override(session, lobby)
                         if not used:
-                            raise ValueError("Leader Override has already been used.")
+                            raise ValueError("Leader override was already used.")
                         state = dict(lobby.state_json or {})
-                        await interaction.followup.send(embed=build_finale_embed(lobby=lobby, template=template, state=state), ephemeral=True)
+                        await self._send_panel(interaction, embed=build_finale_embed(lobby=lobby, template=template, state=state))
                         return
                     else:
                         raise ValueError("Unknown finale action.")
                     if lobby.current_phase == FinalePhase.RESULTS.value:
                         outcome = await self._apply_outcome(session, lobby=lobby)
                         state = dict(lobby.state_json or {})
-                        await interaction.followup.send(embed=build_results_embed(template=template, outcome_payload=outcome, state=state), ephemeral=True)
+                        await self._send_panel(interaction, embed=build_results_embed(template=template, outcome_payload=outcome, state=state))
                         return
                     state = dict(lobby.state_json or {})
-            await interaction.followup.send(embed=build_finale_embed(lobby=lobby, template=template, state=state, phase_result=result), ephemeral=True)
+            await self._send_panel(interaction, embed=build_finale_embed(lobby=lobby, template=template, state=state, phase_result=result))
         except Exception as e:
-            await interaction.followup.send(str(e), ephemeral=True)
-
-    @bankrobbery.command(name="advance", description="Advance the finale by pushing loot, leaving, escaping, or using Override.")
-    @app_commands.describe(action="push, leave, escape, or override")
-    @app_commands.choices(action=[
-        app_commands.Choice(name="Push One More Loot Round", value="push"),
-        app_commands.Choice(name="Leave Now", value="leave"),
-        app_commands.Choice(name="Force Escape", value="escape"),
-        app_commands.Choice(name="Leader Override", value="override"),
-    ])
-    async def advance_cmd(self, interaction: discord.Interaction, action: str):
-        await self._finale_step(interaction, action)
+            await self._send_error(interaction, str(e))
 
 
 async def setup(bot: commands.Bot):

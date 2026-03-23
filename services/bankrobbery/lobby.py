@@ -127,6 +127,26 @@ async def assign_role(session: AsyncSession, *, lobby: BankRobberyLobbyRow, acto
     participant.role = role.value
 
 
+async def auto_configure_crew(session: AsyncSession, *, lobby: BankRobberyLobbyRow) -> list[BankRobberyParticipantRow]:
+    members = await list_participants(session, lobby_id=lobby.id)
+    ordered_roles = [
+        CrewRole.LEADER,
+        CrewRole.HACKER,
+        CrewRole.DRIVER,
+        CrewRole.ENFORCER,
+        CrewRole.FLEX,
+    ]
+    for idx, member in enumerate(members):
+        member.role = ordered_roles[min(idx, len(ordered_roles) - 1)].value
+    count = max(1, len(members))
+    base_cut = 100 // count
+    remainder = 100 % count
+    for idx, member in enumerate(members):
+        member.cut_percent = base_cut + (1 if idx < remainder else 0)
+        member.confirmed_cuts = True
+    return members
+
+
 async def set_ready(session: AsyncSession, *, guild_id: int, user_id: int, ready: bool) -> BankRobberyLobbyRow:
     participant = await session.scalar(select(BankRobberyParticipantRow).where(BankRobberyParticipantRow.guild_id == guild_id, BankRobberyParticipantRow.user_id == user_id))
     if participant is None:
