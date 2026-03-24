@@ -15,7 +15,7 @@ from services.job_hub import (
     tool_defs_for,
     unlocked_perks,
 )
-from services.jobs_core import JOB_DEFS, JOB_SWITCH_COST, JobCategory, category_fail_bp, fmt_int, unlock_level_for
+from services.jobs_core import JOB_DEFS, JOB_SWITCH_COST, JobCategory, category_fail_bp, clamp_int, fmt_int, unlock_level_for
 from services.jobs_endgame import presentation_for
 
 VIP_WORK_COOLDOWN_SECONDS = 10
@@ -77,9 +77,10 @@ def make_job_hub_embed(*, user: discord.abc.User, vip: bool, slot_snap: SlotSnap
     presentation = presentation_for(slot_snap.job_key)
     progress = slot_snap.progress
     assert progress is not None
-    income_bp, xp_bp, stamina_bp, tool_name = tool_bonus_snapshot(slot_snap.job_key, slot_snap.selected_tool_key, slot_snap.tool_levels)
+    income_bp, xp_bp, stamina_save_chance_bp, tool_name = tool_bonus_snapshot(slot_snap.job_key, slot_snap.selected_tool_key, slot_snap.tool_levels)
+    stamina_save_chance_bp = clamp_int(int(stamina_save_chance_bp), 0, 10_000)
     lo, hi = income_range_for(slot_snap.job_key, progress.level, progress.prestige, income_bp)
-    stamina_cost = stamina_cost_preview(slot_snap.job_key, progress.level, progress.prestige, stamina_bp)
+    stamina_cost = stamina_cost_preview(slot_snap.job_key, progress.level, progress.prestige)
     unlocked, locked = unlocked_perks(slot_snap.job_key, progress.level)
     xp_pct = int((progress.xp / max(progress.xp_needed, 1)) * 100)
     prog_bar = "▰" * min(12, round(12 * progress.xp / max(progress.xp_needed, 1))) + "▱" * (12 - min(12, round(12 * progress.xp / max(progress.xp_needed, 1))))
@@ -97,8 +98,8 @@ def make_job_hub_embed(*, user: discord.abc.User, vip: bool, slot_snap: SlotSnap
             buffs.append(f"• Income: **+{income_bp / 100:.0f}%**")
         if xp_bp:
             buffs.append(f"• Job XP: **+{xp_bp / 100:.0f}%**")
-        if stamina_bp:
-            buffs.append(f"• Stamina efficiency: **+{stamina_bp / 100:.0f}%**")
+        if stamina_save_chance_bp:
+            buffs.append(f"• Tool stamina save chance: **{stamina_save_chance_bp / 100:.0f}%**")
         if len(buffs) == 1:
             buffs.append("• No active buffs yet")
         overview_lines = [
@@ -128,8 +129,8 @@ def make_job_hub_embed(*, user: discord.abc.User, vip: bool, slot_snap: SlotSnap
                 effects.append(f"+{tool.income_bonus_bp/100:.0f}% income/lv")
             if tool.xp_bonus_bp:
                 effects.append(f"+{tool.xp_bonus_bp/100:.0f}% xp/lv")
-            if tool.stamina_discount_bp:
-                effects.append(f"-{tool.stamina_discount_bp/100:.0f}% stamina/lv")
+            if tool.stamina_save_chance_bp:
+                effects.append(f"+{tool.stamina_save_chance_bp/100:.2f}% stamina-save chance/lv")
             effects_txt = ", ".join(effects) if effects else "starter benefits"
             lines.append(f"{marker} **{tool.name}** • Lv {lvl}\nCost: **{fmt_int(tool.cost * (lvl + 1))}** • {effects_txt}\n{tool.description}")
         embed.add_field(name="Tools & Upgrades", value=_join_lines_with_limit(lines), inline=False)

@@ -26,7 +26,7 @@ class ToolDefinition:
     cost: int
     income_bonus_bp: int = 0
     xp_bonus_bp: int = 0
-    stamina_discount_bp: int = 0
+    stamina_save_chance_bp: int = 0
     description: str = ""
 
 
@@ -76,12 +76,12 @@ TOOL_CATALOG: dict[str, tuple[ToolDefinition, ...]] = {
     "default": (
         ToolDefinition("kit_basic", "Basic Kit", 0, description="Standard work gear."),
         ToolDefinition("kit_refined", "Refined Kit", 750, income_bonus_bp=1200, xp_bonus_bp=600, description="Better output and cleaner reps."),
-        ToolDefinition("kit_elite", "Elite Kit", 2500, income_bonus_bp=2500, xp_bonus_bp=1200, stamina_discount_bp=800, description="Premium gear for efficient work."),
+        ToolDefinition("kit_elite", "Elite Kit", 2500, income_bonus_bp=2500, xp_bonus_bp=1200, stamina_save_chance_bp=225, description="Premium gear that can preserve stamina on a shift."),
     ),
     "bounty_hunter": (
         ToolDefinition("tracker_pad", "Tracker Pad", 0, description="Baseline intel package."),
         ToolDefinition("target_scope", "Target Scope", 1400, income_bonus_bp=1500, xp_bonus_bp=700, description="Boosts contract precision and pay."),
-        ToolDefinition("hunter_rig", "Hunter Rig", 4200, income_bonus_bp=3000, xp_bonus_bp=1500, stamina_discount_bp=1000, description="High-end pursuit rig for elite captures."),
+        ToolDefinition("hunter_rig", "Hunter Rig", 4200, income_bonus_bp=3000, xp_bonus_bp=1500, stamina_save_chance_bp=225, description="High-end pursuit rig with a chance to preserve stamina."),
     ),
 }
 
@@ -317,7 +317,7 @@ def tool_bonus_snapshot(job_key: str, selected_tool_key: str | None, tool_levels
         return 0, 0, 0, None
     tool = defs[selected_tool_key]
     level = max(int(tool_levels.get(selected_tool_key, 0)), 0)
-    return tool.income_bonus_bp * level, tool.xp_bonus_bp * level, tool.stamina_discount_bp * level, tool.name
+    return tool.income_bonus_bp * level, tool.xp_bonus_bp * level, tool.stamina_save_chance_bp * level, tool.name
 
 
 def unlocked_perks(job_key: str, level: int) -> tuple[list[PerkDefinition], list[PerkDefinition]]:
@@ -344,10 +344,9 @@ def income_range_for(job_key: str, level: int, prestige: int, income_bonus_bp: i
     return lo, hi
 
 
-def stamina_cost_preview(job_key: str, level: int, prestige: int, stamina_discount_bp: int) -> int:
+def stamina_cost_preview(job_key: str, level: int, prestige: int) -> int:
     d = JOB_DEFS[job_key]
-    base = stamina_cost_for_work(job_level=level, prestige=prestige, category=d.category)
-    return max((base * (10_000 - stamina_discount_bp)) // 10_000, 1)
+    return stamina_cost_for_work(job_level=level, prestige=prestige, category=d.category)
 
 
 def prestige_preview(job_key: str, progress: SlotProgress) -> tuple[int, int, int]:
