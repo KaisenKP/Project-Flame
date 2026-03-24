@@ -15,6 +15,7 @@ MAX_JOB_HUB_SLOTS = 3
 DEFAULT_UNLOCKED_SLOTS = 2
 VIP_UNLOCKED_SLOTS = 3
 JOB_HUB_SWITCH_COOLDOWN_SECONDS = 30
+MAX_TOOL_STAMINA_SAVE_CHANCE_BP = 9_500
 
 log = logging.getLogger(__name__)
 
@@ -374,7 +375,9 @@ def tool_bonus_snapshot(job_key: str, selected_tool_key: str | None, tool_levels
         return 0, 0, 0, None
     tool = defs[selected_tool_key]
     level = max(int(tool_levels.get(selected_tool_key, 0)), 0)
-    return tool.income_bonus_bp * level, tool.xp_bonus_bp * level, tool.stamina_save_chance_bp * level, tool.name
+    stamina_save_chance_bp = tool.stamina_save_chance_bp * level
+    stamina_save_chance_bp = min(max(int(stamina_save_chance_bp), 0), MAX_TOOL_STAMINA_SAVE_CHANCE_BP)
+    return tool.income_bonus_bp * level, tool.xp_bonus_bp * level, stamina_save_chance_bp, tool.name
 
 
 def unlocked_perks(job_key: str, level: int) -> tuple[list[PerkDefinition], list[PerkDefinition]]:

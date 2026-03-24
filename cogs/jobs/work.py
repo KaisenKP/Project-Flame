@@ -53,6 +53,7 @@ from services.jobs_core import (
     tier_for_category,
 )
 from services.job_hub import (
+    MAX_TOOL_STAMINA_SAVE_CHANCE_BP,
     award_slot_job_xp,
     buy_or_upgrade_tool,
     event_defs_for,
@@ -514,7 +515,7 @@ class WorkCog(commands.Cog):
                     slot_snap.selected_tool_key,
                     slot_snap.tool_levels,
                 )
-                tool_stamina_save_chance_bp = clamp_int(int(tool_stamina_save_chance_bp), 0, 10_000)
+                tool_stamina_save_chance_bp = clamp_int(int(tool_stamina_save_chance_bp), 0, MAX_TOOL_STAMINA_SAVE_CHANCE_BP)
                 job_effects = JobEffects(
                     payout_bonus_bp=income_tool_bp,
                     fail_reduction_bp=0,
