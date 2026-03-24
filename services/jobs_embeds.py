@@ -5,6 +5,7 @@ from typing import Optional
 import discord
 
 from services.job_hub import (
+    MAX_TOOL_STAMINA_SAVE_CHANCE_BP,
     SlotSnapshot,
     income_range_for,
     perk_defs_for,
@@ -78,7 +79,7 @@ def make_job_hub_embed(*, user: discord.abc.User, vip: bool, slot_snap: SlotSnap
     progress = slot_snap.progress
     assert progress is not None
     income_bp, xp_bp, stamina_save_chance_bp, tool_name = tool_bonus_snapshot(slot_snap.job_key, slot_snap.selected_tool_key, slot_snap.tool_levels)
-    stamina_save_chance_bp = clamp_int(int(stamina_save_chance_bp), 0, 10_000)
+    stamina_save_chance_bp = clamp_int(int(stamina_save_chance_bp), 0, MAX_TOOL_STAMINA_SAVE_CHANCE_BP)
     lo, hi = income_range_for(slot_snap.job_key, progress.level, progress.prestige, income_bp)
     stamina_cost = stamina_cost_preview(slot_snap.job_key, progress.level, progress.prestige)
     unlocked, locked = unlocked_perks(slot_snap.job_key, progress.level)
