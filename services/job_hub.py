@@ -24,6 +24,7 @@ class ToolDefinition:
     key: str
     name: str
     cost: int
+    required_prestige: int = 0
     income_bonus_bp: int = 0
     xp_bonus_bp: int = 0
     stamina_save_chance_bp: int = 0
@@ -76,12 +77,37 @@ TOOL_CATALOG: dict[str, tuple[ToolDefinition, ...]] = {
     "default": (
         ToolDefinition("kit_basic", "Basic Kit", 0, description="Standard work gear."),
         ToolDefinition("kit_refined", "Refined Kit", 750, income_bonus_bp=1200, xp_bonus_bp=600, description="Better output and cleaner reps."),
-        ToolDefinition("kit_elite", "Elite Kit", 2500, income_bonus_bp=2500, xp_bonus_bp=1200, stamina_save_chance_bp=225, description="Premium gear that can preserve stamina on a shift."),
+        ToolDefinition("kit_elite", "Elite Kit", 2500, required_prestige=3, income_bonus_bp=2500, xp_bonus_bp=1200, stamina_save_chance_bp=225, description="Premium gear that can preserve stamina on a shift. Unlocks at Prestige 3."),
     ),
     "bounty_hunter": (
         ToolDefinition("tracker_pad", "Tracker Pad", 0, description="Baseline intel package."),
         ToolDefinition("target_scope", "Target Scope", 1400, income_bonus_bp=1500, xp_bonus_bp=700, description="Boosts contract precision and pay."),
-        ToolDefinition("hunter_rig", "Hunter Rig", 4200, income_bonus_bp=3000, xp_bonus_bp=1500, stamina_save_chance_bp=225, description="High-end pursuit rig with a chance to preserve stamina."),
+        ToolDefinition("hunter_rig", "Hunter Rig", 4200, required_prestige=3, income_bonus_bp=3000, xp_bonus_bp=1500, stamina_save_chance_bp=225, description="High-end pursuit rig with a chance to preserve stamina. Unlocks at Prestige 3."),
+    ),
+    "artifact_hunter": (
+        ToolDefinition("relic_pouch", "Relic Pouch", 0, description="Organizes fragments for steady appraisal."),
+        ToolDefinition("survey_lens", "Survey Lens", 3200, income_bonus_bp=1600, xp_bonus_bp=800, description="Enhances signatures and raises clean-find rates."),
+        ToolDefinition("chrono_resonator", "Chrono Resonator", 9500, required_prestige=3, income_bonus_bp=3200, xp_bonus_bp=1600, stamina_save_chance_bp=250, description="Temporal resonance suite for elite digs. Unlocks at Prestige 3."),
+    ),
+    "drug_lord": (
+        ToolDefinition("street_ledger", "Street Ledger", 0, description="Tracks routes and keeps operations tight."),
+        ToolDefinition("supply_network", "Supply Network Console", 3600, income_bonus_bp=1700, xp_bonus_bp=850, description="Optimizes drops for stronger margins."),
+        ToolDefinition("shadow_syndicate", "Shadow Syndicate Grid", 10200, required_prestige=3, income_bonus_bp=3300, xp_bonus_bp=1650, stamina_save_chance_bp=250, description="High-risk command network with elite upside. Unlocks at Prestige 3."),
+    ),
+    "dragon_slayer": (
+        ToolDefinition("ember_shield", "Ember Shield", 0, description="Basic anti-flame defense kit."),
+        ToolDefinition("wyrm_harpoon", "Wyrm Harpoon", 3800, income_bonus_bp=1750, xp_bonus_bp=900, description="Pins larger targets for better contracts."),
+        ToolDefinition("aether_lance", "Aether Lance", 10800, required_prestige=3, income_bonus_bp=3400, xp_bonus_bp=1700, stamina_save_chance_bp=275, description="Endgame slayer weapon tuned for apex hunts. Unlocks at Prestige 3."),
+    ),
+    "business_ceo": (
+        ToolDefinition("board_brief", "Board Brief", 0, description="Core analytics for safer quarter planning."),
+        ToolDefinition("market_terminal", "Market Terminal", 4000, income_bonus_bp=1800, xp_bonus_bp=900, description="Realtime signals to push reliable gains."),
+        ToolDefinition("quant_command", "Quant Command Suite", 11500, required_prestige=3, income_bonus_bp=3500, xp_bonus_bp=1750, stamina_save_chance_bp=275, description="Institutional-grade execution stack. Unlocks at Prestige 3."),
+    ),
+    "space_miner": (
+        ToolDefinition("ore_scanner", "Ore Scanner", 0, description="Baseline asteroid composition sweeps."),
+        ToolDefinition("plasma_cutter", "Plasma Cutter Mk II", 4200, income_bonus_bp=1850, xp_bonus_bp=950, description="Faster extractions with cleaner yields."),
+        ToolDefinition("singularity_rig", "Singularity Rig", 12000, required_prestige=3, income_bonus_bp=3600, xp_bonus_bp=1800, stamina_save_chance_bp=300, description="Top-tier rig for deep-void harvests. Unlocks at Prestige 3."),
     ),
 }
 
@@ -147,6 +173,24 @@ def event_defs_for(job_key: str | None) -> tuple[RandomEventDefinition, ...]:
 def xp_needed(job_key: str, level: int, prestige: int) -> int:
     job = JOB_DEFS[job_key]
     return xp_needed_for_level(tier=tier_for_category(job.category), prestige=prestige, level=level)
+
+
+LEVEL_100_PRESTIGE_COSTS: tuple[int, int, int] = (10_000, 50_000, 100_000)
+LEVEL_100_JOB_KEYS: frozenset[str] = frozenset({
+    "artifact_hunter",
+    "drug_lord",
+    "dragon_slayer",
+    "business_ceo",
+    "space_miner",
+})
+
+
+def prestige_cost_for_job(job_key: str, current_prestige: int) -> int:
+    p = max(int(current_prestige), 0)
+    if (job_key or "").strip().lower() in LEVEL_100_JOB_KEYS:
+        idx = min(p, len(LEVEL_100_PRESTIGE_COSTS) - 1)
+        return LEVEL_100_PRESTIGE_COSTS[idx]
+    return prestige_cost(p)
 
 
 async def ensure_job_hub_slots(session, *, guild_id: int, user_id: int, vip: bool) -> list[UserJobHubSlotRow]:
@@ -292,6 +336,9 @@ async def get_or_create_tool_row(session, *, guild_id: int, user_id: int, slot_i
 async def buy_or_upgrade_tool(session, *, guild_id: int, user_id: int, slot_index: int, job_key: str, tool_key: str) -> tuple[bool, str]:
     defs = {tool.key: tool for tool in tool_defs_for(job_key)}
     tool = defs[tool_key]
+    progress = await get_or_create_progress(session, guild_id=guild_id, user_id=user_id, slot_index=slot_index, job_key=job_key)
+    if int(progress.prestige) < int(tool.required_prestige):
+        return False, f"🔒 **{tool.name}** unlocks at **Prestige {tool.required_prestige}**."
     row = await get_or_create_tool_row(session, guild_id=guild_id, user_id=user_id, slot_index=slot_index, job_key=job_key, tool_key=tool_key)
     next_level = row.level + 1
     cost = tool.cost * next_level
@@ -308,6 +355,16 @@ async def buy_or_upgrade_tool(session, *, guild_id: int, user_id: int, slot_inde
 
 async def set_selected_tool(session, *, guild_id: int, user_id: int, vip: bool, slot_index: int, tool_key: str) -> None:
     rows = await ensure_job_hub_slots(session, guild_id=guild_id, user_id=user_id, vip=vip)
+    slot = rows[slot_index]
+    if not slot.job_key:
+        raise ValueError("no_job")
+    defs = {tool.key: tool for tool in tool_defs_for(slot.job_key)}
+    tool = defs.get(tool_key)
+    if tool is None:
+        raise ValueError("unknown_tool")
+    progress = await get_or_create_progress(session, guild_id=guild_id, user_id=user_id, slot_index=slot_index, job_key=slot.job_key)
+    if int(progress.prestige) < int(tool.required_prestige):
+        raise ValueError("tool_locked")
     rows[slot_index].selected_tool_key = tool_key
 
 
@@ -352,7 +409,7 @@ def stamina_cost_preview(job_key: str, level: int, prestige: int) -> int:
 def prestige_preview(job_key: str, progress: SlotProgress) -> tuple[int, int, int]:
     current_mult = max(progress.prestige, 0) + 1
     next_mult = current_mult + 1
-    cost = prestige_cost(progress.prestige)
+    cost = prestige_cost_for_job(job_key, progress.prestige)
     return current_mult, next_mult, cost
 
 
@@ -369,7 +426,7 @@ async def prestige_slot(
     cap = level_cap_for(progress.prestige)
     if progress.level < cap:
         return False, f"Reach **Lv {cap}** before prestiging this slot.", None
-    cost = prestige_cost(progress.prestige)
+    cost = prestige_cost_for_job(job_key, progress.prestige)
     wallet = await get_wallet(session, guild_id=guild_id, user_id=user_id)
     if int(wallet.silver) < cost:
         return False, f"Need **{fmt_int(cost)}** Silver to prestige this slot.", None
