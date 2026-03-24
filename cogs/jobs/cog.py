@@ -12,7 +12,8 @@ from discord.app_commands import checks
 from discord.ext import commands
 from sqlalchemy import select
 
-from db.models import UserRow
+from db.models import UserAchievementRow, UserRow
+from services.achievements import prune_invalid_achievements
 from services.db import sessions
 from services.job_hub import ensure_job_hub_slots, get_or_create_progress, get_slot_snapshot, set_slot_progress
 from services.job_progression import state_from_total_xp, total_xp_from_state
@@ -345,6 +346,65 @@ class JobsCog(commands.Cog):
             vip=vip,
             section="tools",
         )
+
+    @app_commands.command(name="achievementfix", description="Admin: remove achievements users no longer qualify for.")
+    @app_commands.describe(user="Optional specific user to repair. Leave blank to scan everyone with achievements.")
+    @checks.has_permissions(manage_guild=True)
+    async def achievementfix(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
+        if interaction.guild is None:
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+
+        guild_id = int(interaction.guild.id)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                if user is not None:
+                    target_user_ids = [int(user.id)]
+                else:
+                    target_user_ids = list(
+                        await session.scalars(
+                            select(UserAchievementRow.user_id)
+                            .where(UserAchievementRow.guild_id == guild_id)
+                            .distinct()
+                            .order_by(UserAchievementRow.user_id.asc())
+                        )
+                    )
+
+                users_scanned = 0
+                total_removed = 0
+                touched_users = 0
+                details: list[str] = []
+
+                for raw_user_id in target_user_ids:
+                    user_id = int(raw_user_id)
+                    removed = await prune_invalid_achievements(
+                        session,
+                        guild_id=guild_id,
+                        user_id=user_id,
+                    )
+                    users_scanned += 1
+                    if not removed:
+                        continue
+                    touched_users += 1
+                    total_removed += len(removed)
+                    if len(details) < 20:
+                        details.append(f"• <@{user_id}>: removed **{len(removed)}** invalid achievement(s)")
+
+        lines = [
+            "✅ Achievement cleanup finished.",
+            f"• Users scanned: **{users_scanned:,}**",
+            f"• Users updated: **{touched_users:,}**",
+            f"• Invalid achievements removed: **{total_removed:,}**",
+            "• Only achievements whose unlock requirements are currently NOT met were removed.",
+        ]
+        if details:
+            lines.append("")
+            lines.append("Sample updates:")
+            lines.extend(details)
+
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     @app_commands.command(name="fixjobxp", description="Admin: scan /work results and repair job progression for a user.")
     @app_commands.describe(
