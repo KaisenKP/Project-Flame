@@ -33,7 +33,13 @@ class JobPicker(Select):
             if job.vip_only and not vip:
                 continue
             options.append(discord.SelectOption(label=job.name, value=job.key, description=f"Unlock Lv {unlock_level_for(job.key, job.category)}"))
-        super().__init__(placeholder=f"Assign a job to {slot_label(slot_index)}", min_values=1, max_values=1, options=options[:25])
+        super().__init__(
+            placeholder=f"Assign a job to {slot_label(slot_index)}",
+            min_values=1,
+            max_values=1,
+            options=options[:25],
+            custom_id=f"jobhub:pick:{slot_index}",
+        )
 
     async def callback(self, interaction: discord.Interaction):
         view: JobHubView = self.view  # type: ignore[assignment]
@@ -45,7 +51,13 @@ class ToolPicker(Select):
         self.slot_index = slot_index
         self.job_key = job_key
         options = [discord.SelectOption(label=tool.name, value=tool.key, description=tool.description[:100] or tool.name) for tool in tool_defs_for(job_key)]
-        super().__init__(placeholder="Select an active tool", min_values=1, max_values=1, options=options)
+        super().__init__(
+            placeholder="Select an active tool",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id=f"jobhub:tool:{slot_index}:{job_key}",
+        )
 
     async def callback(self, interaction: discord.Interaction):
         view: JobHubView = self.view  # type: ignore[assignment]
@@ -84,24 +96,34 @@ class JobHubView(discord.ui.View):
 
     def _build_static_buttons(self) -> None:
         for idx in range(MAX_JOB_HUB_SLOTS):
-            btn = Button(label=f"Slot {idx+1}", style=discord.ButtonStyle.primary if idx == self.selected_slot else discord.ButtonStyle.secondary, row=0)
+            btn = Button(
+                label=f"Slot {idx+1}",
+                style=discord.ButtonStyle.primary if idx == self.selected_slot else discord.ButtonStyle.secondary,
+                row=0,
+                custom_id=f"jobhub:slot:{idx}",
+            )
             btn.callback = self._make_slot_callback(idx)
             self.add_item(btn)
 
         for label, section, row in (("Overview", "overview", 1), ("Switch Job", "switch", 1), ("Tools & Upgrades", "tools", 1), ("Perks", "perks", 2), ("Prestige", "prestige", 2)):
-            btn = Button(label=label, style=discord.ButtonStyle.success if self.section == section else discord.ButtonStyle.secondary, row=row)
+            btn = Button(
+                label=label,
+                style=discord.ButtonStyle.success if self.section == section else discord.ButtonStyle.secondary,
+                row=row,
+                custom_id=f"jobhub:section:{section}",
+            )
             btn.callback = self._make_section_callback(section)
             self.add_item(btn)
 
-        work_btn = Button(label="Work", style=discord.ButtonStyle.success, emoji="💼", row=3)
+        work_btn = Button(label="Work", style=discord.ButtonStyle.success, emoji="💼", row=3, custom_id="jobhub:work")
         work_btn.callback = self.work_now
         self.add_item(work_btn)
 
-        upgrade_btn = Button(label="Upgrade Selected Tool", style=discord.ButtonStyle.primary, row=3)
+        upgrade_btn = Button(label="Upgrade Selected Tool", style=discord.ButtonStyle.primary, row=3, custom_id="jobhub:upgrade")
         upgrade_btn.callback = self.upgrade_tool
         self.add_item(upgrade_btn)
 
-        prestige_btn = Button(label="Prestige Slot", style=discord.ButtonStyle.danger, row=3)
+        prestige_btn = Button(label="Prestige Slot", style=discord.ButtonStyle.danger, row=3, custom_id="jobhub:prestige")
         prestige_btn.callback = self.prestige_btn
         self.add_item(prestige_btn)
 
