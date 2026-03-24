@@ -155,6 +155,127 @@ class ProfileEditView(discord.ui.View):
         self.stop()
 
 
+class AchievementDashboardView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        owner_id: int,
+        target_name: str,
+        unlocked_count: int,
+        total: int,
+        unlocked_lines: list[str],
+        progress_lines: list[str],
+        timeout: float = 180.0,
+    ):
+        super().__init__(timeout=timeout)
+        self.owner_id = owner_id
+        self.target_name = target_name
+        self.unlocked_count = unlocked_count
+        self.total = total
+        self.unlocked_lines = unlocked_lines
+        self.progress_lines = progress_lines
+        self.mode = "progress"
+        self.page = 0
+        self.page_size = 4
+        self.message: Optional[discord.Message] = None
+        self._refresh_button_state()
+
+    def _active_lines(self) -> list[str]:
+        return self.progress_lines if self.mode == "progress" else self.unlocked_lines
+
+    def _page_count(self) -> int:
+        lines = self._active_lines()
+        return max(1, (len(lines) + self.page_size - 1) // self.page_size)
+
+    def _refresh_button_state(self) -> None:
+        max_page = self._page_count() - 1
+        if self.page > max_page:
+            self.page = max_page
+        self.prev_page.disabled = self.page <= 0
+        self.next_page.disabled = self.page >= max_page
+        self.show_progress.style = discord.ButtonStyle.primary if self.mode == "progress" else discord.ButtonStyle.secondary
+        self.show_unlocked.style = discord.ButtonStyle.success if self.mode == "unlocked" else discord.ButtonStyle.secondary
+
+    def build_embed(self) -> discord.Embed:
+        completion_pct = (self.unlocked_count / self.total * 100.0) if self.total else 0.0
+        lines = self._active_lines()
+        start = self.page * self.page_size
+        end = start + self.page_size
+        page_items = lines[start:end]
+        page_label = f"Page {self.page + 1}/{self._page_count()}"
+
+        if self.mode == "progress":
+            title = f"🎯 {self.target_name}'s Achievement Roadmap"
+            section_name = f"Next Up • {page_label}"
+            section_value = "\n\n".join(page_items) if page_items else "🏁 All caught up. Every tracked milestone is complete."
+        else:
+            title = f"🏆 {self.target_name}'s Achievement Showcase"
+            section_name = f"Unlocked • {page_label}"
+            section_value = "\n".join(page_items) if page_items else "🫥 No achievements unlocked yet."
+
+        embed = discord.Embed(
+            title=title,
+            description="Clean milestones, quick progress checks, zero clutter.",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(
+            name="Completion",
+            value=f"**{_fmt_int(self.unlocked_count)} / {_fmt_int(self.total)}** ({completion_pct:.1f}%)",
+            inline=True,
+        )
+        embed.add_field(
+            name="Momentum",
+            value=f"🚀 {_fmt_int(max(0, self.total - self.unlocked_count))} left",
+            inline=True,
+        )
+        embed.add_field(name=section_name, value=section_value, inline=False)
+        embed.set_footer(text="Buttons: 🎯 In Progress • ✅ Unlocked • ⬅️/➡️ pages")
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Only the command user can use these controls.", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
+
+    @discord.ui.button(label="🎯 In Progress", style=discord.ButtonStyle.primary, custom_id="profile:ach:progress")
+    async def show_progress(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.mode = "progress"
+        self.page = 0
+        self._refresh_button_state()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="✅ Unlocked", style=discord.ButtonStyle.secondary, custom_id="profile:ach:unlocked")
+    async def show_unlocked(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.mode = "unlocked"
+        self.page = 0
+        self._refresh_button_state()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="⬅️", style=discord.ButtonStyle.secondary, custom_id="profile:ach:prev")
+    async def prev_page(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if self.page > 0:
+            self.page -= 1
+        self._refresh_button_state()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="➡️", style=discord.ButtonStyle.secondary, custom_id="profile:ach:next")
+    async def next_page(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if self.page < self._page_count() - 1:
+            self.page += 1
+        self._refresh_button_state()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+
 class ProfileCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -272,6 +393,17 @@ class ProfileCog(commands.Cog):
 
         async with self.sessions() as session:
             async with session.begin():
+                unlocked_rows = list(
+                    (
+                        await session.scalars(
+                            select(UserAchievementRow.achievement_key).where(
+                                UserAchievementRow.guild_id == ctx.guild.id,
+                                UserAchievementRow.user_id == target.id,
+                            )
+                        )
+                    ).all()
+                )
+                unlocked_keys = {str(key) for key in unlocked_rows}
                 unlocked_count = int(
                     await session.scalar(
                         select(func.count(UserAchievementRow.id)).where(
@@ -291,7 +423,11 @@ class ProfileCog(commands.Cog):
         total = len(defs)
 
         pending_lines: list[str] = []
+        unlocked_lines: list[str] = []
         for definition in defs:
+            if definition.achievement_key in unlocked_keys:
+                unlocked_lines.append(f"{definition.icon} **{definition.name}**")
+                continue
             parsed = parse_unlock_condition(definition.unlock_condition)
             if parsed is None:
                 continue
@@ -304,39 +440,19 @@ class ProfileCog(commands.Cog):
                 f"Goal: {definition.description}\n"
                 f"Progress: `{_fmt_int(current)}/{_fmt_int(threshold)}`"
             )
-            if len(pending_lines) >= 8:
-                break
 
-        completion_pct = (unlocked_count / total * 100.0) if total else 0.0
-        embed = discord.Embed(
-            title=f"🏆 {target.display_name}'s Achievement Dashboard",
-            description=(
-                "Track your unlocks, chase your next milestones, and farm that leaderboard aura.\n"
-                "No gatekeeping, just clean goals and chaos."
-            ),
-            color=discord.Color.gold(),
+        view = AchievementDashboardView(
+            owner_id=ctx.author.id,
+            target_name=target.display_name,
+            unlocked_count=unlocked_count,
+            total=total,
+            unlocked_lines=unlocked_lines,
+            progress_lines=pending_lines,
         )
-        embed.add_field(
-            name="Completion",
-            value=f"**{_fmt_int(unlocked_count)} / {_fmt_int(total)}** unlocked ({completion_pct:.1f}%)",
-            inline=False,
-        )
-        embed.add_field(
-            name="Social Questboard",
-            value=(
-                "• Post your first selfie in <#1460859587275001866>\n"
-                "• Type your first 100 messages in <#1460856536795578443>\n"
-                "• Keep chatting to stack message and chatroom milestones"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="Your Next Unlocks",
-            value="\n\n".join(pending_lines) if pending_lines else "You are caught up. This is elite behavior.",
-            inline=False,
-        )
-        embed.set_footer(text="Tip: use /work, /business, and chat regularly to progress multiple tracks at once.")
-        await ctx.send(embed=embed)
+        embed = view.build_embed()
+        sent = await ctx.send(embed=embed, view=view)
+        if isinstance(sent, discord.Message):
+            view.message = sent
 
     async def _render_profile_card(self, *, guild_id: int, target: discord.Member) -> Optional[bytes]:
         user_id = target.id
