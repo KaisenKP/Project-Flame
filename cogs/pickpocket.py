@@ -114,6 +114,9 @@ def _cooldown_text(seconds_left: int) -> str:
     return f"{(s + 3599) // 3600}h"
 
 
+def _clean_discord_kwargs(**kwargs):
+    return {k: v for k, v in kwargs.items() if v is not None}
+
 def _compute_percent_steal(balance: int) -> Optional[RobberyOutcome]:
     current_balance = max(int(balance), 0)
     percent = random.randint(2, 25)
@@ -479,7 +482,7 @@ class PickpocketCog(commands.Cog):
         if followup_embed is None:
             followup_embed = self._failure_embed(thief=thief, target=target, line="The wallet math broke. Somehow.")
 
-        sent = await interaction.followup.send(embed=followup_embed, view=followup_view)
+        sent = await interaction.followup.send(**_clean_discord_kwargs(embed=followup_embed, view=followup_view))
         if followup_view is not None:
             followup_view.message = sent
         if reverse_embed is not None:
