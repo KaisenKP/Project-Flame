@@ -148,29 +148,67 @@ class ProfileCardRenderer:
         self._rounded_rect(draw, (372, 382, 1020, 560), 24, fill=(14, 22, 38, 190))
 
         draw.text((404, 404), "WALLET", fill=(148, 181, 255), font=self._font(21, bold=True))
-        draw.text((404, 438), f"Silver  {payload.silver:,}", fill=(255, 255, 255), font=self._font(30, bold=True))
-        draw.text((404, 476), f"Diamonds  {payload.diamonds:,}", fill=(196, 236, 255), font=self._font(28, bold=False))
+        wallet_right = 638
+        self._draw_wallet_row(
+            draw,
+            x=404,
+            y=434,
+            max_right=wallet_right,
+            label="Silver",
+            value=self._format_compact(payload.silver),
+            accent=(230, 236, 255),
+            pill=(70, 95, 170, 214),
+            preferred_size=34,
+            min_size=20,
+            bold=True,
+        )
+        self._draw_wallet_row(
+            draw,
+            x=404,
+            y=474,
+            max_right=wallet_right,
+            label="Diamonds",
+            value=self._format_compact(payload.diamonds),
+            accent=(196, 236, 255),
+            pill=(61, 127, 166, 214),
+            preferred_size=30,
+            min_size=19,
+            bold=False,
+        )
+
+        draw.line((640, 404, 640, 534), fill=(87, 118, 179, 170), width=2)
 
         draw.text((648, 404), "STAMINA", fill=(148, 181, 255), font=self._font(21, bold=True))
+        stamina_ratio = 0.0 if payload.stamina_max <= 0 else max(0.0, min(payload.stamina_current / payload.stamina_max, 1.0))
+        stamina_pct = int(round(stamina_ratio * 100))
         draw.text(
             (648, 442),
             f"{payload.stamina_current:,}/{payload.stamina_max:,}",
             fill=(255, 255, 255),
             font=self._font(36, bold=True),
         )
+        draw.text((648, 474), f"{stamina_pct}% charged", fill=(173, 226, 209), font=self._font(21, bold=False))
         bar = (648, 492, 804, 516)
         self._rounded_rect(draw, bar, 10, fill=(45, 59, 88, 230))
-        stamina_ratio = 0.0 if payload.stamina_max <= 0 else max(0.0, min(payload.stamina_current / payload.stamina_max, 1.0))
         fill_w = int((bar[2] - bar[0]) * stamina_ratio)
         if fill_w > 0:
-            self._rounded_rect(draw, (bar[0], bar[1], bar[0] + fill_w, bar[3]), 10, fill=(75, 214, 164, 255))
+            if stamina_ratio < 0.25:
+                stamina_fill = (255, 138, 138, 255)
+            elif stamina_ratio < 0.6:
+                stamina_fill = (246, 200, 119, 255)
+            else:
+                stamina_fill = (75, 214, 164, 255)
+            self._rounded_rect(draw, (bar[0], bar[1], bar[0] + fill_w, bar[3]), 10, fill=stamina_fill)
 
         draw.text((828, 404), "JOBS", fill=(148, 181, 255), font=self._font(21, bold=True))
         y = 438
         if payload.jobs:
             for j in payload.jobs[:3]:
                 self._rounded_rect(draw, (820, y - 4, 1012, y + 28), 10, fill=(30, 44, 72, 225))
-                draw.text((830, y), f"S{j.slot}: {j.label}", fill=(242, 249, 255), font=self._font(21, bold=False))
+                self._rounded_rect(draw, (826, y, 856, y + 22), 8, fill=(70, 107, 185, 230))
+                draw.text((834, y + 1), f"S{j.slot}", fill=(245, 250, 255), font=self._font(17, bold=True))
+                label = self._truncate_text(f"{j.label}", self._font(20, bold=False), max_width=146)
+                draw.text((862, y), label, fill=(242, 249, 255), font=self._font(20, bold=False))
                 y += 34
         else:
             draw.text((828, y), "No job equipped", fill=(242, 249, 255), font=self._font(23, bold=False))
@@ -262,3 +300,103 @@ class ProfileCardRenderer:
         fallback = ImageFont.load_default()
         self._font_cache[key] = fallback
         return fallback
+
+    def _format_compact(self, n: int) -> str:
+        value = abs(int(n))
+        sign = "-" if int(n) < 0 else ""
+        if value >= 1_000_000_000_000:
+            return f"{sign}{value / 1_000_000_000_000:.2f}T"
+        if value >= 1_000_000_000:
+            return f"{sign}{value / 1_000_000_000:.2f}B"
+        if value >= 1_000_000:
+            return f"{sign}{value / 1_000_000:.2f}M"
+        if value >= 1_000:
+            return f"{sign}{value / 1_000:.1f}K"
+        return f"{int(n):,}"
+
+    def _text_size(self, draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont | ImageFont.ImageFont) -> tuple[int, int]:
+        x0, y0, x1, y1 = draw.textbbox((0, 0), text, font=font)
+        return max(0, x1 - x0), max(0, y1 - y0)
+
+    def _fit_font(
+        self,
+        draw: ImageDraw.ImageDraw,
+        *,
+        text: str,
+        max_width: int,
+        preferred_size: int,
+        min_size: int,
+        bold: bool,
+    ) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+        for size in range(preferred_size, min_size - 1, -1):
+            font = self._font(size, bold=bold)
+            w, _ = self._text_size(draw, text, font)
+            if w <= max_width:
+                return font
+        return self._font(min_size, bold=bold)
+
+    def _truncate_text(
+        self,
+        text: str,
+        font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+        *,
+        max_width: int,
+    ) -> str:
+        if not text:
+            return text
+        dummy = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(dummy)
+        w, _ = self._text_size(draw, text, font)
+        if w <= max_width:
+            return text
+        ellipsis = "…"
+        lo, hi = 0, len(text)
+        best = ellipsis
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            candidate = text[:mid].rstrip() + ellipsis
+            cw, _ = self._text_size(draw, candidate, font)
+            if cw <= max_width:
+                best = candidate
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        return best
+
+    def _draw_wallet_row(
+        self,
+        draw: ImageDraw.ImageDraw,
+        *,
+        x: int,
+        y: int,
+        max_right: int,
+        label: str,
+        value: str,
+        accent: tuple[int, int, int],
+        pill: tuple[int, int, int, int],
+        preferred_size: int,
+        min_size: int,
+        bold: bool,
+    ) -> None:
+        label_font = self._font(20, bold=True)
+        label_text = f"{label}"
+        value_text = value
+        label_w, _ = self._text_size(draw, label_text, label_font)
+        value_max_w = max(24, max_right - (x + label_w + 34))
+        value_font = self._fit_font(
+            draw,
+            text=value_text,
+            max_width=value_max_w,
+            preferred_size=preferred_size,
+            min_size=min_size,
+            bold=bold,
+        )
+        value_w, value_h = self._text_size(draw, value_text, value_font)
+        value_x = max(x + label_w + 24, max_right - value_w)
+        pill_left = x
+        pill_top = y + 1
+        pill_right = x + 12
+        pill_bottom = y + 29
+        self._rounded_rect(draw, (pill_left, pill_top, pill_right, pill_bottom), 6, fill=pill)
+        draw.text((x + 18, y), label_text, fill=accent, font=label_font)
+        draw.text((value_x, y + max(0, (28 - value_h) // 2)), value_text, fill=(255, 255, 255), font=value_font)
