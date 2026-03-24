@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -243,6 +244,15 @@ class JobHubView(discord.ui.View):
                     self.user_id,
                     getattr(interaction.message, "id", None),
                     exc_info=True,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception(
+                    "Job Hub %s edit raised unexpected error for user_id=%s message_id=%s",
+                    label,
+                    self.user_id,
+                    getattr(interaction.message, "id", None),
                 )
 
         stale_message = "That Job Hub is stale. Please run `/job` to open a fresh panel."
