@@ -19,6 +19,31 @@ from services.jobs_core import JOB_DEFS, JOB_SWITCH_COST, JobCategory, category_
 from services.jobs_endgame import presentation_for
 
 VIP_WORK_COOLDOWN_SECONDS = 10
+EMBED_FIELD_VALUE_LIMIT = 1024
+
+
+def _join_lines_with_limit(lines: list[str], *, max_len: int = EMBED_FIELD_VALUE_LIMIT) -> str:
+    if not lines:
+        return "—"
+    accepted: list[str] = []
+    used = 0
+    hidden = 0
+    for line in lines:
+        piece = line if not accepted else f"\n{line}"
+        if used + len(piece) <= max_len:
+            accepted.append(line)
+            used += len(piece)
+            continue
+        hidden += 1
+    if hidden:
+        suffix = f"\n… and {hidden} more."
+        if used + len(suffix) <= max_len:
+            accepted.append(f"… and {hidden} more.")
+        elif accepted:
+            last = accepted[-1]
+            trim_to = max(1, len(last) - (len(suffix) - (max_len - used)))
+            accepted[-1] = last[:trim_to].rstrip() + "…"
+    return "\n".join(accepted)[:max_len]
 
 
 def work_color(category: JobCategory) -> discord.Color:
@@ -88,9 +113,9 @@ def make_job_hub_embed(*, user: discord.abc.User, vip: bool, slot_snap: SlotSnap
             overview_lines.append(f"• Risk: **{presentation.risk_level}**")
             if presentation.can_trigger_danger:
                 overview_lines.append("• Danger Encounters: **Yes**")
-        embed.add_field(name="Overview", value="\n".join(overview_lines), inline=False)
+        embed.add_field(name="Overview", value=_join_lines_with_limit(overview_lines), inline=False)
         embed.add_field(name="Economy Fit", value=f"• Income range: **{fmt_int(lo)} - {fmt_int(hi)} Silver**\n• Stamina cost: **{fmt_int(stamina_cost)}**\n• Switch cost: **{fmt_int(JOB_SWITCH_COST[d.category])} Silver**", inline=True)
-        embed.add_field(name="Buffs & Multipliers", value="\n".join(buffs), inline=True)
+        embed.add_field(name="Buffs & Multipliers", value=_join_lines_with_limit(buffs), inline=True)
         if presentation is not None:
             embed.add_field(name="Capstone Identity", value=f"• {presentation.perk_summary}\n• {presentation.danger_summary}", inline=False)
     elif section == "tools":
@@ -107,12 +132,12 @@ def make_job_hub_embed(*, user: discord.abc.User, vip: bool, slot_snap: SlotSnap
                 effects.append(f"-{tool.stamina_discount_bp/100:.0f}% stamina/lv")
             effects_txt = ", ".join(effects) if effects else "starter benefits"
             lines.append(f"{marker} **{tool.name}** • Lv {lvl}\nCost: **{fmt_int(tool.cost * (lvl + 1))}** • {effects_txt}\n{tool.description}")
-        embed.add_field(name="Tools & Upgrades", value="\n\n".join(lines), inline=False)
+        embed.add_field(name="Tools & Upgrades", value=_join_lines_with_limit(lines), inline=False)
     elif section == "perks":
         unlocked_lines = [f"✅ **{perk.name}** — {perk.description}" for perk in unlocked] or ["No perks unlocked yet."]
         locked_lines = [f"🔒 **{perk.name}** at **Lv {perk.level_required}** — {perk.description}" for perk in locked] or ["All perks unlocked."]
-        embed.add_field(name="Unlocked", value="\n".join(unlocked_lines), inline=False)
-        embed.add_field(name="Locked", value="\n".join(locked_lines), inline=False)
+        embed.add_field(name="Unlocked", value=_join_lines_with_limit(unlocked_lines), inline=False)
+        embed.add_field(name="Locked", value=_join_lines_with_limit(locked_lines), inline=False)
         if presentation is not None:
             embed.add_field(name="Job Identity", value=f"• {presentation.perk_summary}\n• {presentation.danger_summary}", inline=False)
     elif section == "prestige":
@@ -126,7 +151,7 @@ def make_job_hub_embed(*, user: discord.abc.User, vip: bool, slot_snap: SlotSnap
             vip_lock = " • VIP" if job.vip_only else ""
             selected = "✅ " if job.key == slot_snap.job_key else ""
             lines.append(f"{selected}**{job.name}** — unlock **Lv {unlock}** • switch **{fmt_int(JOB_SWITCH_COST[job.category])}**{vip_lock}")
-        embed.add_field(name="Available Jobs", value="\n".join(lines[:25]), inline=False)
+        embed.add_field(name="Available Jobs", value=_join_lines_with_limit(lines[:25]), inline=False)
 
     embed.set_footer(text="Buttons: slots • overview • switch • tools • perks • prestige")
     return embed
