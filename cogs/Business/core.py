@@ -1791,6 +1791,7 @@ async def upgrade_business(
     user_id: int,
     business_key: str,
     quantity: int = 1,
+    include_snapshots: bool = True,
 ) -> BusinessActionResult:
     defn = _def_for_key(business_key)
     if defn is None:
@@ -1857,11 +1858,16 @@ async def upgrade_business(
         ownership.total_spent = int(ownership.total_spent or 0) + affordable_cost
 
     await session.flush()
-    hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
-    manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    hub = None
+    manage = None
+    if include_snapshots:
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
 
     new_level, new_prestige = await _resolve_effective_business_progress(session, ownership=ownership)
     new_visible_level = visible_level_for(new_level)
+    if manage is None:
+        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
     new_hourly = int(manage.hourly_profit) if manage is not None else old_hourly
     new_runtime_hours = int(manage.total_runtime_hours) if manage is not None else old_runtime_hours
     requested_text = f"x{requested_quantity}" if requested_quantity > 1 else "x1"
