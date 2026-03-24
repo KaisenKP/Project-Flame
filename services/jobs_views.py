@@ -282,6 +282,16 @@ class JobHubView(discord.ui.View):
             )
 
     async def refresh(self, interaction: discord.Interaction, notice: Optional[str] = None) -> None:
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.defer()
+            except discord.HTTPException:
+                log.warning(
+                    "Job Hub refresh defer failed for user_id=%s message_id=%s",
+                    self.user_id,
+                    getattr(interaction.message, "id", None),
+                    exc_info=True,
+                )
         async with self.sessionmaker() as session:
             async with session.begin():
                 slot_snap = await get_slot_snapshot(session, guild_id=self.guild_id, user_id=self.user_id, vip=self.vip, slot_index=self.selected_slot)
