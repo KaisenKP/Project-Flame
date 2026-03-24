@@ -125,6 +125,7 @@ class _GuildState:
     tag_index: int = 0
     last_api_at: float = 0.0
     backoff_until: float = 0.0
+    last_cleanup_at: float = 0.0
 
 
 class LeaderboardsCog(commands.Cog):
@@ -156,6 +157,10 @@ class LeaderboardsCog(commands.Cog):
     # Backoff on 429
     BACKOFF_MIN = 8.0
     BACKOFF_MAX = 25.0
+
+    # Periodically clean leaderboard channel so it never accumulates clutter again
+    CLEANUP_INTERVAL_SECONDS = 60.0 * 60.0
+    CLEANUP_HISTORY_LIMIT = 500
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -275,6 +280,19 @@ class LeaderboardsCog(commands.Cog):
                 )
         self._msg_map.pop((int(guild_id), str(tag)), None)
 
+    async def _clear_map_guild(self, guild_id: int) -> None:
+        await self._ensure_tables()
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                await session.execute(
+                    text(f"DELETE FROM {self.TABLE_MAP} WHERE guild_id=:gid"),
+                    {"gid": int(guild_id)},
+                )
+
+        gid = int(guild_id)
+        for tag in self._tags():
+            self._msg_map.pop((gid, tag), None)
+
     def _message_has_tag(self, message: discord.Message, tag: str) -> bool:
         if not message.embeds:
             return False
@@ -282,6 +300,20 @@ class LeaderboardsCog(commands.Cog):
         if not e.footer or not e.footer.text:
             return False
         return f"{self.FOOTER_TAG_PREFIX}{tag}" in e.footer.text
+
+    def _extract_footer_tag(self, message: discord.Message) -> Optional[str]:
+        if not message.embeds:
+            return None
+        e = message.embeds[0]
+        if not e.footer or not e.footer.text:
+            return None
+        footer = str(e.footer.text)
+        if self.FOOTER_TAG_PREFIX not in footer:
+            return None
+        tag = footer.split(self.FOOTER_TAG_PREFIX, 1)[1].strip()
+        if tag not in self._tags():
+            return None
+        return tag
 
     async def _get_channel(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
         ch = guild.get_channel(self.LEADERBOARD_CHANNEL_ID)
@@ -340,6 +372,83 @@ class LeaderboardsCog(commands.Cog):
             except Exception:
                 return False
         return False
+
+    async def _safe_delete(self, msg: discord.Message) -> bool:
+        backoff = 0.0
+        for _ in range(4):
+            try:
+                if backoff > 0:
+                    await asyncio.sleep(backoff)
+                await msg.delete()
+                return True
+            except discord.NotFound:
+                return True
+            except discord.HTTPException as e:
+                if e.status == 429:
+                    retry_after = getattr(e, "retry_after", None)
+                    if retry_after is None:
+                        retry_after = random.uniform(self.BACKOFF_MIN, self.BACKOFF_MAX)
+                    backoff = float(retry_after) + random.uniform(0.25, 0.9)
+                    continue
+                return False
+            except Exception:
+                return False
+        return False
+
+    async def _cleanup_channel_messages(self, guild: discord.Guild, ch: discord.TextChannel, *, full_reset: bool) -> int:
+        tags = set(self._tags())
+        tagged_by_tag: dict[str, list[discord.Message]] = {tag: [] for tag in tags}
+        clutter: list[discord.Message] = []
+        deleted = 0
+
+        history_limit = None if full_reset else int(self.CLEANUP_HISTORY_LIMIT)
+        async for msg in ch.history(limit=history_limit):
+            tag = self._extract_footer_tag(msg)
+            if tag and tag in tags:
+                tagged_by_tag[tag].append(msg)
+            else:
+                clutter.append(msg)
+
+        if full_reset:
+            await self._clear_map_guild(guild.id)
+            for msg in clutter:
+                if await self._safe_delete(msg):
+                    deleted += 1
+                await asyncio.sleep(0.25)
+            for dupes in tagged_by_tag.values():
+                for msg in dupes:
+                    if await self._safe_delete(msg):
+                        deleted += 1
+                    await asyncio.sleep(0.25)
+            return deleted
+
+        keep_ids: set[int] = set()
+        for tag in tags:
+            msgs = tagged_by_tag[tag]
+            if not msgs:
+                await self._clear_map_tag(guild.id, tag)
+                continue
+
+            mapped_mid = self._msg_map.get((guild.id, tag))
+            keep_msg = next((m for m in msgs if mapped_mid and m.id == mapped_mid), msgs[0])
+            keep_ids.add(keep_msg.id)
+            await self._set_map(guild.id, ch.id, tag, keep_msg.id)
+
+            for msg in msgs:
+                if msg.id == keep_msg.id:
+                    continue
+                if await self._safe_delete(msg):
+                    deleted += 1
+                await asyncio.sleep(0.25)
+
+        for msg in clutter:
+            if msg.id in keep_ids:
+                continue
+            if await self._safe_delete(msg):
+                deleted += 1
+            await asyncio.sleep(0.25)
+
+        return deleted
 
     async def _fetch_mapped_message(self, ch: discord.TextChannel, guild_id: int, tag: str) -> Optional[discord.Message]:
         mid = self._msg_map.get((int(guild_id), str(tag)))
@@ -401,6 +510,13 @@ class LeaderboardsCog(commands.Cog):
 
                 if guild.id not in self._loaded_guilds:
                     await self._load_map_for_guild(guild.id)
+
+                if now - st.last_cleanup_at >= self.CLEANUP_INTERVAL_SECONDS:
+                    try:
+                        await self._cleanup_channel_messages(guild, ch, full_reset=False)
+                    except Exception:
+                        pass
+                    st.last_cleanup_at = time.time()
 
                 # Create missing messages in a burst if needed
                 await self._ensure_all_messages_exist_burst(guild, ch)
@@ -812,6 +928,35 @@ class LeaderboardsCog(commands.Cog):
             await self._ensure_all_messages_exist_burst(interaction.guild, ch)
 
         await interaction.followup.send("✅ Leaderboards ensured. Auto-updates run one per minute.", ephemeral=True)
+
+    @leaderboard.command(name="reset_channel", description="Delete all messages in leaderboard channel and recreate clean board.")
+    @app_commands.checks.has_permissions(manage_channels=True)
+    async def reset_channel(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        async with self._lock:
+            ch = await self._get_channel(interaction.guild)
+            if ch is None:
+                await interaction.followup.send("Leaderboard channel not found.", ephemeral=True)
+                return
+            if not self._can_post(interaction.guild, ch):
+                await interaction.followup.send("Missing permissions in leaderboard channel.", ephemeral=True)
+                return
+
+            if interaction.guild.id not in self._loaded_guilds:
+                await self._load_map_for_guild(interaction.guild.id)
+
+            deleted = await self._cleanup_channel_messages(interaction.guild, ch, full_reset=True)
+            await self._ensure_all_messages_exist_burst(interaction.guild, ch)
+
+        await interaction.followup.send(
+            f"✅ Leaderboard channel reset complete. Deleted {deleted} old messages and rebuilt category posts.",
+            ephemeral=True,
+        )
 
     @leaderboard.command(name="debug_exclusions", description="Show excluded user IDs used by this cog.")
     @app_commands.checks.has_permissions(manage_guild=True)
