@@ -286,9 +286,9 @@ class JobsCog(commands.Cog):
             total += int(xp_req_for_next(current_level))
         return total
 
-    @app_commands.command(name="job_boost_existing_users", description="Admin: rollback the mistaken regular XP boost without touching Job Hub XP.")
+    @app_commands.command(name="levelfix", description="Admin: rollback mistaken regular XP levels and clamp absurd cached XP outliers.")
     @checks.has_permissions(manage_guild=True)
-    async def job_boost_existing_users(self, interaction: discord.Interaction):
+    async def levelfix(self, interaction: discord.Interaction):
         if interaction.guild is None:
             await interaction.response.send_message("Server only.", ephemeral=True)
             return
@@ -307,11 +307,15 @@ class JobsCog(commands.Cog):
                 ))
 
                 user_level_rows_touched = 0
+                absurd_rows_clamped = 0
                 for raw_user_id in existing_user_ids:
                     user_id = int(raw_user_id)
                     xp_row = await get_or_create_xp_row(session, guild_id=guild_id, user_id=user_id)
                     boosted_level = max(int(xp_row.level_cached or 1), 1)
                     restored_level = max(boosted_level // 50, 1)
+                    if restored_level > 130:
+                        restored_level = 100
+                        absurd_rows_clamped += 1
                     xp_row.level_cached = restored_level
                     xp_row.xp_total = self._xp_total_for_level_floor(restored_level)
                     user_level_rows_touched += 1
@@ -321,6 +325,7 @@ class JobsCog(commands.Cog):
                 "✅ Restored the mistaken existing-user regular XP boost.",
                 f"• Existing users scanned: **{len(existing_user_ids):,}**",
                 f"• Global XP rows rolled back by restoring levels from the prior **50x** boost: **{user_level_rows_touched:,}**",
+                f"• Users with absurd cached XP (post-rollback level > 130) clamped to **level 100**: **{absurd_rows_clamped:,}**",
                 "• Job Hub XP, levels, and prestige were left unchanged.",
             )),
             ephemeral=True,
