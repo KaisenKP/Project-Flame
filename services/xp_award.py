@@ -49,6 +49,12 @@ async def get_or_create_xp_row(
         )
     )
     if row is not None:
+        # Self-heal stale/corrupt cached level values from legacy migrations/manual edits.
+        # Canonical truth is xp_total -> computed level.
+        prog = get_xp_progress(int(row.xp_total or 0))
+        computed_level = int(prog.level)
+        if int(row.level_cached or 1) != computed_level:
+            row.level_cached = computed_level
         return row
 
     row = XpRow(guild_id=guild_id, user_id=user_id, xp_total=0, level_cached=1)

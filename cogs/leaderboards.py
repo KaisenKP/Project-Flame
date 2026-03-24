@@ -16,6 +16,7 @@ from sqlalchemy import func, select, text
 from db.models import ActivityDailyRow, UserAchievementRow, WalletRow, XpRow
 from services.achievement_catalog import ACHIEVEMENT_CATALOG, AchievementTier
 from services.db import sessions
+from services.xp import get_xp_progress
 
 
 SEASON_START_UTC = date(2026, 1, 25)
@@ -657,15 +658,21 @@ class LeaderboardsCog(commands.Cog):
 
     async def _query_levels(self, guild_id: int, limit: int):
         async with self.sessionmaker() as session:
-            rows = (
+            raw_rows = (
                 await session.execute(
-                    select(XpRow.user_id, XpRow.level_cached, XpRow.xp_total)
+                    select(XpRow.user_id, XpRow.xp_total)
                     .where(XpRow.guild_id == int(guild_id))
-                    .order_by(XpRow.level_cached.desc(), XpRow.xp_total.desc())
-                    .limit(limit)
                 )
             ).all()
-        return rows
+
+        canonical_rows: list[tuple[int, int, int]] = []
+        for user_id, xp_total in raw_rows:
+            xp = int(xp_total or 0)
+            lvl = int(get_xp_progress(xp).level)
+            canonical_rows.append((int(user_id), lvl, xp))
+
+        canonical_rows.sort(key=lambda r: (r[1], r[2]), reverse=True)
+        return canonical_rows[: max(int(limit), 0)]
 
     async def _query_vctime_since_start(self, guild_id: int, start: date, limit: int):
         async with self.sessionmaker() as session:
