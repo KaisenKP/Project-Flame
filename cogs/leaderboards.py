@@ -128,6 +128,101 @@ class _GuildState:
     last_cleanup_at: float = 0.0
 
 
+@dataclass(frozen=True)
+class _HubTagMeta:
+    tag: str
+    label: str
+    emoji: str
+    style: discord.ButtonStyle
+
+
+class _HubCategoryButton(discord.ui.Button):
+    def __init__(self, *, meta: _HubTagMeta, active: bool, row: int):
+        super().__init__(
+            label=meta.label,
+            emoji=meta.emoji,
+            style=discord.ButtonStyle.success if active else meta.style,
+            row=row,
+        )
+        self.meta = meta
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, LeaderboardHubView):
+            return
+        await view.switch_tag(interaction, self.meta.tag)
+
+
+class LeaderboardHubView(discord.ui.View):
+    def __init__(self, *, cog: "LeaderboardsCog", owner_id: int, selected_tag: str, limit: int = 10):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.owner_id = int(owner_id)
+        self.selected_tag = str(selected_tag)
+        self.limit = int(limit)
+        self._build_components()
+
+    def _build_components(self) -> None:
+        self.clear_items()
+        for idx, meta in enumerate(self.cog._hub_tags()):
+            self.add_item(_HubCategoryButton(meta=meta, active=(meta.tag == self.selected_tag), row=idx // 4))
+
+        top_10 = discord.ui.Button(
+            label="Top 10",
+            emoji="🔟",
+            style=discord.ButtonStyle.success if self.limit == 10 else discord.ButtonStyle.secondary,
+            row=3,
+        )
+        top_25 = discord.ui.Button(
+            label="Top 25",
+            emoji="📚",
+            style=discord.ButtonStyle.success if self.limit == 25 else discord.ButtonStyle.secondary,
+            row=3,
+        )
+        refresh = discord.ui.Button(label="Refresh", emoji="✨", style=discord.ButtonStyle.primary, row=3)
+
+        async def set_top_10(interaction: discord.Interaction) -> None:
+            await self.set_limit(interaction, 10)
+
+        async def set_top_25(interaction: discord.Interaction) -> None:
+            await self.set_limit(interaction, 25)
+
+        async def refresh_now(interaction: discord.Interaction) -> None:
+            await self.refresh(interaction)
+
+        top_10.callback = set_top_10
+        top_25.callback = set_top_25
+        refresh.callback = refresh_now
+        self.add_item(top_10)
+        self.add_item(top_25)
+        self.add_item(refresh)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("This leaderboard hub belongs to someone else.", ephemeral=True)
+            return False
+        return True
+
+    async def _render(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+        embed = await self.cog._build_hub_embed(interaction.guild, tag=self.selected_tag, limit=self.limit)
+        self._build_components()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def switch_tag(self, interaction: discord.Interaction, tag: str) -> None:
+        self.selected_tag = str(tag)
+        await self._render(interaction)
+
+    async def set_limit(self, interaction: discord.Interaction, limit: int) -> None:
+        self.limit = max(10, min(int(limit), 25))
+        await self._render(interaction)
+
+    async def refresh(self, interaction: discord.Interaction) -> None:
+        await self._render(interaction)
+
+
 class LeaderboardsCog(commands.Cog):
     LEADERBOARD_CHANNEL_ID = 1464852132359569469
 
@@ -210,6 +305,17 @@ class LeaderboardsCog(commands.Cog):
             self.TAG_VCTIME,
             self.TAG_MONEY,
             self.TAG_ACHIEVEMENTS,
+        ]
+
+    def _hub_tags(self) -> list[_HubTagMeta]:
+        return [
+            _HubTagMeta(tag=self.TAG_MONTHLY_CHAT, label="Monthly Chat", emoji="📅", style=discord.ButtonStyle.primary),
+            _HubTagMeta(tag=self.TAG_MONTHLY_VC, label="Monthly VC", emoji="🎙️", style=discord.ButtonStyle.primary),
+            _HubTagMeta(tag=self.TAG_MESSAGES, label="Messages", emoji="💬", style=discord.ButtonStyle.secondary),
+            _HubTagMeta(tag=self.TAG_LEVELS, label="Levels", emoji="🧠", style=discord.ButtonStyle.secondary),
+            _HubTagMeta(tag=self.TAG_VCTIME, label="VC Time", emoji="⏱️", style=discord.ButtonStyle.secondary),
+            _HubTagMeta(tag=self.TAG_MONEY, label="Money", emoji="💰", style=discord.ButtonStyle.secondary),
+            _HubTagMeta(tag=self.TAG_ACHIEVEMENTS, label="Achievements", emoji="🏆", style=discord.ButtonStyle.secondary),
         ]
 
     async def _ensure_tables(self) -> None:
@@ -709,6 +815,19 @@ class LeaderboardsCog(commands.Cog):
         e.set_footer(text=f"{self.FOOTER_TAG_PREFIX}{tag}")
         return e
 
+    async def _build_hub_embed(self, guild: discord.Guild, *, tag: str, limit: int) -> discord.Embed:
+        e = await self._build_embed(guild, tag=tag, limit=limit)
+        original_title = e.title or "Leaderboard"
+        e.title = f"✨ {original_title} • Hub"
+        e.description = (e.description or "") + "\n\nUse the buttons below to switch categories, resize rankings, and refresh live."
+        e.add_field(
+            name="🎛️ Hub Controls",
+            value="• Category buttons swap boards instantly\n• `Top 10 / Top 25` adjusts depth\n• `Refresh` pulls newest standings",
+            inline=False,
+        )
+        e.set_footer(text=f"Interactive leaderboard hub • live data • {self.FOOTER_TAG_PREFIX}{tag}")
+        return e
+
     async def _query_monthly_messages(self, guild_id: int, start: date, end: date, limit: int, *, exclude_users: bool):
         async with self.sessionmaker() as session:
             q = (
@@ -903,6 +1022,16 @@ class LeaderboardsCog(commands.Cog):
         return rows
 
     leaderboard = app_commands.Group(name="leaderboard", description="View server leaderboards.")
+
+    @leaderboard.command(name="hub", description="Open the interactive leaderboard hub.")
+    async def hub(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+
+        view = LeaderboardHubView(cog=self, owner_id=interaction.user.id, selected_tag=self.TAG_MONTHLY_CHAT, limit=10)
+        embed = await self._build_hub_embed(interaction.guild, tag=self.TAG_MONTHLY_CHAT, limit=10)
+        await interaction.response.send_message(embed=embed, view=view)
 
     @leaderboard.command(name="refresh_channel", description="Force ensure leaderboard messages exist now.")
     @app_commands.checks.has_permissions(manage_guild=True)
