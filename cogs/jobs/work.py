@@ -317,6 +317,8 @@ def _build_work_embed(
     job_xp_need: int,
     effects: JobEffects,
     item_mods: _ItemMods,
+    tool_stamina_saved: bool,
+    tool_stamina_save_chance_bp: int,
     did_double: bool,
     upgrade_level: int,
     upgrade_bonus_pct: int,
@@ -331,10 +333,13 @@ def _build_work_embed(
     outcome_emoji = "❌" if failed else "✅"
     outcome_word = "FAILED" if failed else "SUCCESS"
 
+    stamina_line = f"• ⚡ **-{fmt_int(stamina_cost)}** Stamina"
+    if tool_stamina_saved:
+        stamina_line = "• ⚡ **0 Stamina** (tool save proc)"
     header_line = (
         f"{outcome_emoji} **{outcome_word}**  "
         f"• 💰 **{fmt_int(payout)}** Silver  "
-        f"• ⚡ **-{fmt_int(stamina_cost)}** Stamina"
+        f"{stamina_line}"
     )
 
     if did_double:
@@ -383,6 +388,8 @@ def _build_work_embed(
 
     if int(item_mods.stamina_cost_flat_delta) != 0:
         eff_lines.append(f"⚡ Stamina cost: **{item_mods.stamina_cost_flat_delta:+d}** (flat)")
+    if int(tool_stamina_save_chance_bp) > 0:
+        eff_lines.append(f"🧰 Tool stamina save: **{tool_stamina_save_chance_bp / 100:.2f}%** chance")
     if int(item_mods.double_payout_chance_bp) != 0:
         eff_lines.append(f"🪙 2x payout chance: **{item_mods.double_payout_chance_bp / 100:.2f}%**")
 
@@ -502,15 +509,16 @@ class WorkCog(commands.Cog):
                     await interaction.followup.send(f"Cooldown. Try again in **{fmt_int(left)}s**.", ephemeral=True)
                     return
 
-                income_tool_bp, xp_tool_bp, stamina_tool_bp, selected_tool_name = tool_bonus_snapshot(
+                income_tool_bp, xp_tool_bp, tool_stamina_save_chance_bp, selected_tool_name = tool_bonus_snapshot(
                     key,
                     slot_snap.selected_tool_key,
                     slot_snap.tool_levels,
                 )
+                tool_stamina_save_chance_bp = clamp_int(int(tool_stamina_save_chance_bp), 0, 10_000)
                 job_effects = JobEffects(
                     payout_bonus_bp=income_tool_bp,
                     fail_reduction_bp=0,
-                    stamina_discount_bp=stamina_tool_bp,
+                    stamina_discount_bp=0,
                     job_xp_bonus_bp=xp_tool_bp,
                     user_xp_bonus_bp=0,
                 ).clamp()
@@ -538,12 +546,17 @@ class WorkCog(commands.Cog):
                 stamina_cost = sub_bp(stamina_cost_base, int(merged_effects.stamina_discount_bp))
                 stamina_cost = int(stamina_cost) + int(item_mods.stamina_cost_flat_delta)
                 stamina_cost = clamp_int(int(stamina_cost), 1, 10)
+                effective_stamina_cost = int(stamina_cost)
+                tool_stamina_saved = False
+                if int(tool_stamina_save_chance_bp) > 0 and roll_bp(int(tool_stamina_save_chance_bp)):
+                    effective_stamina_cost = 0
+                    tool_stamina_saved = True
 
                 ok, stam_snap = await self.stamina.try_spend(
                     session,
                     guild_id=guild_id,
                     user_id=user_id,
-                    cost=stamina_cost,
+                    cost=effective_stamina_cost,
                     is_vip=vip,
                 )
                 if not ok:
@@ -711,7 +724,7 @@ class WorkCog(commands.Cog):
                                             user=interaction.user if interaction is not None else interaction_user,
                                             d=d,
                                             resolution=resolution,
-                                            stamina_cost=stamina_cost,
+                                            stamina_cost=effective_stamina_cost,
                                             user_xp=int(user_xp_gain),
                                             job_xp=int(resolution.job_xp),
                                             progress_after=final_progress,
@@ -800,7 +813,7 @@ class WorkCog(commands.Cog):
                     action_text=action_text,
                     failed=failed,
                     payout=payout,
-                    stamina_cost=stamina_cost,
+                    stamina_cost=effective_stamina_cost,
                     user_xp=int(user_xp_gain),
                     job_xp=delta_job_xp,
                     job_title=title_for(key, int(progress_after.prestige)),
@@ -810,6 +823,8 @@ class WorkCog(commands.Cog):
                     job_xp_need=int(xp_needed(key, int(progress_after.level), int(progress_after.prestige))),
                     effects=merged_effects,
                     item_mods=item_mods,
+                    tool_stamina_saved=tool_stamina_saved,
+                    tool_stamina_save_chance_bp=int(tool_stamina_save_chance_bp),
                     did_double=did_double,
                     upgrade_level=upgrade_level,
                     upgrade_bonus_pct=upgrade_bonus_pct,
