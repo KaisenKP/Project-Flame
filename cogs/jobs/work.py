@@ -71,8 +71,11 @@ from services.jobs_endgame import (
     build_danger_embed,
     build_danger_result_embed,
     pick_danger_encounter,
+    pick_normal_interaction,
     resolve_danger_choice,
+    resolve_normal_interaction,
     should_trigger_danger,
+    should_trigger_normal,
 )
 from services.jobs_views import open_job_hub
 
@@ -652,7 +655,23 @@ class WorkCog(commands.Cog):
                     adjusted_job_xp = apply_bp(base_job_xp, int(merged_effects.job_xp_bonus_bp))
                     delta_job_xp = apply_work_xp_multipliers(int(adjusted_job_xp))
 
-                    if (not failed) and should_trigger_danger(key):
+                    danger_triggered = (not failed) and should_trigger_danger(key)
+                    if (not failed) and (not danger_triggered) and should_trigger_normal(key):
+                        normal_interaction = pick_normal_interaction(key)
+                        if normal_interaction is not None:
+                            normal_resolution = resolve_normal_interaction(
+                                interaction=normal_interaction,
+                                payout=payout,
+                                job_xp=delta_job_xp,
+                            )
+                            payout = int(normal_resolution.payout)
+                            delta_job_xp = int(normal_resolution.job_xp)
+                            action_text += (
+                                f"\n✨ **{normal_interaction.title}:** {normal_interaction.description}"
+                                f"\n↳ {normal_resolution.outcome.text}"
+                            )
+
+                    if danger_triggered:
                         encounter = pick_danger_encounter(key)
                         if encounter is not None:
                             _COOLDOWNS[(guild_id, user_id, key)] = now + float(effective_cd)
@@ -671,7 +690,7 @@ class WorkCog(commands.Cog):
                                             final_session.add(final_wallet)
                                             await final_session.flush()
 
-                                        resolution = resolve_danger_choice(encounter=encounter, choice_key=choice_key, payout=payout)
+                                        resolution = resolve_danger_choice(encounter=encounter, choice_key=choice_key, payout=payout, job_xp=delta_job_xp)
                                         if timed_out:
                                             resolution = replace(resolution, timed_out=True)
 
@@ -685,7 +704,7 @@ class WorkCog(commands.Cog):
                                             user_id=user_id,
                                             slot_index=int(active_slot.slot_index),
                                             job_key=key,
-                                            amount=int(delta_job_xp),
+                                            amount=int(resolution.job_xp),
                                         )
 
                                         result_embed = build_danger_result_embed(
@@ -694,7 +713,7 @@ class WorkCog(commands.Cog):
                                             resolution=resolution,
                                             stamina_cost=stamina_cost,
                                             user_xp=int(user_xp_gain),
-                                            job_xp=delta_job_xp,
+                                            job_xp=int(resolution.job_xp),
                                             progress_after=final_progress,
                                             next_job_name=next_job_name,
                                             xp_needed_value=int(xp_needed(key, int(final_progress.level), int(final_progress.prestige))),
