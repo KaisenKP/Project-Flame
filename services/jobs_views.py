@@ -27,18 +27,29 @@ log = logging.getLogger(__name__)
 
 
 class JobPicker(Select):
-    def __init__(self, *, vip: bool, slot_index: int):
+    def __init__(self, *, vip: bool, slot_index: int, page: int = 0):
         self.slot_index = slot_index
-        options = []
-        for job in sorted(JOB_DEFS.values(), key=lambda item: item.name.lower()):
+        self.page = max(0, int(page))
+        all_options = []
+        for job in sorted(JOB_DEFS.values(), key=lambda item: (unlock_level_for(item.key, item.category), item.name.lower())):
             if job.vip_only and not vip:
                 continue
-            options.append(discord.SelectOption(label=job.name, value=job.key, description=f"Unlock Lv {unlock_level_for(job.key, job.category)}"))
+            all_options.append(discord.SelectOption(label=job.name, value=job.key, description=f"Unlock Lv {unlock_level_for(job.key, job.category)}"))
+
+        start = self.page * 25
+        stop = start + 25
+        options = all_options[start:stop]
+        total_pages = max(1, ((len(all_options) - 1) // 25) + 1)
+
+        if not options:
+            self.page = 0
+            options = all_options[:25]
+
         super().__init__(
-            placeholder=f"Assign a job to {slot_label(slot_index)}",
+            placeholder=f"Assign a job to {slot_label(slot_index)} • Page {self.page + 1}/{total_pages}",
             min_values=1,
             max_values=1,
-            options=options[:25],
+            options=options,
             custom_id=f"jobhub:pick:{slot_index}",
         )
 
@@ -92,6 +103,7 @@ class JobHubView(discord.ui.View):
         self.vip = vip
         self.selected_slot = selected_slot
         self.section = section
+        self.switch_page = 0
         self.message: discord.Message | None = None
         self._build_static_buttons()
 
@@ -133,9 +145,38 @@ class JobHubView(discord.ui.View):
             if isinstance(item, Select):
                 self.remove_item(item)
         if self.section == "switch":
-            self.add_item(JobPicker(vip=self.vip, slot_index=self.selected_slot))
+            picker = JobPicker(vip=self.vip, slot_index=self.selected_slot, page=self.switch_page)
+            self.switch_page = picker.page
+            self.add_item(picker)
+            all_jobs_count = sum(1 for job in JOB_DEFS.values() if self.vip or not job.vip_only)
+            total_pages = max(1, ((all_jobs_count - 1) // 25) + 1)
+            if total_pages > 1:
+                prev_btn = Button(
+                    label="◀ Jobs",
+                    style=discord.ButtonStyle.secondary,
+                    row=4,
+                    disabled=self.switch_page <= 0,
+                    custom_id="jobhub:switch_prev",
+                )
+                next_btn = Button(
+                    label="Jobs ▶",
+                    style=discord.ButtonStyle.secondary,
+                    row=4,
+                    disabled=self.switch_page >= (total_pages - 1),
+                    custom_id="jobhub:switch_next",
+                )
+                prev_btn.callback = self._switch_page_callback(-1, total_pages)
+                next_btn.callback = self._switch_page_callback(1, total_pages)
+                self.add_item(prev_btn)
+                self.add_item(next_btn)
         elif self.section == "tools" and slot_snap.job_key:
             self.add_item(ToolPicker(slot_index=self.selected_slot, job_key=slot_snap.job_key))
+
+    def _switch_page_callback(self, delta: int, total_pages: int):
+        async def callback(interaction: discord.Interaction):
+            self.switch_page = max(0, min(total_pages - 1, self.switch_page + delta))
+            await self.refresh(interaction)
+        return callback
 
     def _make_slot_callback(self, slot_index: int):
         async def callback(interaction: discord.Interaction):
@@ -153,6 +194,8 @@ class JobHubView(discord.ui.View):
     def _make_section_callback(self, section: str):
         async def callback(interaction: discord.Interaction):
             self.section = section
+            if section != "switch":
+                self.switch_page = 0
             await self.refresh(interaction)
         return callback
 
