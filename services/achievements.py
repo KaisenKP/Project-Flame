@@ -370,6 +370,37 @@ async def check_and_grant_achievements(
     return granted
 
 
+async def prune_invalid_achievements(
+    session: AsyncSession,
+    *,
+    guild_id: int,
+    user_id: int,
+) -> list[str]:
+    from db.models import UserAchievementRow
+
+    ctx = await _build_context(session, guild_id=guild_id, user_id=user_id)
+    eligible = set(check_achievement_conditions(ctx))
+    rows = list(
+        await session.scalars(
+            select(UserAchievementRow).where(
+                UserAchievementRow.guild_id == guild_id,
+                UserAchievementRow.user_id == user_id,
+            )
+        )
+    )
+
+    removed: list[str] = []
+    for row in rows:
+        key = str(row.achievement_key)
+        if key not in ACHIEVEMENT_CATALOG:
+            continue
+        if key in eligible:
+            continue
+        await session.delete(row)
+        removed.append(key)
+    return removed
+
+
 def queue_achievement_announcements(
     *,
     bot: discord.Client,
