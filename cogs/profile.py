@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import func, select
 
-from db.models import JobRow, ProfileBackgroundRow, ProfileSettingsRow, UserAchievementRow, UserJobSlotRow, WalletRow, XpRow
+from db.models import ProfileBackgroundRow, ProfileSettingsRow, UserAchievementRow, UserJobHubSlotRow, WalletRow, XpRow
 from services.achievement_catalog import sorted_achievements
 from services.achievements import build_achievement_context, parse_unlock_condition
 from services.db import sessions
@@ -20,6 +20,8 @@ from services.profile_backgrounds import (
     resolve_background_key,
 )
 from services.profile_card import JobDisplay, ProfileCardPayload, ProfileCardRenderer
+from services.job_hub import ensure_job_hub_slots
+from services.jobs_core import JOB_DEFS
 from services.stamina import StaminaService
 from services.users import ensure_user_rows
 from services.vip import is_vip_member
@@ -509,11 +511,7 @@ class ProfileCog(commands.Cog):
                     session,
                     guild_id=guild_id,
                     user_id=user_id,
-                )
-
-                jobs_by_id = await self._get_jobs_lookup(
-                    session,
-                    slots,
+                    vip=vip,
                 )
 
         xp_total = int(xp_row.xp_total) if xp_row else 0
@@ -524,7 +522,6 @@ class ProfileCog(commands.Cog):
 
         jobs = self._build_job_labels(
             slots,
-            jobs_by_id,
             equipped_job_key=equipped_job_key,
             equipped_job_name=equipped_job_name,
         )
@@ -665,31 +662,15 @@ class ProfileCog(commands.Cog):
         *,
         guild_id: int,
         user_id: int,
-    ) -> list[UserJobSlotRow]:
-        res = await session.execute(
-            select(UserJobSlotRow)
-            .where(
-                UserJobSlotRow.guild_id == guild_id,
-                UserJobSlotRow.user_id == user_id,
-            )
-            .order_by(UserJobSlotRow.slot_index.asc())
+        vip: bool,
+    ) -> list[UserJobHubSlotRow]:
+        rows = await ensure_job_hub_slots(
+            session,
+            guild_id=guild_id,
+            user_id=user_id,
+            vip=vip,
         )
-        return list(res.scalars().all())
-
-    async def _get_jobs_lookup(
-        self,
-        session,
-        slots: list[UserJobSlotRow],
-    ) -> dict[int, JobRow]:
-        job_ids = [s.job_id for s in slots]
-        if not job_ids:
-            return {}
-
-        res = await session.execute(
-            select(JobRow).where(JobRow.id.in_(job_ids))
-        )
-        jobs = list(res.scalars().all())
-        return {j.id: j for j in jobs}
+        return sorted(rows, key=lambda row: int(row.slot_index))
 
     async def _get_profile_settings(
         self,
@@ -723,8 +704,7 @@ class ProfileCog(commands.Cog):
 
     def _build_job_labels(
         self,
-        slots: list[UserJobSlotRow],
-        jobs_by_id: dict[int, JobRow],
+        slots: list[UserJobHubSlotRow],
         *,
         equipped_job_key: Optional[str],
         equipped_job_name: Optional[str],
@@ -737,10 +717,14 @@ class ProfileCog(commands.Cog):
             return []
 
         labels: list[JobDisplay] = []
-        for s in slots:
-            job = jobs_by_id.get(s.job_id)
-            name = job.name if job else f"Job #{s.job_id}"
-            labels.append(JobDisplay(slot=s.slot_index + 1, label=name))
+        active_first = sorted(slots, key=lambda row: (not bool(row.is_active), int(row.slot_index)))
+        for s in active_first:
+            if not s.job_key:
+                continue
+            key = str(s.job_key).strip().lower()
+            job = JOB_DEFS.get(key)
+            name = job.name if job else key.replace("_", " ").title()
+            labels.append(JobDisplay(slot=int(s.slot_index) + 1, label=name))
         return labels
 
 
