@@ -11,7 +11,7 @@ from sqlalchemy import delete, func, select, update
 from db.models import ActivityDailyRow, UserAchievementCounterRow, WalletRow, XpRow
 from services.db import sessions
 from services.users import ensure_user_rows
-from services.xp import get_xp_progress
+from services.xp import get_xp_progress, xp_req_for_next
 
 
 RECON_WORK_XP_BASE = 8
@@ -23,6 +23,14 @@ def _fmt_int(n: int) -> str:
         return f"{int(n):,}"
     except Exception:
         return str(n)
+
+
+def _xp_total_for_level(level: int) -> int:
+    level = max(int(level), 1)
+    total = 0
+    for lv in range(1, level):
+        total += int(xp_req_for_next(lv))
+    return int(total)
 
 
 class CurrencyAdminCog(commands.Cog):
@@ -125,6 +133,53 @@ class CurrencyAdminCog(commands.Cog):
 
         extra = f"Deleted rows: **{deleted}**" if isinstance(deleted, int) else "Wipe complete."
         await interaction.followup.send(f"🧹 Currency wipe done. {extra}", ephemeral=True)
+
+    @app_commands.command(name="set_level", description="Admin: set a member's global level exactly.")
+    @app_commands.describe(
+        user="Target member",
+        level="New level value (minimum 1, maximum 2000)",
+    )
+    @checks.has_permissions(manage_guild=True)
+    async def set_level(self, interaction: discord.Interaction, user: discord.Member, level: int):
+        if interaction.guild is None:
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+
+        level = max(1, min(int(level), 2000))
+        guild_id = int(interaction.guild.id)
+        user_id = int(user.id)
+        target_xp_total = _xp_total_for_level(level)
+
+        await interaction.response.defer(ephemeral=True)
+
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                await ensure_user_rows(session, guild_id=guild_id, user_id=user_id)
+                xp_row = await session.scalar(
+                    select(XpRow).where(
+                        XpRow.guild_id == guild_id,
+                        XpRow.user_id == user_id,
+                    )
+                )
+                if xp_row is None:
+                    xp_row = XpRow(guild_id=guild_id, user_id=user_id, xp_total=0, level_cached=1)
+                    session.add(xp_row)
+                    await session.flush()
+
+                old_xp = int(getattr(xp_row, "xp_total", 0) or 0)
+                old_level = int(getattr(xp_row, "level_cached", 1) or 1)
+
+                xp_row.xp_total = int(target_xp_total)
+                xp_row.level_cached = int(level)
+
+        await interaction.followup.send(
+            (
+                f"✅ Set {user.mention} to **Level {level}**.\n"
+                f"Previous: **L{old_level}** ({_fmt_int(old_xp)} XP)\n"
+                f"New: **L{level}** ({_fmt_int(target_xp_total)} XP)"
+            ),
+            ephemeral=True,
+        )
 
     @app_commands.command(
         name="rebuild_levels_from_activity",
