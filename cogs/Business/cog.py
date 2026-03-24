@@ -83,6 +83,7 @@ _ASSIGNMENTS_PAGE_SIZE = 10
 _ACCESS_DENIED = "Access Denied - You do not have permission to use this dashboard."
 
 _BUSINESS_RUNTIME_STATE_PATH = Path("data/business_runtime_state.json")
+_BUSINESS_REVENUE_ANNOUNCEMENT_CHANNEL_ID = 1460859446480867339
 
 # =========================================================
 # CORE CONTRACT IMPORTS
@@ -3871,7 +3872,12 @@ class BusinessCog(commands.Cog):
             return
 
         channels: list[discord.abc.Messageable] = []
-        if guild.system_channel is not None:
+
+        preferred = guild.get_channel(_BUSINESS_REVENUE_ANNOUNCEMENT_CHANNEL_ID)
+        if isinstance(preferred, discord.abc.Messageable):
+            channels.append(preferred)
+
+        if guild.system_channel is not None and guild.system_channel not in channels:
             channels.append(guild.system_channel)
         for channel in guild.text_channels:
             if channel in channels:
@@ -3882,7 +3888,7 @@ class BusinessCog(commands.Cog):
             perms = channel.permissions_for(me)
             if perms.send_messages:
                 channels.append(channel)
-            if len(channels) >= 3:
+            if len(channels) >= 4:
                 break
 
         for channel in channels:
