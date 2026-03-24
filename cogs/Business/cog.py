@@ -499,8 +499,9 @@ except Exception:
         user_id: int,
         business_key: str,
         quantity: int = 1,
+        include_snapshots: bool = True,
     ) -> BusinessActionResult:
-        _ = session, guild_id, user_id, business_key
+        _ = session, guild_id, user_id, business_key, quantity, include_snapshots
         return BusinessActionResult(
             ok=False,
             message="Business services are not wired yet. Build upgrade_business(...) in cogs/Business/core.py.",
@@ -2245,7 +2246,7 @@ class BusinessHubView(BusinessBaseView):
         async with self.cog.sessionmaker() as session:
             async with session.begin():
                 await ensure_user_rows(session, guild_id=self.guild_id, user_id=self.owner_id)
-                result = await upgrade_business(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.selected_business_key)
+                result = await upgrade_business(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.selected_business_key, include_snapshots=False)
                 detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.selected_business_key)
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
@@ -2601,7 +2602,7 @@ class BusinessDetailView(BusinessBaseView):
         async with self.cog.sessionmaker() as session:
             async with session.begin():
                 await ensure_user_rows(session, guild_id=self.guild_id, user_id=self.owner_id)
-                result = await upgrade_business(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+                result = await upgrade_business(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key, include_snapshots=False)
                 detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
@@ -2618,7 +2619,7 @@ class BusinessDetailView(BusinessBaseView):
         async with self.cog.sessionmaker() as session:
             async with session.begin():
                 await ensure_user_rows(session, guild_id=self.guild_id, user_id=self.owner_id)
-                result = await upgrade_business(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key, quantity=5)
+                result = await upgrade_business(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key, quantity=5, include_snapshots=False)
                 detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
@@ -2635,7 +2636,7 @@ class BusinessDetailView(BusinessBaseView):
         async with self.cog.sessionmaker() as session:
             async with session.begin():
                 await ensure_user_rows(session, guild_id=self.guild_id, user_id=self.owner_id)
-                result = await upgrade_business(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key, quantity=10)
+                result = await upgrade_business(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key, quantity=10, include_snapshots=False)
                 detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
