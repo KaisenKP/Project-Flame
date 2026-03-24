@@ -62,7 +62,10 @@ class ToolPicker(Select):
     def __init__(self, *, slot_index: int, job_key: str):
         self.slot_index = slot_index
         self.job_key = job_key
-        options = [discord.SelectOption(label=tool.name, value=tool.key, description=tool.description[:100] or tool.name) for tool in tool_defs_for(job_key)]
+        options = []
+        for tool in tool_defs_for(job_key):
+            suffix = f" • Unlock P{tool.required_prestige}" if int(tool.required_prestige) > 0 else ""
+            options.append(discord.SelectOption(label=tool.name, value=tool.key, description=(tool.description[:84] + suffix)[:100] or tool.name))
         super().__init__(
             placeholder="Select an active tool",
             min_values=1,
@@ -75,7 +78,14 @@ class ToolPicker(Select):
         view: JobHubView = self.view  # type: ignore[assignment]
         async with view.sessionmaker() as session:
             async with session.begin():
-                await set_selected_tool(session, guild_id=view.guild_id, user_id=view.user_id, vip=view.vip, slot_index=self.slot_index, tool_key=self.values[0])
+                try:
+                    await set_selected_tool(session, guild_id=view.guild_id, user_id=view.user_id, vip=view.vip, slot_index=self.slot_index, tool_key=self.values[0])
+                except ValueError as exc:
+                    if str(exc) == "tool_locked":
+                        await interaction.response.send_message("🔒 This tool unlocks at higher prestige for this slot.", ephemeral=True)
+                        return
+                    await interaction.response.send_message("Unable to select this tool right now.", ephemeral=True)
+                    return
         await view.refresh(interaction, notice="✅ Active tool updated.")
 
 

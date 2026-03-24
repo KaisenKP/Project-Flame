@@ -124,6 +124,7 @@ def make_job_hub_embed(*, user: discord.abc.User, vip: bool, slot_snap: SlotSnap
         for tool in tool_defs_for(slot_snap.job_key):
             lvl = slot_snap.tool_levels.get(tool.key, 0)
             marker = "✅" if slot_snap.selected_tool_key == tool.key else "•"
+            prestige_locked = int(progress.prestige) < int(tool.required_prestige)
             effects = []
             if tool.income_bonus_bp:
                 effects.append(f"+{tool.income_bonus_bp/100:.0f}% income/lv")
@@ -132,7 +133,8 @@ def make_job_hub_embed(*, user: discord.abc.User, vip: bool, slot_snap: SlotSnap
             if tool.stamina_save_chance_bp:
                 effects.append(f"+{tool.stamina_save_chance_bp/100:.2f}% stamina-save chance/lv")
             effects_txt = ", ".join(effects) if effects else "starter benefits"
-            lines.append(f"{marker} **{tool.name}** • Lv {lvl}\nCost: **{fmt_int(tool.cost * (lvl + 1))}** • {effects_txt}\n{tool.description}")
+            lock_line = f" • 🔒 Prestige {tool.required_prestige}" if prestige_locked else ""
+            lines.append(f"{marker} **{tool.name}** • Lv {lvl}{lock_line}\nCost: **{fmt_int(tool.cost * (lvl + 1))}** • {effects_txt}\n{tool.description}")
         embed.add_field(name="Tools & Upgrades", value=_join_lines_with_limit(lines), inline=False)
     elif section == "perks":
         unlocked_lines = [f"✅ **{perk.name}** — {perk.description}" for perk in unlocked] or ["No perks unlocked yet."]
