@@ -456,12 +456,16 @@ class WorkCog(commands.Cog):
             )
             return
 
-        await work_lock.acquire()
         vip = is_vip_member(interaction.user)  # type: ignore[arg-type]
         now = time.time()
+        lock_acquired = False
 
         try:
-            await interaction.response.defer(thinking=True)
+            if not interaction.response.is_done():
+                await interaction.response.defer(thinking=True)
+
+            await work_lock.acquire()
+            lock_acquired = True
 
             embed: Optional[discord.Embed] = None
             key: Optional[str] = None
@@ -887,7 +891,8 @@ class WorkCog(commands.Cog):
             else:
                 await interaction.followup.send("Something went wrong generating the work result.", ephemeral=True)
         finally:
-            work_lock.release()
+            if lock_acquired:
+                work_lock.release()
 
     async def _check_and_announce_achievements(self, *, guild_id: int, user_id: int) -> None:
         try:
@@ -1026,6 +1031,8 @@ class _WorkUpgradeView(discord.ui.View):
             )
             return
 
+        await interaction.response.defer(thinking=True)
+
         original_label = button.label
         button.disabled = True
         button.label = "Processing..."
@@ -1046,7 +1053,7 @@ class _WorkUpgradeView(discord.ui.View):
                     await interaction.message.edit(view=self)
                 except Exception:
                     pass
-            await interaction.response.send_message("Work command is currently unavailable.", ephemeral=True)
+            await interaction.followup.send("Work command is currently unavailable.", ephemeral=True)
             return
 
         await cmd.callback(cog, interaction)
