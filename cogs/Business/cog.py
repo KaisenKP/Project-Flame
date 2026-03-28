@@ -623,6 +623,18 @@ def _parse_int(value: str, default: int = 0) -> int:
     return sign * int(digits)
 
 
+def _clamp_int(value: object, minimum: int, maximum: int) -> int:
+    low = int(minimum)
+    high = int(maximum)
+    if high < low:
+        low, high = high, low
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = low
+    return max(low, min(parsed, high))
+
+
 def _trim(s: str, limit: int) -> str:
     if len(s) <= limit:
         return s
