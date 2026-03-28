@@ -196,14 +196,15 @@ class LootboxCog(commands.Cog):
     # Your exact silver ranges:
     # common: 2500-5000
     # rare: 10000-25000
-    # epic: 50000-150000
+    # epic: 55000-165000
     #
     # legendary kept as a jackpot tier.
     RARITY_TABLE: dict[LootboxRarity, RarityConfig] = {
         LootboxRarity.COMMON: RarityConfig(weight=75, min_silver=2500, max_silver=5000, min_xp=8, max_xp=22),
         LootboxRarity.RARE: RarityConfig(weight=18, min_silver=10000, max_silver=25000, min_xp=22, max_xp=60),
-        LootboxRarity.EPIC: RarityConfig(weight=6, min_silver=50000, max_silver=150000, min_xp=60, max_xp=160),
-        LootboxRarity.LEGENDARY: RarityConfig(weight=1, min_silver=200000, max_silver=600000, min_xp=160, max_xp=400),
+        # Epic and Legendary buffed by 10%.
+        LootboxRarity.EPIC: RarityConfig(weight=6, min_silver=55000, max_silver=165000, min_xp=66, max_xp=176),
+        LootboxRarity.LEGENDARY: RarityConfig(weight=1, min_silver=220000, max_silver=660000, min_xp=176, max_xp=440),
     }
 
     # "Animation" tuning
