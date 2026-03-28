@@ -29,3 +29,8 @@ def due_date_from_now(days: int = LOAN_DURATION_DAYS) -> datetime:
 
 def clamp_positive(value: int) -> int:
     return max(0, int(value))
+
+
+def safe_asset_label(*, key: str, fallback_id: int | None = None) -> str:
+    suffix = f" #{fallback_id}" if fallback_id is not None else ""
+    return f"Unknown / Legacy Asset ({key}){suffix}"

@@ -9,7 +9,7 @@ from db.models import BusinessOwnershipRow, LuxuryLoanRow, UserAssetRow, WalletR
 from services.users import ensure_user_rows
 
 from .catalog import ASSET_CATALOG
-from .domain import LoanCapacitySnapshot, LoanSnapshot, LoanStatus, OwnedAssetView, SeizureResult
+from .domain import LoanCapacitySnapshot, LoanSnapshot, LoanStatus, LuxuryOverviewSnapshot, OwnedAssetView, SeizureResult
 from .util import (
     BASE_INTEREST_RATE,
     COLLATERAL_RATIO,
@@ -17,6 +17,7 @@ from .util import (
     LOAN_DURATION_DAYS,
     OVERDUE_GRACE_DAYS,
     PENALTY_INTEREST_RATE,
+    SHOWCASE_SLOTS_MAX,
     due_date_from_now,
     now_utc,
 )
@@ -97,6 +98,9 @@ async def set_showcase_slot(
     asset_id: int,
     slot: int,
 ) -> UserAssetRow:
+    if slot < 1 or slot > SHOWCASE_SLOTS_MAX:
+        raise ValueError("invalid_slot")
+
     row = await session.scalar(
         select(UserAssetRow).where(
             UserAssetRow.id == asset_id,
@@ -128,6 +132,9 @@ async def set_showcase_slot(
 
 
 async def clear_showcase_slot(session: AsyncSession, *, guild_id: int, user_id: int, slot: int) -> bool:
+    if slot < 1 or slot > SHOWCASE_SLOTS_MAX:
+        return False
+
     row = await session.scalar(
         select(UserAssetRow).where(
             UserAssetRow.guild_id == guild_id,
@@ -154,6 +161,7 @@ async def get_total_asset_value(session: AsyncSession, *, guild_id: int, user_id
             )
         )
     ).all()
+    # Preserve existing collateral behavior: keys missing from the catalog contribute 0.
     luxury_value = int(sum(ASSET_CATALOG.get(k).value for k in luxury_rows if k in ASSET_CATALOG))
     business_value = int(
         await session.scalar(
@@ -213,6 +221,22 @@ async def get_loan_capacity(session: AsyncSession, *, guild_id: int, user_id: in
         borrow_limit=borrow_limit,
         active_loan_balance=active_balance,
         available_to_borrow=max(0, borrow_limit - active_balance),
+    )
+
+
+async def get_overview_snapshot(session: AsyncSession, *, guild_id: int, user_id: int) -> LuxuryOverviewSnapshot:
+    wallet = await get_or_create_wallet(session, guild_id=guild_id, user_id=user_id)
+    assets = await list_owned_assets(session, guild_id=guild_id, user_id=user_id)
+    total_value = await get_total_asset_value(session, guild_id=guild_id, user_id=user_id)
+    loan = await get_loan_snapshot(session, guild_id=guild_id, user_id=user_id)
+    showcased_assets_count = sum(1 for a in assets if a.is_showcased and a.showcase_slot in (1, 2, 3))
+    return LuxuryOverviewSnapshot(
+        wallet_silver=int(wallet.silver),
+        total_asset_value=int(total_value),
+        net_worth=int(wallet.silver) + int(total_value),
+        owned_assets_count=len(assets),
+        showcased_assets_count=showcased_assets_count,
+        active_loan=loan,
     )
 
 
