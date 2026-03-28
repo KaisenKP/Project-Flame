@@ -2153,6 +2153,55 @@ class BusinessHubView(BusinessBaseView):
                     business_key=self.selected_business_key,
                 )
 
+    def _set_bulk_action_loading_state(self, *, loading: bool) -> None:
+        for child in self.children:
+            if hasattr(child, "disabled"):
+                child.disabled = loading
+
+    def _build_bulk_action_loading_embed(
+        self,
+        *,
+        user: discord.abc.User,
+        action_label: str,
+        progress_text: str,
+    ) -> discord.Embed:
+        embed = _build_hub_embed(
+            user=user,
+            snap=self.hub_snapshot,
+            selected_business_key=self.selected_business_key,
+        )
+        embed.add_field(
+            name=f"{action_label} in progress",
+            value=(
+                f"⏳ **{progress_text}**\n"
+                "▰▱▱ Preparing jobs...\n"
+                "Please wait while your empire updates."
+            ),
+            inline=False,
+        )
+        return embed
+
+    async def _show_bulk_action_loading(
+        self,
+        interaction: discord.Interaction,
+        *,
+        action_label: str,
+        progress_text: str,
+    ) -> None:
+        self._set_bulk_action_loading_state(loading=True)
+        loading_embed = self._build_bulk_action_loading_embed(
+            user=interaction.user,
+            action_label=action_label,
+            progress_text=progress_text,
+        )
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(embed=loading_embed, view=self)
+            else:
+                await _safe_edit_panel(interaction, embed=loading_embed, view=self)
+        except (discord.NotFound, discord.HTTPException, AttributeError):
+            log.debug("Failed to render business bulk-action loading state", exc_info=True)
+
     @discord.ui.button(label="Manage", style=discord.ButtonStyle.secondary, emoji="🛠️", row=1)
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
@@ -2206,29 +2255,45 @@ class BusinessHubView(BusinessBaseView):
     @discord.ui.button(label="Start All", style=discord.ButtonStyle.success, emoji="⏯️", row=1)
     async def start_all_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
-        await _safe_defer(interaction)
-        async with self.cog.sessionmaker() as session:
-            async with session.begin():
-                hub = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
-                owned_keys = [card.key for card in hub.cards if card.owned]
-                started = 0
-                already_running = 0
-                failed = 0
-                for business_key in owned_keys:
-                    result = await start_business_run(
-                        session,
-                        guild_id=self.guild_id,
-                        user_id=self.owner_id,
-                        business_key=business_key,
-                    )
-                    if result.ok:
-                        started += 1
-                        continue
-                    if "already running" in (result.message or "").lower():
-                        already_running += 1
-                    else:
-                        failed += 1
-                snap = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
+        await self._show_bulk_action_loading(
+            interaction,
+            action_label="Start All",
+            progress_text="Starting businesses…",
+        )
+        started = 0
+        already_running = 0
+        failed = 0
+        error_message: Optional[str] = None
+        try:
+            async with self.cog.sessionmaker() as session:
+                async with session.begin():
+                    hub = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
+                    owned_keys = [card.key for card in hub.cards if card.owned]
+                    for business_key in owned_keys:
+                        result = await start_business_run(
+                            session,
+                            guild_id=self.guild_id,
+                            user_id=self.owner_id,
+                            business_key=business_key,
+                        )
+                        if result.ok:
+                            started += 1
+                            continue
+                        if "already running" in (result.message or "").lower():
+                            already_running += 1
+                        else:
+                            failed += 1
+                    snap = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
+        except Exception:
+            log.exception(
+                "Start All bulk action failed | guild_id=%s user_id=%s",
+                self.guild_id,
+                self.owner_id,
+            )
+            error_message = "I couldn't start every business right now. No data was lost—please try again."
+            async with self.cog.sessionmaker() as session:
+                async with session.begin():
+                    snap = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
 
         summary = (
             f"Started: **{started}**\n"
@@ -2237,6 +2302,8 @@ class BusinessHubView(BusinessBaseView):
         )
         embed = _build_hub_embed(user=interaction.user, snap=snap, selected_business_key=self.selected_business_key)
         embed.add_field(name="Start All Businesses", value=summary, inline=False)
+        if error_message:
+            embed.add_field(name="⚠️ Bulk Action Error", value=error_message, inline=False)
         view = BusinessHubView(
             cog=self.cog,
             owner_id=self.owner_id,
@@ -2249,29 +2316,45 @@ class BusinessHubView(BusinessBaseView):
     @discord.ui.button(label="Stop All", style=discord.ButtonStyle.danger, emoji="🛑", row=1)
     async def stop_all_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
-        await _safe_defer(interaction)
-        async with self.cog.sessionmaker() as session:
-            async with session.begin():
-                hub = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
-                owned_keys = [card.key for card in hub.cards if card.owned]
-                stopped = 0
-                already_stopped = 0
-                failed = 0
-                for business_key in owned_keys:
-                    result = await stop_business_run(
-                        session,
-                        guild_id=self.guild_id,
-                        user_id=self.owner_id,
-                        business_key=business_key,
-                    )
-                    if result.ok:
-                        stopped += 1
-                        continue
-                    if "not currently running" in (result.message or "").lower():
-                        already_stopped += 1
-                    else:
-                        failed += 1
-                snap = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
+        await self._show_bulk_action_loading(
+            interaction,
+            action_label="Stop All",
+            progress_text="Stopping businesses…",
+        )
+        stopped = 0
+        already_stopped = 0
+        failed = 0
+        error_message: Optional[str] = None
+        try:
+            async with self.cog.sessionmaker() as session:
+                async with session.begin():
+                    hub = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
+                    owned_keys = [card.key for card in hub.cards if card.owned]
+                    for business_key in owned_keys:
+                        result = await stop_business_run(
+                            session,
+                            guild_id=self.guild_id,
+                            user_id=self.owner_id,
+                            business_key=business_key,
+                        )
+                        if result.ok:
+                            stopped += 1
+                            continue
+                        if "not currently running" in (result.message or "").lower():
+                            already_stopped += 1
+                        else:
+                            failed += 1
+                    snap = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
+        except Exception:
+            log.exception(
+                "Stop All bulk action failed | guild_id=%s user_id=%s",
+                self.guild_id,
+                self.owner_id,
+            )
+            error_message = "I couldn't stop every business right now. Your controls were safely restored."
+            async with self.cog.sessionmaker() as session:
+                async with session.begin():
+                    snap = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
 
         summary = (
             f"Stopped: **{stopped}**\n"
@@ -2280,6 +2363,8 @@ class BusinessHubView(BusinessBaseView):
         )
         embed = _build_hub_embed(user=interaction.user, snap=snap, selected_business_key=self.selected_business_key)
         embed.add_field(name="Stop All Businesses", value=summary, inline=False)
+        if error_message:
+            embed.add_field(name="⚠️ Bulk Action Error", value=error_message, inline=False)
         view = BusinessHubView(
             cog=self.cog,
             owner_id=self.owner_id,
