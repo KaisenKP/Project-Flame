@@ -19,6 +19,7 @@ from .util import (
     PENALTY_INTEREST_RATE,
     SHOWCASE_SLOTS_MAX,
     due_date_from_now,
+    ensure_utc,
     now_utc,
 )
 
@@ -201,10 +202,10 @@ def _loan_to_snapshot(loan: LuxuryLoanRow) -> LoanSnapshot:
         interest_rate=float(loan.interest_rate),
         total_due=loan.total_due,
         remaining_balance=loan.remaining_balance,
-        issued_at=loan.issued_at,
-        due_at=loan.due_at,
+        issued_at=ensure_utc(loan.issued_at),
+        due_at=ensure_utc(loan.due_at),
         status=LoanStatus(loan.status),
-        last_interest_applied_at=loan.last_interest_applied_at,
+        last_interest_applied_at=ensure_utc(loan.last_interest_applied_at),
         debt_recovery_mode=loan.debt_recovery_mode,
         recovery_rate_bp=loan.recovery_rate_bp,
     )
@@ -318,7 +319,9 @@ async def evaluate_loan_state(session: AsyncSession, *, guild_id: int, user_id: 
         return None
 
     now = now_utc()
-    if loan.status == LoanStatus.ACTIVE.value and now > loan.due_at:
+    due_at = ensure_utc(loan.due_at)
+
+    if loan.status == LoanStatus.ACTIVE.value and now > due_at:
         loan.status = LoanStatus.OVERDUE.value
         penalty = int(round(loan.remaining_balance * PENALTY_INTEREST_RATE))
         loan.remaining_balance += penalty
@@ -326,8 +329,8 @@ async def evaluate_loan_state(session: AsyncSession, *, guild_id: int, user_id: 
         loan.last_interest_applied_at = now
 
     if loan.status in (LoanStatus.OVERDUE.value, LoanStatus.ACTIVE.value):
-        if now > loan.due_at:
-            default_cutoff = loan.due_at + timedelta(days=OVERDUE_GRACE_DAYS)
+        if now > due_at:
+            default_cutoff = due_at + timedelta(days=OVERDUE_GRACE_DAYS)
             if now >= default_cutoff:
                 loan.status = LoanStatus.DEFAULTED.value
                 seizure = await seize_assets_for_default(session, guild_id=guild_id, user_id=user_id, loan=loan)
