@@ -82,6 +82,16 @@ class LoanSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class LuxuryOverviewSnapshot:
+    wallet_silver: int
+    total_asset_value: int
+    net_worth: int
+    owned_assets_count: int
+    showcased_assets_count: int
+    active_loan: LoanSnapshot | None
+
+
+@dataclass(frozen=True, slots=True)
 class SeizureResult:
     seized_asset_ids: list[int]
     seized_value_total: int
