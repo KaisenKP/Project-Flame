@@ -2126,12 +2126,17 @@ class BusinessHubView(BusinessBaseView):
     def _configure_buttons(self) -> None:
         owns_all = self.hub_snapshot.total_count > 0 and self.hub_snapshot.owned_count >= self.hub_snapshot.total_count
         has_selected = bool(self.selected_business_key)
+        owned_cards = [c for c in self.hub_snapshot.cards if c.owned]
         selected_card = next((c for c in self.hub_snapshot.cards if c.key == self.selected_business_key), None)
         at_cap = bool(selected_card is not None and selected_card.visible_level >= selected_card.max_level)
+        any_running = any(c.running for c in owned_cards)
+        any_stopped = any(not c.running for c in owned_cards)
         self.buy_button.disabled = owns_all
         self.manage_button.disabled = not has_selected
         self.run_button.disabled = (not has_selected) or bool(selected_card and selected_card.running)
         self.stop_button.disabled = (not has_selected) or not bool(selected_card and selected_card.running)
+        self.start_all_button.disabled = not any_stopped
+        self.stop_all_button.disabled = not any_running
         self.workers_button.disabled = not has_selected
         self.managers_button.disabled = not has_selected
         self.upgrade_button.disabled = (not has_selected) or at_cap
@@ -2196,6 +2201,92 @@ class BusinessHubView(BusinessBaseView):
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
         embed.add_field(name="Stop Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
         view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.selected_business_key, owned=detail.owned, detail=detail)
+        await _safe_edit_panel(interaction, embed=embed, view=view)
+
+    @discord.ui.button(label="Start All", style=discord.ButtonStyle.success, emoji="⏯️", row=1)
+    async def start_all_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await _safe_defer(interaction)
+        async with self.cog.sessionmaker() as session:
+            async with session.begin():
+                hub = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
+                owned_keys = [card.key for card in hub.cards if card.owned]
+                started = 0
+                already_running = 0
+                failed = 0
+                for business_key in owned_keys:
+                    result = await start_business_run(
+                        session,
+                        guild_id=self.guild_id,
+                        user_id=self.owner_id,
+                        business_key=business_key,
+                    )
+                    if result.ok:
+                        started += 1
+                        continue
+                    if "already running" in (result.message or "").lower():
+                        already_running += 1
+                    else:
+                        failed += 1
+                snap = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
+
+        summary = (
+            f"Started: **{started}**\n"
+            f"Already running: **{already_running}**\n"
+            f"Failed: **{failed}**"
+        )
+        embed = _build_hub_embed(user=interaction.user, snap=snap, selected_business_key=self.selected_business_key)
+        embed.add_field(name="Start All Businesses", value=summary, inline=False)
+        view = BusinessHubView(
+            cog=self.cog,
+            owner_id=self.owner_id,
+            guild_id=self.guild_id,
+            hub_snapshot=snap,
+            selected_business_key=self.selected_business_key,
+        )
+        await _safe_edit_panel(interaction, embed=embed, view=view)
+
+    @discord.ui.button(label="Stop All", style=discord.ButtonStyle.danger, emoji="🛑", row=1)
+    async def stop_all_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await _safe_defer(interaction)
+        async with self.cog.sessionmaker() as session:
+            async with session.begin():
+                hub = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
+                owned_keys = [card.key for card in hub.cards if card.owned]
+                stopped = 0
+                already_stopped = 0
+                failed = 0
+                for business_key in owned_keys:
+                    result = await stop_business_run(
+                        session,
+                        guild_id=self.guild_id,
+                        user_id=self.owner_id,
+                        business_key=business_key,
+                    )
+                    if result.ok:
+                        stopped += 1
+                        continue
+                    if "not currently running" in (result.message or "").lower():
+                        already_stopped += 1
+                    else:
+                        failed += 1
+                snap = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
+
+        summary = (
+            f"Stopped: **{stopped}**\n"
+            f"Already stopped: **{already_stopped}**\n"
+            f"Failed: **{failed}**"
+        )
+        embed = _build_hub_embed(user=interaction.user, snap=snap, selected_business_key=self.selected_business_key)
+        embed.add_field(name="Stop All Businesses", value=summary, inline=False)
+        view = BusinessHubView(
+            cog=self.cog,
+            owner_id=self.owner_id,
+            guild_id=self.guild_id,
+            hub_snapshot=snap,
+            selected_business_key=self.selected_business_key,
+        )
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="Workers", style=discord.ButtonStyle.secondary, emoji="👷", row=2)
