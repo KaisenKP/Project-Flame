@@ -54,6 +54,7 @@ from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
+import time
 from typing import List, Optional, Sequence
 
 import discord
@@ -73,6 +74,7 @@ log = logging.getLogger(__name__)
 
 AUTO_HIRE_MAX_REROLLS = 250
 AUTO_HIRE_ALLOWED_RARITIES = {"common", "uncommon", "rare", "epic", "mythic"}
+AUTO_HIRE_PROGRESS_UPDATE_INTERVAL_SECONDS = 1.0
 
 _BUSINESS_ADMIN_ROLE_IDS = {int(part) for part in ((os.getenv("BUSINESS_ADMIN_ROLE_IDS") or os.getenv("BUSINESS_ADMIN_ROLE_ID") or "").replace(",", " ").split()) if part.strip().isdigit()}
 RARITY_ORDER = ("common", "uncommon", "rare", "epic", "legendary", "mythical")
@@ -3000,6 +3002,7 @@ class ConfirmWorkerAutoHireView(discord.ui.View):
         best_score = -1
         latest_hit = "None yet"
         filled_total = 0
+        last_progress_update = time.monotonic()
 
         async with self.parent_view.cog.sessionmaker() as session:
             async with session.begin():
@@ -3025,7 +3028,14 @@ class ConfirmWorkerAutoHireView(discord.ui.View):
                         best_score = candidate_score
                         best_hit = hit_line
                     if str(getattr(c, "rarity", "common")).strip().lower() not in self.allowed_rarities:
-                        if rerolls_used == 1 or rerolls_used % 4 == 0 or "Mythical Pull" in tags or "Rare Pull" in tags:
+                        should_push_update = (
+                            rerolls_used == 1
+                            or rerolls_used % 10 == 0
+                            or "Mythical Pull" in tags
+                            or "Rare Pull" in tags
+                            or (time.monotonic() - last_progress_update) >= AUTO_HIRE_PROGRESS_UPDATE_INTERVAL_SECONDS
+                        )
+                        if should_push_update:
                             progress = discord.Embed(
                                 title="VIP Auto-Hiring In Progress",
                                 description="Scanning workers and snapping up matching hires...",
@@ -3035,6 +3045,7 @@ class ConfirmWorkerAutoHireView(discord.ui.View):
                             progress.add_field(name="Best Hit", value=best_hit, inline=False)
                             progress.add_field(name="Latest Hit", value=hit_line, inline=False)
                             await interaction.edit_original_response(embed=progress, view=None)
+                            last_progress_update = time.monotonic()
                         continue
                     hire_result = await hire_worker_manual(
                         session,
@@ -3064,6 +3075,7 @@ class ConfirmWorkerAutoHireView(discord.ui.View):
                     progress.add_field(name="Best Hit", value=best_hit, inline=False)
                     progress.add_field(name="Latest Hit", value=latest_hit, inline=False)
                     await interaction.edit_original_response(embed=progress, view=None)
+                    last_progress_update = time.monotonic()
 
         self.parent_view.current_candidate = None
         suffix = " Worker slots are full." if slots_full else (f" {last_error}" if last_error else "")
@@ -3116,6 +3128,7 @@ class ConfirmManagerAutoHireView(discord.ui.View):
         best_score = -1
         latest_hit = "None yet"
         filled_total = 0
+        last_progress_update = time.monotonic()
 
         async with self.parent_view.cog.sessionmaker() as session:
             async with session.begin():
@@ -3141,7 +3154,14 @@ class ConfirmManagerAutoHireView(discord.ui.View):
                         best_score = candidate_score
                         best_hit = hit_line
                     if str(getattr(c, "rarity", "common")).strip().lower() not in self.allowed_rarities:
-                        if rerolls_used == 1 or rerolls_used % 4 == 0 or "Mythical Pull" in tags or "Rare Pull" in tags:
+                        should_push_update = (
+                            rerolls_used == 1
+                            or rerolls_used % 10 == 0
+                            or "Mythical Pull" in tags
+                            or "Rare Pull" in tags
+                            or (time.monotonic() - last_progress_update) >= AUTO_HIRE_PROGRESS_UPDATE_INTERVAL_SECONDS
+                        )
+                        if should_push_update:
                             progress = discord.Embed(
                                 title="VIP Auto-Hiring In Progress",
                                 description="Rolling live manager reveals...",
@@ -3151,6 +3171,7 @@ class ConfirmManagerAutoHireView(discord.ui.View):
                             progress.add_field(name="Best Hit", value=best_hit, inline=False)
                             progress.add_field(name="Latest Hit", value=hit_line, inline=False)
                             await interaction.edit_original_response(embed=progress, view=None)
+                            last_progress_update = time.monotonic()
                         continue
                     hire_result = await hire_manager_manual(
                         session,
@@ -3180,6 +3201,7 @@ class ConfirmManagerAutoHireView(discord.ui.View):
                     progress.add_field(name="Best Hit", value=best_hit, inline=False)
                     progress.add_field(name="Latest Hit", value=latest_hit, inline=False)
                     await interaction.edit_original_response(embed=progress, view=None)
+                    last_progress_update = time.monotonic()
 
         self.parent_view.current_candidate = None
         suffix = " Manager slots are full." if slots_full else (f" {last_error}" if last_error else "")
