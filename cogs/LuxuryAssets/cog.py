@@ -15,13 +15,9 @@ from services.users import ensure_user_rows
 
 from .catalog import ASSET_CATALOG
 from .embeds import (
-    build_assets_embed,
-    build_buy_confirmation_embed,
     build_loan_capacity_embed,
     build_loan_confirmation_embed,
     build_loan_status_embed,
-    build_showcase_embed,
-    build_store_embed,
 )
 from .repo import (
     clear_showcase_slot,
@@ -41,7 +37,7 @@ from .repo import (
     set_showcase_slot,
 )
 from .ui import ConfirmCancelView, LuxuryHubData, LuxuryHubView, build_shop_confirmation_embed
-from .util import BASE_INTEREST_RATE, LOAN_DURATION_DAYS, SHOWCASE_SLOTS_MAX, due_date_from_now, fmt_int
+from .util import BASE_INTEREST_RATE, LOAN_DURATION_DAYS, due_date_from_now, fmt_int
 
 log = logging.getLogger(__name__)
 
@@ -254,7 +250,7 @@ class LuxuryHubController:
 
 
 class LuxuryAssetsCog(commands.Cog):
-    luxury = app_commands.Group(name="luxury", description="Luxury asset hub and compatibility commands.")
+    luxury = app_commands.Group(name="luxury", description="Luxury asset hub.")
     loan = app_commands.Group(name="loan", description="Asset-backed loans and repayment.")
 
     def __init__(self, bot: commands.Bot):
@@ -306,104 +302,6 @@ class LuxuryAssetsCog(commands.Cog):
     @luxury.command(name="hub", description="Open the Luxury Hub.")
     async def luxury_hub(self, interaction: discord.Interaction):
         await self.open_hub(interaction)
-
-    @luxury.command(name="store", description="Browse luxury assets and prices. (legacy compatibility)")
-    async def luxury_store(self, interaction: discord.Interaction):
-        if interaction.guild is None:
-            return await interaction.response.send_message("Server only.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True)
-        async with self.sessionmaker() as session:
-            async with session.begin():
-                await ensure_user_rows(session, guild_id=interaction.guild.id, user_id=interaction.user.id)
-                wallet = await get_or_create_wallet(session, guild_id=interaction.guild.id, user_id=interaction.user.id)
-                em = build_store_embed(user=interaction.user, balance=int(wallet.silver))
-        await interaction.followup.send(embed=em, ephemeral=True)
-
-    @luxury.command(name="buy", description="Buy a luxury asset. (legacy compatibility)")
-    @app_commands.describe(asset_key="Catalog key, e.g. supercar")
-    async def luxury_buy(self, interaction: discord.Interaction, asset_key: str):
-        if interaction.guild is None:
-            return await interaction.response.send_message("Server only.", ephemeral=True)
-
-        asset_key = asset_key.strip().lower()
-        if asset_key not in ASSET_CATALOG or not ASSET_CATALOG[asset_key].is_active:
-            return await interaction.response.send_message("Unknown asset key. Use `/luxury store` first.", ephemeral=True)
-
-        async with self.sessionmaker() as session:
-            async with session.begin():
-                await ensure_user_rows(session, guild_id=interaction.guild.id, user_id=interaction.user.id)
-                wallet = await get_or_create_wallet(session, guild_id=interaction.guild.id, user_id=interaction.user.id)
-                owned_count = await count_owned_asset_key(
-                    session,
-                    guild_id=interaction.guild.id,
-                    user_id=interaction.user.id,
-                    asset_key=asset_key,
-                )
-
-        em = build_buy_confirmation_embed(user=interaction.user, asset_key=asset_key, balance=int(wallet.silver))
-        em.add_field(name="You Own", value=f"{owned_count}x", inline=True)
-
-        view = ConfirmCancelView(owner_id=interaction.user.id)
-        await interaction.response.send_message(embed=em, view=view, ephemeral=True)
-        await view.wait()
-        if not view.confirmed:
-            return
-
-        ok, message = await self.hub_controller.buy(interaction, asset_key)
-        if ok:
-            await interaction.followup.send(message, ephemeral=True)
-        else:
-            await interaction.followup.send(message, ephemeral=True)
-
-    @luxury.command(name="showcase", description="View your 3 luxury showcase slots. (legacy compatibility)")
-    async def luxury_showcase(self, interaction: discord.Interaction):
-        if interaction.guild is None:
-            return await interaction.response.send_message("Server only.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True)
-
-        async with self.sessionmaker() as session:
-            async with session.begin():
-                assets = await list_owned_assets(session, guild_id=interaction.guild.id, user_id=interaction.user.id)
-
-        await interaction.followup.send(embed=build_showcase_embed(user=interaction.user, assets=assets), ephemeral=True)
-
-    @luxury.command(name="equip", description="Equip an owned asset to a showcase slot. (legacy compatibility)")
-    @app_commands.describe(asset_id="Asset inventory ID", slot="Showcase slot 1-3")
-    async def luxury_equip(self, interaction: discord.Interaction, asset_id: int, slot: int):
-        if interaction.guild is None:
-            return await interaction.response.send_message("Server only.", ephemeral=True)
-        if slot < 1 or slot > SHOWCASE_SLOTS_MAX:
-            return await interaction.response.send_message("Slot must be 1-3.", ephemeral=True)
-
-        ok, msg = await self.hub_controller.assign_showcase(interaction, asset_id=asset_id, slot=slot)
-        await interaction.response.send_message(("✅ " if ok else "❌ ") + msg, ephemeral=True)
-
-    @luxury.command(name="unequip", description="Clear a showcase slot. (legacy compatibility)")
-    @app_commands.describe(slot="Showcase slot 1-3")
-    async def luxury_unequip(self, interaction: discord.Interaction, slot: int):
-        if interaction.guild is None:
-            return await interaction.response.send_message("Server only.", ephemeral=True)
-        if slot < 1 or slot > SHOWCASE_SLOTS_MAX:
-            return await interaction.response.send_message("Slot must be 1-3.", ephemeral=True)
-
-        ok, msg = await self.hub_controller.clear_showcase(interaction, slot=slot)
-        await interaction.response.send_message(("✅ " if ok else "❌ ") + msg, ephemeral=True)
-
-    @luxury.command(name="assets", description="View your luxury inventory and net worth. (legacy compatibility)")
-    async def luxury_assets(self, interaction: discord.Interaction):
-        if interaction.guild is None:
-            return await interaction.response.send_message("Server only.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True)
-        async with self.sessionmaker() as session:
-            async with session.begin():
-                assets = await list_owned_assets(session, guild_id=interaction.guild.id, user_id=interaction.user.id)
-                total_value = await get_user_asset_value(session, guild_id=interaction.guild.id, user_id=interaction.user.id)
-                net_worth = await get_user_net_worth(session, guild_id=interaction.guild.id, user_id=interaction.user.id)
-
-        await interaction.followup.send(
-            embed=build_assets_embed(user=interaction.user, assets=assets, total_value=total_value, net_worth=net_worth),
-            ephemeral=True,
-        )
 
     @loan.command(name="capacity", description="See your collateralized borrowing limit. (legacy compatibility)")
     async def loan_capacity(self, interaction: discord.Interaction):
