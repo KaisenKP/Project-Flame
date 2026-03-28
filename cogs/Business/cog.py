@@ -3222,8 +3222,7 @@ class VIPRerollSetupView(discord.ui.View):
 
     async def _build_summary_embed(self) -> discord.Embed:
         silver, unit_cost, owned = await self._resolve_wallet_and_rerolls()
-        selected = owned if self.amount_key == "max" else _clamp_int(_parse_int(self.amount_key, 1), 1, AUTO_HIRE_MAX_REROLLS)
-        selected = min(selected, owned)
+        selected = self._selected_reroll_amount(owned=owned)
         remaining = max(owned - selected, 0)
         title_target = "Worker" if self.target_kind == "worker" else "Manager"
         embed = discord.Embed(title=f"VIP {title_target} Reroll Setup", description="Tune your rerolls, then confirm. Nothing is spent until you press **Confirm**.", color=discord.Color.gold())
@@ -3237,7 +3236,19 @@ class VIPRerollSetupView(discord.ui.View):
         embed.add_field(name="Cost per reroll", value=f"**{_fmt_int(unit_cost)} Silver**", inline=True)
         embed.add_field(name="Expected remaining Silver", value=f"**{_fmt_int(max(silver - (selected * unit_cost), 0))}**", inline=True)
         embed.add_field(name="Filtered pool", value=f"`{', '.join(sorted(self._selected_rarity_keys()))}`", inline=False)
+        embed.set_footer(text=f"Per run cap: {_fmt_int(AUTO_HIRE_MAX_REROLLS)} rerolls")
         return embed
+
+    def _selected_reroll_amount(self, *, owned: int) -> int:
+        if self.amount_key == "max":
+            return min(max(int(owned), 0), AUTO_HIRE_MAX_REROLLS)
+        selected = _clamp_int(_parse_int(self.amount_key, 1), 1, AUTO_HIRE_MAX_REROLLS)
+        return min(selected, max(int(owned), 0))
+
+    @staticmethod
+    def _is_slots_full_message(message: str) -> bool:
+        normalized = _safe_str(message, "").strip().lower()
+        return "slots are full" in normalized
 
     async def _refresh_message(self, interaction: discord.Interaction) -> None:
         embed = await self._build_summary_embed()
@@ -3263,10 +3274,11 @@ class VIPRerollSetupView(discord.ui.View):
             return _worker_matches_kind(candidate, self.kind_key)  # type: ignore[arg-type]
         return _manager_matches_kind(candidate, self.kind_key)  # type: ignore[arg-type]
 
-    async def _process_rerolls(self, interaction: discord.Interaction, *, amount: int) -> tuple[int, int, str, str, str]:
+    async def _process_rerolls(self, interaction: discord.Interaction, *, amount: int) -> tuple[int, int, str, str, str, str]:
         hires, rerolls_used = 0, 0
         best_hit, latest_hit = "None yet", "None yet"
         best_score = -1
+        stopped_note = ""
         async with self.parent_view.cog.sessionmaker() as session:
             async with session.begin():
                 for idx in range(amount):
@@ -3277,7 +3289,10 @@ class VIPRerollSetupView(discord.ui.View):
                         roll_result = await roll_manager_candidate(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key, reroll_cost=MANAGER_CANDIDATE_REROLL_COST)
                         candidate = roll_result.manager_candidate
                     if (not roll_result.ok) or candidate is None:
-                        return hires, rerolls_used, best_hit, latest_hit, roll_result.message
+                        if self._is_slots_full_message(roll_result.message):
+                            stopped_note = "Stopped early because all assignment slots are full."
+                            break
+                        return hires, rerolls_used, best_hit, latest_hit, stopped_note, roll_result.message
                     rerolls_used += 1
                     rarity_key = _normalize_rarity_key(getattr(candidate, "rarity", ""))
                     hit_name = _safe_str(getattr(candidate, "worker_name", getattr(candidate, "manager_name", None)), "Candidate")
@@ -3297,14 +3312,17 @@ class VIPRerollSetupView(discord.ui.View):
                     else:
                         hire_result = await hire_manager_manual(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key, manager_name=str(getattr(candidate, "manager_name", "Manager")), rarity=str(getattr(candidate, "rarity", "common")), runtime_bonus_hours=int(getattr(candidate, "runtime_bonus_hours", 0) or 0), profit_bonus_bp=int(getattr(candidate, "profit_bonus_bp", 0) or 0), auto_restart_charges=int(getattr(candidate, "auto_restart_charges", 0) or 0), charge_silver=False)
                     if not hire_result.ok:
-                        return hires, rerolls_used, best_hit, latest_hit, hire_result.message
+                        if self._is_slots_full_message(hire_result.message):
+                            stopped_note = "Stopped early because all assignment slots are full."
+                            break
+                        return hires, rerolls_used, best_hit, latest_hit, stopped_note, hire_result.message
                     hires += 1
                     latest_hit = hit_line
                     progress = discord.Embed(title="VIP Reroll In Progress", description="Applying successful hires...", color=discord.Color.gold())
                     progress.add_field(name="Progress", value=f"Hires: **{_fmt_int(hires)}**\nRolls: **{_fmt_int(rerolls_used)}/{_fmt_int(amount)}**", inline=False)
                     progress.add_field(name="Best hit", value=best_hit, inline=False)
                     await interaction.edit_original_response(embed=progress, view=None)
-        return hires, rerolls_used, best_hit, latest_hit, ""
+        return hires, rerolls_used, best_hit, latest_hit, stopped_note, ""
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, emoji="✅", row=3)
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -3316,7 +3334,7 @@ class VIPRerollSetupView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         try:
             _, _, owned = await self._resolve_wallet_and_rerolls()
-            amount = owned if self.amount_key == "max" else _clamp_int(_parse_int(self.amount_key, 1), 1, AUTO_HIRE_MAX_REROLLS)
+            amount = self._selected_reroll_amount(owned=owned)
             if amount <= 0 or owned <= 0:
                 await interaction.edit_original_response(content="You do not currently own any rerolls for this action.", embed=None, view=self)
                 return
@@ -3326,7 +3344,7 @@ class VIPRerollSetupView(discord.ui.View):
             if self.target_kind == "manager" and not _manager_kind_pool_possible(self.kind_key, self._selected_rarity_keys()):
                 await interaction.edit_original_response(content="This kind + rarity combination has an empty result pool.", embed=None, view=self)
                 return
-            hires, rerolls_used, best_hit, latest_hit, err = await self._process_rerolls(interaction, amount=amount)
+            hires, rerolls_used, best_hit, latest_hit, stopped_note, err = await self._process_rerolls(interaction, amount=amount)
             self.parent_view.current_candidate = None
             summary = discord.Embed(title="VIP Reroll Complete", description="Your rerolls have finished.", color=SUCCESS_COLOR if not err else ERROR_COLOR)
             summary.add_field(name="Hires", value=f"**{_fmt_int(hires)}**", inline=True)
@@ -3334,6 +3352,8 @@ class VIPRerollSetupView(discord.ui.View):
             summary.add_field(name="Best pull", value=best_hit, inline=True)
             if latest_hit != "None yet":
                 summary.add_field(name="Latest matched pull", value=latest_hit, inline=False)
+            if stopped_note:
+                summary.add_field(name="Auto-stop", value=stopped_note, inline=False)
             if err:
                 summary.add_field(name="Stopped early", value=err, inline=False)
             await interaction.edit_original_response(embed=summary, view=None)
