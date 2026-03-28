@@ -75,6 +75,8 @@ log = logging.getLogger(__name__)
 AUTO_HIRE_MAX_REROLLS = 250
 AUTO_HIRE_ALLOWED_RARITIES = {"common", "uncommon", "rare", "epic", "mythic"}
 AUTO_HIRE_PROGRESS_UPDATE_INTERVAL_SECONDS = 1.0
+VIP_REROLL_AMOUNT_OPTIONS = (1, 5, 10, 25)
+VIP_REROLL_TIMEOUT_SECONDS = 120
 
 _BUSINESS_ADMIN_ROLE_IDS = {int(part) for part in ((os.getenv("BUSINESS_ADMIN_ROLE_IDS") or os.getenv("BUSINESS_ADMIN_ROLE_ID") or "").replace(",", " ").split()) if part.strip().isdigit()}
 RARITY_ORDER = ("common", "uncommon", "rare", "epic", "legendary", "mythical")
@@ -746,6 +748,99 @@ def _format_manager_summary(raw: object) -> Optional[str]:
     if text:
         return _trim(text, 36)
     return None
+
+
+def _normalize_rarity_key(raw: object) -> str:
+    key = _safe_str(raw, "").strip().lower()
+    if key == "mythic":
+        return "mythical"
+    return key
+
+
+def _rarity_order_index(raw: object) -> int:
+    key = _normalize_rarity_key(raw)
+    try:
+        return RARITY_ORDER.index(key)
+    except ValueError:
+        return -1
+
+
+def _build_rarity_filter_options(*, target_kind: str) -> dict[str, set[str]]:
+    if target_kind == "worker":
+        return {
+            "any": {"common", "uncommon", "rare", "epic", "mythic"},
+            "rare_only": {"rare"},
+            "epic_only": {"epic"},
+            "mythical_only": {"mythic"},
+            "rare_plus": {"rare", "epic", "mythic"},
+            "epic_plus": {"epic", "mythic"},
+        }
+    return {
+        "any": {"common", "rare", "epic", "legendary", "mythical"},
+        "rare_only": {"rare"},
+        "epic_only": {"epic"},
+        "mythical_only": {"mythical"},
+        "rare_plus": {"rare", "epic", "legendary", "mythical"},
+        "epic_plus": {"epic", "legendary", "mythical"},
+    }
+
+
+def _display_rarity_filter(filter_key: str) -> str:
+    mapping = {
+        "any": "Any rarity",
+        "rare_only": "Rare only",
+        "epic_only": "Epic only",
+        "mythical_only": "Mythical only",
+        "rare_plus": "Rare+",
+        "epic_plus": "Epic+",
+    }
+    return mapping.get(filter_key, "Any rarity")
+
+
+def _worker_matches_kind(candidate: WorkerCandidateSnapshot, kind_key: str) -> bool:
+    if kind_key == "any":
+        return True
+    return _safe_str(getattr(candidate, "worker_type", "efficient"), "efficient").lower() == kind_key
+
+
+def _manager_matches_kind(candidate: ManagerCandidateSnapshot, kind_key: str) -> bool:
+    runtime = int(getattr(candidate, "runtime_bonus_hours", 0) or 0)
+    profit = int(getattr(candidate, "profit_bonus_bp", 0) or 0)
+    auto = int(getattr(candidate, "auto_restart_charges", 0) or 0)
+    if kind_key == "any":
+        return True
+    if kind_key == "runtime":
+        return runtime >= profit / 100 and runtime >= auto * 3
+    if kind_key == "profit":
+        return profit >= runtime * 100 and profit >= auto * 200
+    if kind_key == "automation":
+        return auto > 0 and auto * 200 >= profit and auto * 3 >= runtime
+    if kind_key == "balanced":
+        return runtime > 0 and profit > 0 and auto > 0
+    return True
+
+
+def _manager_kind_pool_possible(kind_key: str, rarity_keys: set[str]) -> bool:
+    if kind_key != "automation":
+        return True
+    return any(r in {"rare", "epic", "legendary", "mythical"} for r in rarity_keys)
+
+
+def _kind_label(target_kind: str, kind_key: str) -> str:
+    if target_kind == "worker":
+        return {
+            "any": "Any worker type",
+            "fast": "Fast workers",
+            "efficient": "Efficient workers",
+            "kind": "Kind workers",
+        }.get(kind_key, "Any worker type")
+    return {
+        "any": "Any manager profile",
+        "runtime": "Runtime-focused",
+        "profit": "Profit-focused",
+        "automation": "Automation-focused",
+        "balanced": "Balanced profile",
+    }.get(kind_key, "Any manager profile")
 
 
 
@@ -2970,6 +3065,193 @@ class ConfirmStaffRemovalView(discord.ui.View):
         await interaction.response.edit_message(content=f"{self.staff_kind.title()} removal cancelled.", embed=None, view=None)
 
 
+class VIPRerollSetupView(discord.ui.View):
+    def __init__(self, *, parent_view: "WorkerAssignmentsView | ManagerAssignmentsView", target_kind: str):
+        super().__init__(timeout=VIP_REROLL_TIMEOUT_SECONDS)
+        self.parent_view = parent_view
+        self.target_kind = target_kind
+        self.processing = False
+        self.rarity_filter_key = "any"
+        self.kind_key = "any"
+        self.amount_key = "1"
+        self._message: Optional[discord.Message] = None
+        self._build_controls()
+
+    def _build_controls(self) -> None:
+        rarity_select = discord.ui.Select(placeholder="Rarity filter", min_values=1, max_values=1, row=0, options=[discord.SelectOption(label="Any rarity", value="any"), discord.SelectOption(label="Rare only", value="rare_only"), discord.SelectOption(label="Epic only", value="epic_only"), discord.SelectOption(label="Mythical only", value="mythical_only"), discord.SelectOption(label="Rare+", value="rare_plus"), discord.SelectOption(label="Epic+", value="epic_plus")])
+        rarity_select.callback = self._on_rarity_change
+        self.add_item(rarity_select)
+        if self.target_kind == "worker":
+            kind_options = [discord.SelectOption(label="Any worker type", value="any"), discord.SelectOption(label="Fast", value="fast"), discord.SelectOption(label="Efficient", value="efficient"), discord.SelectOption(label="Kind", value="kind")]
+            kind_placeholder = "Worker kind"
+        else:
+            kind_options = [discord.SelectOption(label="Any manager profile", value="any"), discord.SelectOption(label="Runtime focused", value="runtime"), discord.SelectOption(label="Profit focused", value="profit"), discord.SelectOption(label="Automation focused", value="automation"), discord.SelectOption(label="Balanced", value="balanced")]
+            kind_placeholder = "Manager kind"
+        kind_select = discord.ui.Select(placeholder=kind_placeholder, min_values=1, max_values=1, row=1, options=kind_options)
+        kind_select.callback = self._on_kind_change
+        self.add_item(kind_select)
+        amount_options = [discord.SelectOption(label=str(v), value=str(v)) for v in VIP_REROLL_AMOUNT_OPTIONS]
+        amount_options.append(discord.SelectOption(label="Max available", value="max"))
+        amount_select = discord.ui.Select(placeholder="Reroll amount", min_values=1, max_values=1, row=2, options=amount_options)
+        amount_select.callback = self._on_amount_change
+        self.add_item(amount_select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if int(interaction.user.id) != self.parent_view.owner_id:
+            await interaction.response.send_message("This VIP reroll panel belongs to someone else.", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+        if self._message is not None:
+            try:
+                await self._message.edit(content="VIP reroll setup timed out. Open it again from Auto-Hire (VIP).", view=self)
+            except Exception:
+                pass
+
+    async def _resolve_wallet_and_rerolls(self) -> tuple[int, int, int]:
+        async with self.parent_view.cog.sessionmaker() as session:
+            async with session.begin():
+                wallet = await session.scalar(select(WalletRow).where(WalletRow.guild_id == int(self.parent_view.guild_id), WalletRow.user_id == int(self.parent_view.owner_id)))
+        silver = int(getattr(wallet, "silver", 0) or 0) if wallet is not None else 0
+        unit_cost = WORKER_CANDIDATE_REROLL_COST if self.target_kind == "worker" else MANAGER_CANDIDATE_REROLL_COST
+        return silver, unit_cost, max(silver // max(unit_cost, 1), 0)
+
+    def _selected_rarity_keys(self) -> set[str]:
+        filters = _build_rarity_filter_options(target_kind=self.target_kind)
+        return set(filters.get(self.rarity_filter_key, filters["any"]))
+
+    async def _build_summary_embed(self) -> discord.Embed:
+        silver, unit_cost, owned = await self._resolve_wallet_and_rerolls()
+        selected = owned if self.amount_key == "max" else _clamp_int(_parse_int(self.amount_key, 1), 1, AUTO_HIRE_MAX_REROLLS)
+        selected = min(selected, owned)
+        remaining = max(owned - selected, 0)
+        title_target = "Worker" if self.target_kind == "worker" else "Manager"
+        embed = discord.Embed(title=f"VIP {title_target} Reroll Setup", description="Tune your rerolls, then confirm. Nothing is spent until you press **Confirm**.", color=discord.Color.gold())
+        embed.add_field(name="Target type", value=title_target, inline=True)
+        embed.add_field(name="Business", value=f"`{self.parent_view.business_key}`", inline=True)
+        embed.add_field(name="Kind", value=_kind_label(self.target_kind, self.kind_key), inline=True)
+        embed.add_field(name="Rarity filter", value=_display_rarity_filter(self.rarity_filter_key), inline=True)
+        embed.add_field(name="Rerolls owned", value=f"**{_fmt_int(owned)}**", inline=True)
+        embed.add_field(name="Rerolls selected", value=f"**{_fmt_int(selected)}**", inline=True)
+        embed.add_field(name="Rerolls remaining", value=f"**{_fmt_int(remaining)}**", inline=True)
+        embed.add_field(name="Cost per reroll", value=f"**{_fmt_int(unit_cost)} Silver**", inline=True)
+        embed.add_field(name="Expected remaining Silver", value=f"**{_fmt_int(max(silver - (selected * unit_cost), 0))}**", inline=True)
+        embed.add_field(name="Filtered pool", value=f"`{', '.join(sorted(self._selected_rarity_keys()))}`", inline=False)
+        return embed
+
+    async def _refresh_message(self, interaction: discord.Interaction) -> None:
+        embed = await self._build_summary_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def _on_rarity_change(self, interaction: discord.Interaction) -> None:
+        self.rarity_filter_key = interaction.data.get("values", ["any"])[0]  # type: ignore[union-attr]
+        await self._refresh_message(interaction)
+
+    async def _on_kind_change(self, interaction: discord.Interaction) -> None:
+        self.kind_key = interaction.data.get("values", ["any"])[0]  # type: ignore[union-attr]
+        await self._refresh_message(interaction)
+
+    async def _on_amount_change(self, interaction: discord.Interaction) -> None:
+        self.amount_key = interaction.data.get("values", ["1"])[0]  # type: ignore[union-attr]
+        await self._refresh_message(interaction)
+
+    def _candidate_matches_filters(self, candidate: WorkerCandidateSnapshot | ManagerCandidateSnapshot) -> bool:
+        rarity_ok = _normalize_rarity_key(getattr(candidate, "rarity", "")) in {_normalize_rarity_key(r) for r in self._selected_rarity_keys()}
+        if not rarity_ok:
+            return False
+        if self.target_kind == "worker":
+            return _worker_matches_kind(candidate, self.kind_key)  # type: ignore[arg-type]
+        return _manager_matches_kind(candidate, self.kind_key)  # type: ignore[arg-type]
+
+    async def _process_rerolls(self, interaction: discord.Interaction, *, amount: int) -> tuple[int, int, str, str, str]:
+        hires, rerolls_used = 0, 0
+        best_hit, latest_hit = "None yet", "None yet"
+        best_score = -1
+        async with self.parent_view.cog.sessionmaker() as session:
+            async with session.begin():
+                for idx in range(amount):
+                    if self.target_kind == "worker":
+                        roll_result = await roll_worker_candidate(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key, reroll_cost=WORKER_CANDIDATE_REROLL_COST)
+                        candidate = roll_result.worker_candidate
+                    else:
+                        roll_result = await roll_manager_candidate(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key, reroll_cost=MANAGER_CANDIDATE_REROLL_COST)
+                        candidate = roll_result.manager_candidate
+                    if (not roll_result.ok) or candidate is None:
+                        return hires, rerolls_used, best_hit, latest_hit, roll_result.message
+                    rerolls_used += 1
+                    rarity_key = _normalize_rarity_key(getattr(candidate, "rarity", ""))
+                    hit_name = _safe_str(getattr(candidate, "worker_name", getattr(candidate, "manager_name", None)), "Candidate")
+                    hit_line = f"{hit_name} {(_worker_rarity_badge(rarity_key) if self.target_kind == 'worker' else _manager_rarity_badge(rarity_key))}"
+                    score = _worker_candidate_score(candidate) if self.target_kind == "worker" else _manager_candidate_score(candidate)  # type: ignore[arg-type]
+                    if score > best_score:
+                        best_hit, best_score = hit_line, score
+                    if not self._candidate_matches_filters(candidate):
+                        if idx == 0 or (idx + 1) % 5 == 0:
+                            progress = discord.Embed(title="VIP Reroll In Progress", description="Filtering and evaluating candidates...", color=discord.Color.gold())
+                            progress.add_field(name="Progress", value=f"Rolls: **{_fmt_int(rerolls_used)}/{_fmt_int(amount)}**", inline=False)
+                            progress.add_field(name="Best hit", value=best_hit, inline=False)
+                            await interaction.edit_original_response(embed=progress, view=None)
+                        continue
+                    if self.target_kind == "worker":
+                        hire_result = await hire_worker_manual(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key, worker_name=str(getattr(candidate, "worker_name", "Worker")), worker_type=str(getattr(candidate, "worker_type", "efficient")), rarity=str(getattr(candidate, "rarity", "common")), flat_profit_bonus=int(getattr(candidate, "flat_profit_bonus", 0) or 0), percent_profit_bonus_bp=int(getattr(candidate, "percent_profit_bonus_bp", 0) or 0), charge_silver=False)
+                    else:
+                        hire_result = await hire_manager_manual(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key, manager_name=str(getattr(candidate, "manager_name", "Manager")), rarity=str(getattr(candidate, "rarity", "common")), runtime_bonus_hours=int(getattr(candidate, "runtime_bonus_hours", 0) or 0), profit_bonus_bp=int(getattr(candidate, "profit_bonus_bp", 0) or 0), auto_restart_charges=int(getattr(candidate, "auto_restart_charges", 0) or 0), charge_silver=False)
+                    if not hire_result.ok:
+                        return hires, rerolls_used, best_hit, latest_hit, hire_result.message
+                    hires += 1
+                    latest_hit = hit_line
+                    progress = discord.Embed(title="VIP Reroll In Progress", description="Applying successful hires...", color=discord.Color.gold())
+                    progress.add_field(name="Progress", value=f"Hires: **{_fmt_int(hires)}**\nRolls: **{_fmt_int(rerolls_used)}/{_fmt_int(amount)}**", inline=False)
+                    progress.add_field(name="Best hit", value=best_hit, inline=False)
+                    await interaction.edit_original_response(embed=progress, view=None)
+        return hires, rerolls_used, best_hit, latest_hit, ""
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, emoji="✅", row=3)
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        if self.processing:
+            await interaction.response.send_message("This reroll is already running.", ephemeral=True)
+            return
+        self.processing = True
+        await interaction.response.defer(ephemeral=True)
+        try:
+            _, _, owned = await self._resolve_wallet_and_rerolls()
+            amount = owned if self.amount_key == "max" else _clamp_int(_parse_int(self.amount_key, 1), 1, AUTO_HIRE_MAX_REROLLS)
+            if amount <= 0 or owned <= 0:
+                await interaction.edit_original_response(content="You do not currently own any rerolls for this action.", embed=None, view=self)
+                return
+            if amount > owned:
+                await interaction.edit_original_response(content=f"You only own **{_fmt_int(owned)}** rerolls right now.", embed=None, view=self)
+                return
+            if self.target_kind == "manager" and not _manager_kind_pool_possible(self.kind_key, self._selected_rarity_keys()):
+                await interaction.edit_original_response(content="This kind + rarity combination has an empty result pool.", embed=None, view=self)
+                return
+            hires, rerolls_used, best_hit, latest_hit, err = await self._process_rerolls(interaction, amount=amount)
+            self.parent_view.current_candidate = None
+            summary = discord.Embed(title="VIP Reroll Complete", description="Your rerolls have finished.", color=SUCCESS_COLOR if not err else ERROR_COLOR)
+            summary.add_field(name="Hires", value=f"**{_fmt_int(hires)}**", inline=True)
+            summary.add_field(name="Rolls used", value=f"**{_fmt_int(rerolls_used)}**/**{_fmt_int(amount)}**", inline=True)
+            summary.add_field(name="Best pull", value=best_hit, inline=True)
+            if latest_hit != "None yet":
+                summary.add_field(name="Latest matched pull", value=latest_hit, inline=False)
+            if err:
+                summary.add_field(name="Stopped early", value=err, inline=False)
+            await interaction.edit_original_response(embed=summary, view=None)
+            await self.parent_view._show_recruitment_board(interaction, action_message=f"✅ VIP reroll complete: **{_fmt_int(rerolls_used)}** rolls used, **{_fmt_int(hires)}** hires.")
+        finally:
+            self.processing = False
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=3)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content="VIP reroll cancelled.", view=self)
+
+
 class AutoHireWorkersModal(discord.ui.Modal, title="Auto-Hire Workers"):
     def __init__(self, view: "WorkerAssignmentsView"):
         super().__init__()
@@ -3332,22 +3614,10 @@ class WorkerAssignmentsView(BusinessBaseView):
         self.next_page_button.disabled = self.page >= (total_pages - 1)
 
     async def _send_auto_hire_reply(self, interaction: discord.Interaction) -> None:
-        rerolls = 15
-        allowed_rarities = set(AUTO_HIRE_ALLOWED_RARITIES)
-        total_cost = rerolls * WORKER_CANDIDATE_REROLL_COST
-        embed = discord.Embed(
-            title="Confirm Worker Auto-Hire",
-            description=f"Auto-Hire can spend up to **{_fmt_int(total_cost)} Silver** for **{_fmt_int(rerolls)} rerolls**.",
-            color=discord.Color.gold(),
-        )
-        embed.add_field(name="Allowed rarities", value=f"`{', '.join(sorted(allowed_rarities))}`", inline=False)
-        embed.add_field(name="Flow", value="Auto-Hire keeps rolling and hires matches until slots are full or budget is spent.", inline=False)
-        await interaction.response.send_message(
-            "VIP Auto-Reroll started with default settings (all rarities, 15 rerolls).",
-            embed=embed,
-            view=ConfirmWorkerAutoHireView(parent_view=self, rerolls=rerolls, allowed_rarities=allowed_rarities),
-            ephemeral=True,
-        )
+        setup_view = VIPRerollSetupView(parent_view=self, target_kind="worker")
+        embed = await setup_view._build_summary_embed()
+        await interaction.response.send_message(embed=embed, view=setup_view, ephemeral=True)
+        setup_view._message = await interaction.original_response()
 
     async def _refresh_assignments_embed(self, interaction: discord.Interaction) -> Optional[tuple[BusinessManageSnapshot, Sequence[WorkerAssignmentSlotSnapshot], discord.Embed]]:
         async with self.cog.sessionmaker() as session:
@@ -3567,22 +3837,10 @@ class ManagerAssignmentsView(BusinessBaseView):
         self.next_page_button.disabled = self.page >= (total_pages - 1)
 
     async def _send_auto_hire_reply(self, interaction: discord.Interaction) -> None:
-        rerolls = 15
-        allowed_rarities = set(AUTO_HIRE_ALLOWED_RARITIES)
-        total_cost = rerolls * MANAGER_CANDIDATE_REROLL_COST
-        embed = discord.Embed(
-            title="Confirm Manager Auto-Hire",
-            description=f"Auto-Hire can spend up to **{_fmt_int(total_cost)} Silver** for **{_fmt_int(rerolls)} rerolls**.",
-            color=discord.Color.gold(),
-        )
-        embed.add_field(name="Allowed rarities", value=f"`{', '.join(sorted(allowed_rarities))}`", inline=False)
-        embed.add_field(name="Flow", value="Auto-Hire keeps rolling and hires matches until slots are full or budget is spent.", inline=False)
-        await interaction.response.send_message(
-            "VIP Auto-Reroll started with default settings (all rarities, 15 rerolls).",
-            embed=embed,
-            view=ConfirmManagerAutoHireView(parent_view=self, rerolls=rerolls, allowed_rarities=allowed_rarities),
-            ephemeral=True,
-        )
+        setup_view = VIPRerollSetupView(parent_view=self, target_kind="manager")
+        embed = await setup_view._build_summary_embed()
+        await interaction.response.send_message(embed=embed, view=setup_view, ephemeral=True)
+        setup_view._message = await interaction.original_response()
 
     async def _refresh_assignments_embed(self, interaction: discord.Interaction) -> Optional[tuple[BusinessManageSnapshot, Sequence[ManagerAssignmentSlotSnapshot], discord.Embed]]:
         async with self.cog.sessionmaker() as session:
