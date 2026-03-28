@@ -428,6 +428,17 @@ class WorkCog(commands.Cog):
         self.bot = bot
         self.sessionmaker = sessions()
         self.stamina = StaminaService()
+        self._work_guard_map_lock = asyncio.Lock()
+        self._work_user_locks: dict[tuple[int, int], asyncio.Lock] = {}
+
+    async def _work_lock_for(self, guild_id: int, user_id: int) -> asyncio.Lock:
+        key = (int(guild_id), int(user_id))
+        async with self._work_guard_map_lock:
+            lock = self._work_user_locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._work_user_locks[key] = lock
+            return lock
 
     @app_commands.command(name="work", description="Work your equipped job.")
     async def work_cmd(self, interaction: discord.Interaction):
@@ -437,434 +448,446 @@ class WorkCog(commands.Cog):
 
         guild_id = interaction.guild.id
         user_id = interaction.user.id
+        work_lock = await self._work_lock_for(guild_id, user_id)
+        if work_lock.locked():
+            await interaction.response.send_message(
+                "Slow down, your last work is still running.",
+                ephemeral=True,
+            )
+            return
+
+        await work_lock.acquire()
         vip = is_vip_member(interaction.user)  # type: ignore[arg-type]
         now = time.time()
 
-        await interaction.response.defer(thinking=True)
+        try:
+            await interaction.response.defer(thinking=True)
 
-        embed: Optional[discord.Embed] = None
-        key: Optional[str] = None
-        used_cooldown_seconds: Optional[float] = None
-        next_job_name: Optional[str] = None
+            embed: Optional[discord.Embed] = None
+            key: Optional[str] = None
+            used_cooldown_seconds: Optional[float] = None
+            next_job_name: Optional[str] = None
 
-        async with self.sessionmaker() as session:
-            async with session.begin():
-                await ensure_user_rows(session, guild_id=guild_id, user_id=user_id)
+            async with self.sessionmaker() as session:
+                async with session.begin():
+                    await ensure_user_rows(session, guild_id=guild_id, user_id=user_id)
 
-                active_slot = await get_active_slot(session, guild_id=guild_id, user_id=user_id, vip=vip)
-                key = active_slot.job_key
-                if not key:
-                    await interaction.followup.send(
-                        "You don’t have a job assigned to your active Job Hub slot yet.\nUse **/job** to configure it.",
-                        ephemeral=True,
-                    )
-                    return
-
-                d = get_job_def(key)
-                if d is None:
-                    await interaction.followup.send(
-                        "Your first job slot no longer exists. Use **/job** to set your slots again.",
-                        ephemeral=True,
-                    )
-                    return
-
-                if d.vip_only and not vip:
-                    await interaction.followup.send(
-                        "Your current slot is VIP-locked and you’re not VIP. Pick another with **/job**.",
-                        ephemeral=True,
-                    )
-                    return
-
-                job_row = await get_or_create_job_row(session, job_key=key)
-                if not bool(getattr(job_row, "enabled", True)):
-                    await interaction.followup.send(f"Job `{key}` is disabled in DB.", ephemeral=True)
-                    return
-
-                user_level = await get_level(session, guild_id=guild_id, user_id=user_id)
-
-                from services.jobs_core import unlock_level_for
-                need_unlock = unlock_level_for(d.key, d.category)
-
-                if (not vip) and user_level < need_unlock:
-                    await interaction.followup.send(f"🔒 **{d.name}** unlocks at **Level {need_unlock}**.", ephemeral=True)
-                    return
-
-                if not d.actions:
-                    await interaction.followup.send("This job has no actions configured.", ephemeral=True)
-                    return
-
-                slot_snap = await get_slot_snapshot(session, guild_id=guild_id, user_id=user_id, vip=vip, slot_index=int(active_slot.slot_index))
-                snap_before = slot_snap.progress
-                if snap_before is None:
-                    await interaction.followup.send("This slot has no progression state yet. Reopen `/job` and try again.", ephemeral=True)
-                    return
-                effective_cd = _effective_work_cooldown_seconds(
-                    base_seconds=float(d.cooldown_seconds),
-                    work_level=int(snap_before.level),
-                    vip=vip,
-                )
-                cd_key = (guild_id, user_id, key)
-                ready_at = _COOLDOWNS.get(cd_key, 0.0)
-                if ready_at > now:
-                    left = int(max(ready_at - now, 0))
-                    await interaction.followup.send(f"Cooldown. Try again in **{fmt_int(left)}s**.", ephemeral=True)
-                    return
-
-                income_tool_bp, xp_tool_bp, tool_stamina_save_chance_bp, selected_tool_name = tool_bonus_snapshot(
-                    key,
-                    slot_snap.selected_tool_key,
-                    slot_snap.tool_levels,
-                )
-                tool_stamina_save_chance_bp = clamp_int(int(tool_stamina_save_chance_bp), 0, MAX_TOOL_STAMINA_SAVE_CHANCE_BP)
-                job_effects = JobEffects(
-                    payout_bonus_bp=income_tool_bp,
-                    fail_reduction_bp=0,
-                    stamina_discount_bp=0,
-                    job_xp_bonus_bp=xp_tool_bp,
-                    user_xp_bonus_bp=0,
-                ).clamp()
-
-                item_mods = await _get_item_mods(session, guild_id=guild_id, user_id=user_id)
-
-                merged_effects = replace(
-                    job_effects,
-                    payout_bonus_bp=clamp_int(int(job_effects.payout_bonus_bp) + int(item_mods.payout_bonus_bp), -10_000, 50_000),
-                    fail_reduction_bp=clamp_int(int(job_effects.fail_reduction_bp) + int(item_mods.fail_reduction_bp), 0, 10_000),
-                    stamina_discount_bp=clamp_int(int(job_effects.stamina_discount_bp) + int(item_mods.stamina_discount_bp), 0, 10_000),
-                    job_xp_bonus_bp=clamp_int(int(job_effects.job_xp_bonus_bp) + int(item_mods.job_xp_bonus_bp), -10_000, 50_000),
-                    user_xp_bonus_bp=clamp_int(int(job_effects.user_xp_bonus_bp) + int(item_mods.user_xp_bonus_bp), -10_000, 50_000),
-                )
-                merged_effects = merged_effects.clamp()
-
-                job_level_now = max(int(snap_before.level), 1)
-                job_prestige_now = max(int(snap_before.prestige), 0)
-
-                stamina_cost_base = stamina_cost_for_work(
-                    job_level=job_level_now,
-                    prestige=job_prestige_now,
-                    category=d.category,
-                )
-                stamina_cost = sub_bp(stamina_cost_base, int(merged_effects.stamina_discount_bp))
-                stamina_cost = int(stamina_cost) + int(item_mods.stamina_cost_flat_delta)
-                stamina_cost = clamp_int(int(stamina_cost), 1, 10)
-                effective_stamina_cost = int(stamina_cost)
-                tool_stamina_saved = False
-                if int(tool_stamina_save_chance_bp) > 0 and roll_bp(int(tool_stamina_save_chance_bp)):
-                    effective_stamina_cost = 0
-                    tool_stamina_saved = True
-
-                ok, stam_snap = await self.stamina.try_spend(
-                    session,
-                    guild_id=guild_id,
-                    user_id=user_id,
-                    cost=effective_stamina_cost,
-                    is_vip=vip,
-                )
-                if not ok:
-                    await interaction.followup.send(
-                        f"Not enough stamina. You have **{fmt_int(stam_snap.current)}/{fmt_int(stam_snap.max)}**.",
-                        ephemeral=True,
-                    )
-                    return
-
-                wallet = await session.scalar(
-                    select(WalletRow).where(
-                        WalletRow.guild_id == guild_id,
-                        WalletRow.user_id == user_id,
-                    )
-                )
-                if wallet is None:
-                    wallet = WalletRow(guild_id=guild_id, user_id=user_id, silver=0, diamonds=0)
-                    session.add(wallet)
-                    await session.flush()
-
-                success_actions, fail_actions = _split_actions(d)
-
-                fail_bp = category_fail_bp(d.category, d.fail_chance_bp)
-                fail_bp = max(int(fail_bp) - int(merged_effects.fail_reduction_bp), 0)
-                fail_bp = clamp_int(fail_bp, 0, 10_000)
-
-                failed = roll_bp(fail_bp) if fail_bp > 0 else False
-                extra_roll = roll_bp(int(getattr(merged_effects, "extra_roll_bp", 0))) if int(getattr(merged_effects, "extra_roll_bp", 0)) > 0 else False
-
-                payout = 0
-                action_text = ""
-                did_double = False
-                upgrade_level = 0
-                upgrade_bonus_pct = 0
-
-                if failed:
-                    action = _pick_weighted(fail_actions)
-                    action_text = action.text
-                    payout = 0
-                else:
-                    action = _pick_weighted(success_actions)
-                    action_text = action.text
-
-                    lo = int(action.min_silver)
-                    hi = int(action.max_silver)
-                    if hi < lo:
-                        lo, hi = hi, lo
-
-                    def _roll_payout_once() -> int:
-                        raw = random.randint(max(lo, 0), max(hi, 0))
-
-                        if int(getattr(merged_effects, "rare_find_bp", 0)) > 0 and roll_bp(int(getattr(merged_effects, "rare_find_bp", 0))):
-                            bump = max(int(round(raw * 0.25)), 1)
-                            raw += bump
-
-                        if d.bonus_chance_bp > 0 and d.bonus_multiplier > 1.0 and roll_bp(d.bonus_chance_bp):
-                            raw = int(round(raw * float(d.bonus_multiplier)))
-
-                        raw = payout_for_work(
-                            base_payout=raw,
-                            job_key=key,
-                            job_level=job_level_now,
-                            prestige=job_prestige_now,
+                    active_slot = await get_active_slot(session, guild_id=guild_id, user_id=user_id, vip=vip)
+                    key = active_slot.job_key
+                    if not key:
+                        await interaction.followup.send(
+                            "You don’t have a job assigned to your active Job Hub slot yet.\nUse **/job** to configure it.",
+                            ephemeral=True,
                         )
-                        raw = apply_bp(raw, int(merged_effects.payout_bonus_bp))
-                        return max(int(raw), 0)
+                        return
 
-                    p1 = _roll_payout_once()
-                    payout = max(p1, _roll_payout_once()) if extra_roll else p1
+                    d = get_job_def(key)
+                    if d is None:
+                        await interaction.followup.send(
+                            "Your first job slot no longer exists. Use **/job** to set your slots again.",
+                            ephemeral=True,
+                        )
+                        return
 
-                    upgrade_level = int(slot_snap.tool_levels.get(slot_snap.selected_tool_key or "", 0))
-                    upgrade_bonus_pct = income_tool_bp // 100
+                    if d.vip_only and not vip:
+                        await interaction.followup.send(
+                            "Your current slot is VIP-locked and you’re not VIP. Pick another with **/job**.",
+                            ephemeral=True,
+                        )
+                        return
 
-                    perk_unlocked, _ = unlocked_perks(key, job_level_now)
-                    for event in event_defs_for(key):
-                        chance_bp = int(event.chance_bp)
-                        chance_bp += sum(int(perk.event_weight_bonus_bp) for perk in perk_unlocked)
-                        if roll_bp(chance_bp):
-                            payout = max((payout * (10_000 + int(event.payout_multiplier_bp))) // 10_000, 0) + int(event.bonus_silver_flat)
-                            stamina_cost = clamp_int(stamina_cost + int(event.stamina_delta), 1, 10)
-                            action_text += f"\n🎲 **{event.name}:** {event.description}"
-                            if event.fail_override is False:
-                                failed = False
-                            break
+                    job_row = await get_or_create_job_row(session, job_key=key)
+                    if not bool(getattr(job_row, "enabled", True)):
+                        await interaction.followup.send(f"Job `{key}` is disabled in DB.", ephemeral=True)
+                        return
 
-                    base_user_xp = user_xp_for_work(user_level=user_level, category=d.category)
-                    adjusted_user_xp = apply_bp(base_user_xp, int(merged_effects.user_xp_bonus_bp))
-                    user_xp_gain = apply_work_xp_multipliers(int(adjusted_user_xp))
-                    await award_xp(
-                        session,
-                        guild_id=guild_id,
-                        user_id=user_id,
-                        amount=int(user_xp_gain),
-                        apply_weekend_multiplier=False,
+                    user_level = await get_level(session, guild_id=guild_id, user_id=user_id)
+
+                    from services.jobs_core import unlock_level_for
+                    need_unlock = unlock_level_for(d.key, d.category)
+
+                    if (not vip) and user_level < need_unlock:
+                        await interaction.followup.send(f"🔒 **{d.name}** unlocks at **Level {need_unlock}**.", ephemeral=True)
+                        return
+
+                    if not d.actions:
+                        await interaction.followup.send("This job has no actions configured.", ephemeral=True)
+                        return
+
+                    slot_snap = await get_slot_snapshot(session, guild_id=guild_id, user_id=user_id, vip=vip, slot_index=int(active_slot.slot_index))
+                    snap_before = slot_snap.progress
+                    if snap_before is None:
+                        await interaction.followup.send("This slot has no progression state yet. Reopen `/job` and try again.", ephemeral=True)
+                        return
+                    effective_cd = _effective_work_cooldown_seconds(
+                        base_seconds=float(d.cooldown_seconds),
+                        work_level=int(snap_before.level),
+                        vip=vip,
                     )
-                    await increment_counter(
-                        session,
-                        guild_id=guild_id,
-                        user_id=user_id,
-                        counter_key="jobs_completed",
-                        amount=1,
-                    )
+                    cd_key = (guild_id, user_id, key)
+                    ready_at = _COOLDOWNS.get(cd_key, 0.0)
+                    if ready_at > now:
+                        left = int(max(ready_at - now, 0))
+                        await interaction.followup.send(f"Cooldown. Try again in **{fmt_int(left)}s**.", ephemeral=True)
+                        return
 
-                    base_job_xp = job_xp_for_work(
+                    income_tool_bp, xp_tool_bp, tool_stamina_save_chance_bp, selected_tool_name = tool_bonus_snapshot(
+                        key,
+                        slot_snap.selected_tool_key,
+                        slot_snap.tool_levels,
+                    )
+                    tool_stamina_save_chance_bp = clamp_int(int(tool_stamina_save_chance_bp), 0, MAX_TOOL_STAMINA_SAVE_CHANCE_BP)
+                    job_effects = JobEffects(
+                        payout_bonus_bp=income_tool_bp,
+                        fail_reduction_bp=0,
+                        stamina_discount_bp=0,
+                        job_xp_bonus_bp=xp_tool_bp,
+                        user_xp_bonus_bp=0,
+                    ).clamp()
+
+                    item_mods = await _get_item_mods(session, guild_id=guild_id, user_id=user_id)
+
+                    merged_effects = replace(
+                        job_effects,
+                        payout_bonus_bp=clamp_int(int(job_effects.payout_bonus_bp) + int(item_mods.payout_bonus_bp), -10_000, 50_000),
+                        fail_reduction_bp=clamp_int(int(job_effects.fail_reduction_bp) + int(item_mods.fail_reduction_bp), 0, 10_000),
+                        stamina_discount_bp=clamp_int(int(job_effects.stamina_discount_bp) + int(item_mods.stamina_discount_bp), 0, 10_000),
+                        job_xp_bonus_bp=clamp_int(int(job_effects.job_xp_bonus_bp) + int(item_mods.job_xp_bonus_bp), -10_000, 50_000),
+                        user_xp_bonus_bp=clamp_int(int(job_effects.user_xp_bonus_bp) + int(item_mods.user_xp_bonus_bp), -10_000, 50_000),
+                    )
+                    merged_effects = merged_effects.clamp()
+
+                    job_level_now = max(int(snap_before.level), 1)
+                    job_prestige_now = max(int(snap_before.prestige), 0)
+
+                    stamina_cost_base = stamina_cost_for_work(
                         job_level=job_level_now,
                         prestige=job_prestige_now,
                         category=d.category,
                     )
-                    adjusted_job_xp = apply_bp(base_job_xp, int(merged_effects.job_xp_bonus_bp))
-                    delta_job_xp = apply_work_xp_multipliers(int(adjusted_job_xp))
+                    stamina_cost = sub_bp(stamina_cost_base, int(merged_effects.stamina_discount_bp))
+                    stamina_cost = int(stamina_cost) + int(item_mods.stamina_cost_flat_delta)
+                    stamina_cost = clamp_int(int(stamina_cost), 1, 10)
+                    effective_stamina_cost = int(stamina_cost)
+                    tool_stamina_saved = False
+                    if int(tool_stamina_save_chance_bp) > 0 and roll_bp(int(tool_stamina_save_chance_bp)):
+                        effective_stamina_cost = 0
+                        tool_stamina_saved = True
 
-                    danger_triggered = (not failed) and should_trigger_danger(key)
-                    if (not failed) and (not danger_triggered) and should_trigger_normal(key):
-                        normal_interaction = pick_normal_interaction(key)
-                        if normal_interaction is not None:
-                            normal_resolution = resolve_normal_interaction(
-                                interaction=normal_interaction,
-                                payout=payout,
-                                job_xp=delta_job_xp,
+                    ok, stam_snap = await self.stamina.try_spend(
+                        session,
+                        guild_id=guild_id,
+                        user_id=user_id,
+                        cost=effective_stamina_cost,
+                        is_vip=vip,
+                    )
+                    if not ok:
+                        await interaction.followup.send(
+                            f"Not enough stamina. You have **{fmt_int(stam_snap.current)}/{fmt_int(stam_snap.max)}**.",
+                            ephemeral=True,
+                        )
+                        return
+
+                    wallet = await session.scalar(
+                        select(WalletRow).where(
+                            WalletRow.guild_id == guild_id,
+                            WalletRow.user_id == user_id,
+                        )
+                    )
+                    if wallet is None:
+                        wallet = WalletRow(guild_id=guild_id, user_id=user_id, silver=0, diamonds=0)
+                        session.add(wallet)
+                        await session.flush()
+
+                    success_actions, fail_actions = _split_actions(d)
+
+                    fail_bp = category_fail_bp(d.category, d.fail_chance_bp)
+                    fail_bp = max(int(fail_bp) - int(merged_effects.fail_reduction_bp), 0)
+                    fail_bp = clamp_int(fail_bp, 0, 10_000)
+
+                    failed = roll_bp(fail_bp) if fail_bp > 0 else False
+                    extra_roll = roll_bp(int(getattr(merged_effects, "extra_roll_bp", 0))) if int(getattr(merged_effects, "extra_roll_bp", 0)) > 0 else False
+
+                    payout = 0
+                    action_text = ""
+                    did_double = False
+                    upgrade_level = 0
+                    upgrade_bonus_pct = 0
+
+                    if failed:
+                        action = _pick_weighted(fail_actions)
+                        action_text = action.text
+                        payout = 0
+                    else:
+                        action = _pick_weighted(success_actions)
+                        action_text = action.text
+
+                        lo = int(action.min_silver)
+                        hi = int(action.max_silver)
+                        if hi < lo:
+                            lo, hi = hi, lo
+
+                        def _roll_payout_once() -> int:
+                            raw = random.randint(max(lo, 0), max(hi, 0))
+
+                            if int(getattr(merged_effects, "rare_find_bp", 0)) > 0 and roll_bp(int(getattr(merged_effects, "rare_find_bp", 0))):
+                                bump = max(int(round(raw * 0.25)), 1)
+                                raw += bump
+
+                            if d.bonus_chance_bp > 0 and d.bonus_multiplier > 1.0 and roll_bp(d.bonus_chance_bp):
+                                raw = int(round(raw * float(d.bonus_multiplier)))
+
+                            raw = payout_for_work(
+                                base_payout=raw,
+                                job_key=key,
+                                job_level=job_level_now,
+                                prestige=job_prestige_now,
                             )
-                            payout = int(normal_resolution.payout)
-                            delta_job_xp = int(normal_resolution.job_xp)
-                            action_text += (
-                                f"\n✨ **{normal_interaction.title}:** {normal_interaction.description}"
-                                f"\n↳ {normal_resolution.outcome.text}"
-                            )
+                            raw = apply_bp(raw, int(merged_effects.payout_bonus_bp))
+                            return max(int(raw), 0)
 
-                    if danger_triggered:
-                        encounter = pick_danger_encounter(key)
-                        if encounter is not None:
-                            _COOLDOWNS[(guild_id, user_id, key)] = now + float(effective_cd)
+                        p1 = _roll_payout_once()
+                        payout = max(p1, _roll_payout_once()) if extra_roll else p1
 
-                            async def _resolve_danger(*, interaction: Optional[discord.Interaction], choice_key: str, timed_out: bool, view: DangerEncounterView) -> None:
-                                async with self.sessionmaker() as final_session:
-                                    async with final_session.begin():
-                                        final_wallet = await final_session.scalar(
-                                            select(WalletRow).where(
-                                                WalletRow.guild_id == guild_id,
-                                                WalletRow.user_id == user_id,
-                                            )
-                                        )
-                                        if final_wallet is None:
-                                            final_wallet = WalletRow(guild_id=guild_id, user_id=user_id, silver=0, diamonds=0)
-                                            final_session.add(final_wallet)
-                                            await final_session.flush()
+                        upgrade_level = int(slot_snap.tool_levels.get(slot_snap.selected_tool_key or "", 0))
+                        upgrade_bonus_pct = income_tool_bp // 100
 
-                                        resolution = resolve_danger_choice(encounter=encounter, choice_key=choice_key, payout=payout, job_xp=delta_job_xp)
-                                        if timed_out:
-                                            resolution = replace(resolution, timed_out=True)
+                        perk_unlocked, _ = unlocked_perks(key, job_level_now)
+                        for event in event_defs_for(key):
+                            chance_bp = int(event.chance_bp)
+                            chance_bp += sum(int(perk.event_weight_bonus_bp) for perk in perk_unlocked)
+                            if roll_bp(chance_bp):
+                                payout = max((payout * (10_000 + int(event.payout_multiplier_bp))) // 10_000, 0) + int(event.bonus_silver_flat)
+                                stamina_cost = clamp_int(stamina_cost + int(event.stamina_delta), 1, 10)
+                                action_text += f"\n🎲 **{event.name}:** {event.description}"
+                                if event.fail_override is False:
+                                    failed = False
+                                break
 
-                                        final_wallet.silver += int(resolution.payout)
-                                        if hasattr(final_wallet, "silver_earned"):
-                                            final_wallet.silver_earned += int(max(resolution.payout, 0))
-
-                                        final_progress, final_leveled = await award_slot_job_xp(
-                                            final_session,
-                                            guild_id=guild_id,
-                                            user_id=user_id,
-                                            slot_index=int(active_slot.slot_index),
-                                            job_key=key,
-                                            amount=int(resolution.job_xp),
-                                        )
-
-                                        result_embed = build_danger_result_embed(
-                                            user=interaction.user if interaction is not None else interaction_user,
-                                            d=d,
-                                            resolution=resolution,
-                                            stamina_cost=effective_stamina_cost,
-                                            user_xp=int(user_xp_gain),
-                                            job_xp=int(resolution.job_xp),
-                                            progress_after=final_progress,
-                                            next_job_name=next_job_name,
-                                            xp_needed_value=int(xp_needed(key, int(final_progress.level), int(final_progress.prestige))),
-                                        )
-                                        if final_leveled:
-                                            result_embed.add_field(name="Milestone", value="⬆️ Leveled up from the danger encounter payout.", inline=False)
-
-                                if interaction is not None:
-                                    await interaction.edit_original_response(embed=result_embed, view=view)
-                                elif view._message is not None:
-                                    await view._message.edit(embed=result_embed, view=view)
-
-                            interaction_user = interaction.user
-                            danger_embed = build_danger_embed(user=interaction.user, d=d, encounter=encounter, payout=payout)
-                            view = DangerEncounterView(
-                                owner_id=user_id,
-                                timeout_seconds=45.0,
-                                encounter=encounter,
-                                resolver=_resolve_danger,
-                            )
-                            sent_msg = await interaction.followup.send(embed=danger_embed, view=view, wait=True)
-                            view.bind_message(sent_msg)
-                            asyncio.create_task(
-                                self._check_and_announce_achievements(guild_id=guild_id, user_id=user_id),
-                                name="jobs.work.achievements",
-                            )
-                            return
-
-                    if int(item_mods.double_payout_chance_bp) > 0 and roll_bp(int(item_mods.double_payout_chance_bp)):
-                        did_double = True
-                        payout *= 2
-                        await _consume_charge_from_group(
+                        base_user_xp = user_xp_for_work(user_level=user_level, category=d.category)
+                        adjusted_user_xp = apply_bp(base_user_xp, int(merged_effects.user_xp_bonus_bp))
+                        user_xp_gain = apply_work_xp_multipliers(int(adjusted_user_xp))
+                        await award_xp(
                             session,
                             guild_id=guild_id,
                             user_id=user_id,
-                            group_key="double_payout",
+                            amount=int(user_xp_gain),
+                            apply_weekend_multiplier=False,
+                        )
+                        await increment_counter(
+                            session,
+                            guild_id=guild_id,
+                            user_id=user_id,
+                            counter_key="jobs_completed",
                             amount=1,
                         )
 
-                    wallet.silver += int(payout)
-                    if hasattr(wallet, "silver_earned"):
-                        wallet.silver_earned += int(max(payout, 0))
-                if failed:
-                    base_user_xp = user_xp_for_work(user_level=user_level, category=d.category)
-                    adjusted_user_xp = apply_bp(base_user_xp, int(merged_effects.user_xp_bonus_bp))
-                    user_xp_gain = apply_work_xp_multipliers(int(adjusted_user_xp))
-                    await award_xp(
+                        base_job_xp = job_xp_for_work(
+                            job_level=job_level_now,
+                            prestige=job_prestige_now,
+                            category=d.category,
+                        )
+                        adjusted_job_xp = apply_bp(base_job_xp, int(merged_effects.job_xp_bonus_bp))
+                        delta_job_xp = apply_work_xp_multipliers(int(adjusted_job_xp))
+
+                        danger_triggered = (not failed) and should_trigger_danger(key)
+                        if (not failed) and (not danger_triggered) and should_trigger_normal(key):
+                            normal_interaction = pick_normal_interaction(key)
+                            if normal_interaction is not None:
+                                normal_resolution = resolve_normal_interaction(
+                                    interaction=normal_interaction,
+                                    payout=payout,
+                                    job_xp=delta_job_xp,
+                                )
+                                payout = int(normal_resolution.payout)
+                                delta_job_xp = int(normal_resolution.job_xp)
+                                action_text += (
+                                    f"\n✨ **{normal_interaction.title}:** {normal_interaction.description}"
+                                    f"\n↳ {normal_resolution.outcome.text}"
+                                )
+
+                        if danger_triggered:
+                            encounter = pick_danger_encounter(key)
+                            if encounter is not None:
+                                _COOLDOWNS[(guild_id, user_id, key)] = now + float(effective_cd)
+
+                                async def _resolve_danger(*, interaction: Optional[discord.Interaction], choice_key: str, timed_out: bool, view: DangerEncounterView) -> None:
+                                    async with self.sessionmaker() as final_session:
+                                        async with final_session.begin():
+                                            final_wallet = await final_session.scalar(
+                                                select(WalletRow).where(
+                                                    WalletRow.guild_id == guild_id,
+                                                    WalletRow.user_id == user_id,
+                                                )
+                                            )
+                                            if final_wallet is None:
+                                                final_wallet = WalletRow(guild_id=guild_id, user_id=user_id, silver=0, diamonds=0)
+                                                final_session.add(final_wallet)
+                                                await final_session.flush()
+
+                                            resolution = resolve_danger_choice(encounter=encounter, choice_key=choice_key, payout=payout, job_xp=delta_job_xp)
+                                            if timed_out:
+                                                resolution = replace(resolution, timed_out=True)
+
+                                            final_wallet.silver += int(resolution.payout)
+                                            if hasattr(final_wallet, "silver_earned"):
+                                                final_wallet.silver_earned += int(max(resolution.payout, 0))
+
+                                            final_progress, final_leveled = await award_slot_job_xp(
+                                                final_session,
+                                                guild_id=guild_id,
+                                                user_id=user_id,
+                                                slot_index=int(active_slot.slot_index),
+                                                job_key=key,
+                                                amount=int(resolution.job_xp),
+                                            )
+
+                                            result_embed = build_danger_result_embed(
+                                                user=interaction.user if interaction is not None else interaction_user,
+                                                d=d,
+                                                resolution=resolution,
+                                                stamina_cost=effective_stamina_cost,
+                                                user_xp=int(user_xp_gain),
+                                                job_xp=int(resolution.job_xp),
+                                                progress_after=final_progress,
+                                                next_job_name=next_job_name,
+                                                xp_needed_value=int(xp_needed(key, int(final_progress.level), int(final_progress.prestige))),
+                                            )
+                                            if final_leveled:
+                                                result_embed.add_field(name="Milestone", value="⬆️ Leveled up from the danger encounter payout.", inline=False)
+
+                                    if interaction is not None:
+                                        await interaction.edit_original_response(embed=result_embed, view=view)
+                                    elif view._message is not None:
+                                        await view._message.edit(embed=result_embed, view=view)
+
+                                interaction_user = interaction.user
+                                danger_embed = build_danger_embed(user=interaction.user, d=d, encounter=encounter, payout=payout)
+                                view = DangerEncounterView(
+                                    owner_id=user_id,
+                                    timeout_seconds=45.0,
+                                    encounter=encounter,
+                                    resolver=_resolve_danger,
+                                )
+                                sent_msg = await interaction.followup.send(embed=danger_embed, view=view, wait=True)
+                                view.bind_message(sent_msg)
+                                asyncio.create_task(
+                                    self._check_and_announce_achievements(guild_id=guild_id, user_id=user_id),
+                                    name="jobs.work.achievements",
+                                )
+                                return
+
+                        if int(item_mods.double_payout_chance_bp) > 0 and roll_bp(int(item_mods.double_payout_chance_bp)):
+                            did_double = True
+                            payout *= 2
+                            await _consume_charge_from_group(
+                                session,
+                                guild_id=guild_id,
+                                user_id=user_id,
+                                group_key="double_payout",
+                                amount=1,
+                            )
+
+                        wallet.silver += int(payout)
+                        if hasattr(wallet, "silver_earned"):
+                            wallet.silver_earned += int(max(payout, 0))
+                    if failed:
+                        base_user_xp = user_xp_for_work(user_level=user_level, category=d.category)
+                        adjusted_user_xp = apply_bp(base_user_xp, int(merged_effects.user_xp_bonus_bp))
+                        user_xp_gain = apply_work_xp_multipliers(int(adjusted_user_xp))
+                        await award_xp(
+                            session,
+                            guild_id=guild_id,
+                            user_id=user_id,
+                            amount=int(user_xp_gain),
+                            apply_weekend_multiplier=False,
+                        )
+                        await increment_counter(
+                            session,
+                            guild_id=guild_id,
+                            user_id=user_id,
+                            counter_key="jobs_completed",
+                            amount=1,
+                        )
+
+                        base_job_xp = job_xp_for_work(
+                            job_level=job_level_now,
+                            prestige=job_prestige_now,
+                            category=d.category,
+                        )
+                        adjusted_job_xp = apply_bp(base_job_xp, int(merged_effects.job_xp_bonus_bp))
+                        delta_job_xp = apply_work_xp_multipliers(int(adjusted_job_xp))
+                    progress_after, leveled_up = await award_slot_job_xp(
                         session,
                         guild_id=guild_id,
                         user_id=user_id,
-                        amount=int(user_xp_gain),
-                        apply_weekend_multiplier=False,
-                    )
-                    await increment_counter(
-                        session,
-                        guild_id=guild_id,
-                        user_id=user_id,
-                        counter_key="jobs_completed",
-                        amount=1,
+                        slot_index=int(active_slot.slot_index),
+                        job_key=key,
+                        amount=int(delta_job_xp),
                     )
 
-                    base_job_xp = job_xp_for_work(
-                        job_level=job_level_now,
-                        prestige=job_prestige_now,
-                        category=d.category,
+                    work_image_url = job_row_image_get(job_row)
+                    next_job_name = d.name
+
+                    embed = _build_work_embed(
+                        user=interaction.user,
+                        d=d,
+                        action_text=action_text,
+                        failed=failed,
+                        payout=payout,
+                        stamina_cost=effective_stamina_cost,
+                        user_xp=int(user_xp_gain),
+                        job_xp=delta_job_xp,
+                        job_title=title_for(key, int(progress_after.prestige)),
+                        job_level=int(progress_after.level),
+                        job_prestige=int(progress_after.prestige),
+                        job_xp_into=int(progress_after.xp),
+                        job_xp_need=int(xp_needed(key, int(progress_after.level), int(progress_after.prestige))),
+                        effects=merged_effects,
+                        item_mods=item_mods,
+                        tool_stamina_saved=tool_stamina_saved,
+                        tool_stamina_save_chance_bp=int(tool_stamina_save_chance_bp),
+                        did_double=did_double,
+                        upgrade_level=upgrade_level,
+                        upgrade_bonus_pct=upgrade_bonus_pct,
+                        work_image_url=work_image_url,
+                        leveled_up=bool(leveled_up),
+                        prestiged=False,
+                        next_job_name=next_job_name,
+                        weekend_bonus_active=is_weekend(),
                     )
-                    adjusted_job_xp = apply_bp(base_job_xp, int(merged_effects.job_xp_bonus_bp))
-                    delta_job_xp = apply_work_xp_multipliers(int(adjusted_job_xp))
-                progress_after, leveled_up = await award_slot_job_xp(
-                    session,
+                    used_cooldown_seconds = effective_cd
+
+            if key is not None and used_cooldown_seconds is not None:
+                _COOLDOWNS[(guild_id, user_id, key)] = now + float(used_cooldown_seconds)
+
+            if embed is not None:
+                cooldown_ready_at = now + float(used_cooldown_seconds or 0.0)
+                prestige_ready = bool(progress_after.level >= level_cap_for(progress_after.prestige))
+                current_prestige = int(progress_after.prestige)
+                view = _WorkUpgradeView(
+                    sessionmaker=self.sessionmaker,
                     guild_id=guild_id,
                     user_id=user_id,
-                    slot_index=int(active_slot.slot_index),
+                    cooldown_ready_at=cooldown_ready_at,
+                    active_slot_index=int(active_slot.slot_index),
                     job_key=key,
-                    amount=int(delta_job_xp),
+                    job_name=d.name,
+                    prestige_ready=prestige_ready,
+                    prestige_cost_value=prestige_cost(current_prestige),
+                    current_earnings_multiplier=current_prestige + 1,
+                    next_earnings_multiplier=current_prestige + 2,
                 )
-
-                work_image_url = job_row_image_get(job_row)
-                next_job_name = d.name
-
-                embed = _build_work_embed(
-                    user=interaction.user,
-                    d=d,
-                    action_text=action_text,
-                    failed=failed,
-                    payout=payout,
-                    stamina_cost=effective_stamina_cost,
-                    user_xp=int(user_xp_gain),
-                    job_xp=delta_job_xp,
-                    job_title=title_for(key, int(progress_after.prestige)),
-                    job_level=int(progress_after.level),
-                    job_prestige=int(progress_after.prestige),
-                    job_xp_into=int(progress_after.xp),
-                    job_xp_need=int(xp_needed(key, int(progress_after.level), int(progress_after.prestige))),
-                    effects=merged_effects,
-                    item_mods=item_mods,
-                    tool_stamina_saved=tool_stamina_saved,
-                    tool_stamina_save_chance_bp=int(tool_stamina_save_chance_bp),
-                    did_double=did_double,
-                    upgrade_level=upgrade_level,
-                    upgrade_bonus_pct=upgrade_bonus_pct,
-                    work_image_url=work_image_url,
-                    leveled_up=bool(leveled_up),
-                    prestiged=False,
-                    next_job_name=next_job_name,
-                    weekend_bonus_active=is_weekend(),
+                sent_msg = await interaction.followup.send(embed=embed, view=view, wait=True)
+                view.bind_message(sent_msg)
+                asyncio.create_task(
+                    self._check_and_announce_achievements(guild_id=guild_id, user_id=user_id),
+                    name="jobs.work.achievements",
                 )
-                used_cooldown_seconds = effective_cd
-
-        if key is not None and used_cooldown_seconds is not None:
-            _COOLDOWNS[(guild_id, user_id, key)] = now + float(used_cooldown_seconds)
-
-        if embed is not None:
-            cooldown_ready_at = now + float(used_cooldown_seconds or 0.0)
-            prestige_ready = bool(progress_after.level >= level_cap_for(progress_after.prestige))
-            current_prestige = int(progress_after.prestige)
-            view = _WorkUpgradeView(
-                sessionmaker=self.sessionmaker,
-                guild_id=guild_id,
-                user_id=user_id,
-                cooldown_ready_at=cooldown_ready_at,
-                active_slot_index=int(active_slot.slot_index),
-                job_key=key,
-                job_name=d.name,
-                prestige_ready=prestige_ready,
-                prestige_cost_value=prestige_cost(current_prestige),
-                current_earnings_multiplier=current_prestige + 1,
-                next_earnings_multiplier=current_prestige + 2,
-            )
-            sent_msg = await interaction.followup.send(embed=embed, view=view, wait=True)
-            view.bind_message(sent_msg)
-            asyncio.create_task(
-                self._check_and_announce_achievements(guild_id=guild_id, user_id=user_id),
-                name="jobs.work.achievements",
-            )
-        else:
-            await interaction.followup.send("Something went wrong generating the work result.", ephemeral=True)
+            else:
+                await interaction.followup.send("Something went wrong generating the work result.", ephemeral=True)
+        finally:
+            work_lock.release()
 
     async def _check_and_announce_achievements(self, *, guild_id: int, user_id: int) -> None:
         try:
@@ -1003,9 +1026,26 @@ class _WorkUpgradeView(discord.ui.View):
             )
             return
 
+        original_label = button.label
+        button.disabled = True
+        button.label = "Processing..."
+        try:
+            if interaction.message is not None:
+                await interaction.message.edit(view=self)
+        except Exception:
+            button.disabled = False
+            button.label = original_label
+
         cog = interaction.client.get_cog("WorkCog") if interaction.client else None
         cmd = getattr(cog, "work_cmd", None) if cog is not None else None
         if cog is None or cmd is None or not hasattr(cmd, "callback"):
+            button.disabled = False
+            button.label = original_label
+            if interaction.message is not None:
+                try:
+                    await interaction.message.edit(view=self)
+                except Exception:
+                    pass
             await interaction.response.send_message("Work command is currently unavailable.", ephemeral=True)
             return
 
