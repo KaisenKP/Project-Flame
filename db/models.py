@@ -1202,3 +1202,35 @@ class BusinessManagerAssignmentRow(Base):
         onupdate=NOW,
         nullable=False,
     )
+
+
+class BusinessAutoHireSessionRow(Base):
+    __tablename__ = "business_auto_hire_sessions"
+    __table_args__ = (
+        UniqueConstraint(
+            "guild_id",
+            "user_id",
+            "business_key",
+            "staff_kind",
+            name="uq_business_auto_hire_sessions_target",
+        ),
+        Index("ix_business_auto_hire_sessions_active", "active", "updated_at"),
+        Index("ix_business_auto_hire_sessions_user", "guild_id", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    business_key: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    staff_kind: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    remaining_rerolls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    allowed_rarities_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    last_error: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=NOW, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        TS,
+        server_default=NOW,
+        onupdate=NOW,
+        nullable=False,
+    )
