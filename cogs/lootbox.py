@@ -202,9 +202,9 @@ class LootboxCog(commands.Cog):
     RARITY_TABLE: dict[LootboxRarity, RarityConfig] = {
         LootboxRarity.COMMON: RarityConfig(weight=75, min_silver=2500, max_silver=5000, min_xp=8, max_xp=22),
         LootboxRarity.RARE: RarityConfig(weight=18, min_silver=10000, max_silver=25000, min_xp=22, max_xp=60),
-        # Epic and Legendary buffed by 10%.
-        LootboxRarity.EPIC: RarityConfig(weight=6, min_silver=55000, max_silver=165000, min_xp=66, max_xp=176),
-        LootboxRarity.LEGENDARY: RarityConfig(weight=1, min_silver=220000, max_silver=660000, min_xp=176, max_xp=440),
+        # Epic and Legendary buffed by 10x.
+        LootboxRarity.EPIC: RarityConfig(weight=6, min_silver=550000, max_silver=1650000, min_xp=660, max_xp=1760),
+        LootboxRarity.LEGENDARY: RarityConfig(weight=1, min_silver=2200000, max_silver=6600000, min_xp=1760, max_xp=4400),
     }
 
     # "Animation" tuning
