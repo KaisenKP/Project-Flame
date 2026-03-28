@@ -15,7 +15,7 @@ from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import select, text
 
-from db.models import LootboxInventoryRow, WalletRow, XpRow
+from db.models import LootboxInventoryRow, StaminaRow, WalletRow, XpRow
 from services.db import sessions
 from services.users import ensure_user_rows
 from services.vip import is_vip_member
@@ -895,6 +895,24 @@ class DailyCog(commands.Cog):
                 if xp > 0:
                     await award_xp(session, guild_id=guild_id, user_id=user_id, amount=int(xp))
 
+                stamina_row = await session.scalar(
+                    select(StaminaRow).where(
+                        StaminaRow.guild_id == guild_id,
+                        StaminaRow.user_id == user_id,
+                    )
+                )
+                if stamina_row is None:
+                    stamina_row = StaminaRow(
+                        guild_id=guild_id,
+                        user_id=user_id,
+                        current_stamina=100,
+                        max_stamina=100,
+                    )
+                    session.add(stamina_row)
+                else:
+                    stamina_row.max_stamina = max(int(getattr(stamina_row, "max_stamina", 100) or 100), 100)
+                    stamina_row.current_stamina = 100
+
         loot_write_failed = False
         loot_write_error = ""
 
@@ -967,6 +985,7 @@ class DailyCog(commands.Cog):
         embed.add_field(name="🔥 Streak", value=f"**{_fmt_int(reward.streak)}** / {self.STREAK_MAX}", inline=True)
         embed.add_field(name="💰 Silver", value=f"**+{_fmt_int(reward.silver)}**", inline=True)
         embed.add_field(name="🧠 XP", value=f"**+{_fmt_int(reward.xp)}**", inline=True)
+        embed.add_field(name="⚡ Stamina", value="**100/100**", inline=True)
 
         embed.add_field(name="📈 XP Mult", value=f"**x{reward.xp_mult:.1f}**", inline=True)
         embed.add_field(name="🆙 Level Mult", value=f"**x{reward.level_multiplier}**", inline=True)
