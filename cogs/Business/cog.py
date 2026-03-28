@@ -76,7 +76,7 @@ AUTO_HIRE_MAX_REROLLS = 250
 AUTO_HIRE_ALLOWED_RARITIES = {"common", "uncommon", "rare", "epic", "mythic"}
 AUTO_HIRE_PROGRESS_UPDATE_INTERVAL_SECONDS = 1.0
 VIP_REROLL_AMOUNT_OPTIONS = (1, 5, 10, 25)
-VIP_REROLL_TIMEOUT_SECONDS = 120
+VIP_REROLL_TIMEOUT_SECONDS = None
 
 _BUSINESS_ADMIN_ROLE_IDS = {int(part) for part in ((os.getenv("BUSINESS_ADMIN_ROLE_IDS") or os.getenv("BUSINESS_ADMIN_ROLE_ID") or "").replace(",", " ").split()) if part.strip().isdigit()}
 RARITY_ORDER = ("common", "uncommon", "rare", "epic", "legendary", "mythical")
