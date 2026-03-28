@@ -3867,73 +3867,79 @@ class WorkerAssignmentsView(BusinessBaseView):
     @discord.ui.button(label="Hire Worker", style=discord.ButtonStyle.success, emoji="➕", row=0)
     async def hire_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
+        if self.is_processing:
+            await interaction.response.send_message("A recruit action is already in progress. Please wait a moment.", ephemeral=True)
+            return
+        self.is_processing = True
         await _safe_defer(interaction)
-
-        if self.current_candidate is None:
-            payload = await self._refresh_assignments_embed(interaction)
-            if payload is None:
+        try:
+            if self.current_candidate is None:
+                payload = await self._refresh_assignments_embed(interaction)
+                if payload is None:
+                    return
+                detail, slots, assignments_embed = payload
+                rolling = _build_worker_candidate_embed(
+                    user=interaction.user,
+                    detail=detail,
+                    candidate=WorkerCandidateSnapshot(worker_name="Searching...", worker_type="efficient", rarity="common", flat_profit_bonus=0, percent_profit_bonus_bp=0, reroll_cost=WORKER_CANDIDATE_REROLL_COST),
+                    slots=slots,
+                    stage_label="Re-rolling Candidate...",
+                    status_line="Searching for a better hire...",
+                )
+                await _safe_edit_panel(interaction, embeds=[rolling, assignments_embed], view=self, message_id=self.panel_message_id)
+                await asyncio.sleep(0.4)
+                async with self.cog.sessionmaker() as session:
+                    async with session.begin():
+                        result = await roll_worker_candidate(
+                            session,
+                            guild_id=self.guild_id,
+                            user_id=self.owner_id,
+                            business_key=self.business_key,
+                            reroll_cost=WORKER_CANDIDATE_REROLL_COST,
+                        )
+                if not result.ok or result.worker_candidate is None:
+                    await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
+                    return
+                self.current_candidate = result.worker_candidate
+                await self._show_recruitment_board(interaction, action_message="✨ New candidate found. Hire now for free.")
                 return
-            detail, slots, assignments_embed = payload
-            rolling = _build_worker_candidate_embed(
-                user=interaction.user,
-                detail=detail,
-                candidate=WorkerCandidateSnapshot(worker_name="Searching...", worker_type="efficient", rarity="common", flat_profit_bonus=0, percent_profit_bonus_bp=0, reroll_cost=WORKER_CANDIDATE_REROLL_COST),
-                slots=slots,
-                stage_label="Re-rolling Candidate...",
-                status_line="Searching for a better hire...",
-            )
-            await _safe_edit_panel(interaction, embeds=[rolling, assignments_embed], view=self, message_id=self.panel_message_id)
-            await asyncio.sleep(0.4)
+
+            candidate = self.current_candidate
             async with self.cog.sessionmaker() as session:
                 async with session.begin():
-                    result = await roll_worker_candidate(
+                    result = await hire_worker_manual(
                         session,
                         guild_id=self.guild_id,
                         user_id=self.owner_id,
                         business_key=self.business_key,
-                        reroll_cost=WORKER_CANDIDATE_REROLL_COST,
+                        worker_name=str(getattr(candidate, "worker_name", "Worker")),
+                        worker_type=str(getattr(candidate, "worker_type", "efficient")),
+                        rarity=str(getattr(candidate, "rarity", "common")),
+                        flat_profit_bonus=int(getattr(candidate, "flat_profit_bonus", 0) or 0),
+                        percent_profit_bonus_bp=int(getattr(candidate, "percent_profit_bonus_bp", 0) or 0),
+                        charge_silver=False,
                     )
-            if not result.ok or result.worker_candidate is None:
-                await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
+                    detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+                    slots = await get_worker_assignment_slots(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+            if detail is None:
+                await interaction.followup.send("That business could not be found.", ephemeral=True)
                 return
-            self.current_candidate = result.worker_candidate
-            await self._show_recruitment_board(interaction, action_message="✨ New candidate found. Hire now for free.")
-            return
 
-        candidate = self.current_candidate
-        async with self.cog.sessionmaker() as session:
-            async with session.begin():
-                result = await hire_worker_manual(
-                    session,
-                    guild_id=self.guild_id,
-                    user_id=self.owner_id,
-                    business_key=self.business_key,
-                    worker_name=str(getattr(candidate, "worker_name", "Worker")),
-                    worker_type=str(getattr(candidate, "worker_type", "efficient")),
-                    rarity=str(getattr(candidate, "rarity", "common")),
-                    flat_profit_bonus=int(getattr(candidate, "flat_profit_bonus", 0) or 0),
-                    percent_profit_bonus_bp=int(getattr(candidate, "percent_profit_bonus_bp", 0) or 0),
-                    charge_silver=False,
-                )
-                detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
-                slots = await get_worker_assignment_slots(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
-        if detail is None:
-            await interaction.followup.send("That business could not be found.", ephemeral=True)
-            return
-
-        assignments_embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots, page=self.page)
-        if result.ok and result.hired_worker is not None:
-            self.current_candidate = None
-            result_embed = _build_worker_hire_result_embed(user=interaction.user, detail=detail, hired=result.hired_worker)
-            await _safe_edit_panel(interaction, embeds=[result_embed, assignments_embed], view=self, message_id=self.panel_message_id)
-            return
-        await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
+            assignments_embed = _build_worker_assignments_embed(user=interaction.user, detail=detail, slots=slots, page=self.page)
+            if result.ok and result.hired_worker is not None:
+                self.current_candidate = None
+                result_embed = _build_worker_hire_result_embed(user=interaction.user, detail=detail, hired=result.hired_worker)
+                await _safe_edit_panel(interaction, embeds=[result_embed, assignments_embed], view=self, message_id=self.panel_message_id)
+                return
+            await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
+        finally:
+            self.is_processing = False
 
     @discord.ui.button(label="Reroll Worker", style=discord.ButtonStyle.primary, emoji="🎲", row=0)
     async def reroll_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         if self.is_processing:
-            await interaction.response.send_message("A reroll is already in progress. Please wait a moment.", ephemeral=True)
+            await interaction.response.send_message("A recruit action is already in progress. Please wait a moment.", ephemeral=True)
             return
         self.is_processing = True
         await _safe_defer(interaction)
@@ -4090,23 +4096,101 @@ class ManagerAssignmentsView(BusinessBaseView):
     @discord.ui.button(label="Hire Manager", style=discord.ButtonStyle.success, emoji="➕", row=0)
     async def hire_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
+        if self.is_processing:
+            await interaction.response.send_message("A recruit action is already in progress. Please wait a moment.", ephemeral=True)
+            return
+        self.is_processing = True
         await _safe_defer(interaction)
+        try:
+            if self.current_candidate is None:
+                payload = await self._refresh_assignments_embed(interaction)
+                if payload is None:
+                    return
+                detail, slots, assignments_embed = payload
+                rolling = _build_manager_candidate_embed(
+                    user=interaction.user,
+                    detail=detail,
+                    candidate=ManagerCandidateSnapshot(manager_name="Searching...", rarity="common", runtime_bonus_hours=0, profit_bonus_bp=0, auto_restart_charges=0, reroll_cost=MANAGER_CANDIDATE_REROLL_COST),
+                    slots=slots,
+                    stage_label="Re-rolling Candidate...",
+                    status_line="Searching for a better hire...",
+                )
+                await _safe_edit_panel(interaction, embeds=[rolling, assignments_embed], view=self, message_id=self.panel_message_id)
+                await asyncio.sleep(0.4)
+                async with self.cog.sessionmaker() as session:
+                    async with session.begin():
+                        result = await roll_manager_candidate(
+                            session,
+                            guild_id=self.guild_id,
+                            user_id=self.owner_id,
+                            business_key=self.business_key,
+                            reroll_cost=MANAGER_CANDIDATE_REROLL_COST,
+                        )
+                if not result.ok or result.manager_candidate is None:
+                    await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
+                    return
+                self.current_candidate = result.manager_candidate
+                await self._show_recruitment_board(interaction, action_message="✨ New candidate found. Hire now for free.")
+                return
 
-        if self.current_candidate is None:
+            candidate = self.current_candidate
+            async with self.cog.sessionmaker() as session:
+                async with session.begin():
+                    result = await hire_manager_manual(
+                        session,
+                        guild_id=self.guild_id,
+                        user_id=self.owner_id,
+                        business_key=self.business_key,
+                        manager_name=str(getattr(candidate, "manager_name", "Manager")),
+                        rarity=str(getattr(candidate, "rarity", "common")),
+                        runtime_bonus_hours=int(getattr(candidate, "runtime_bonus_hours", 0) or 0),
+                        profit_bonus_bp=int(getattr(candidate, "profit_bonus_bp", 0) or 0),
+                        auto_restart_charges=int(getattr(candidate, "auto_restart_charges", 0) or 0),
+                        charge_silver=False,
+                    )
+                    detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+                    slots = await get_manager_assignment_slots(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+            if detail is None:
+                await interaction.followup.send("That business could not be found.", ephemeral=True)
+                return
+
+            assignments_embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots, page=self.page)
+            if result.ok and result.hired_manager is not None:
+                self.current_candidate = None
+                result_embed = _build_manager_hire_result_embed(user=interaction.user, detail=detail, hired=result.hired_manager)
+                await _safe_edit_panel(interaction, embeds=[result_embed, assignments_embed], view=self, message_id=self.panel_message_id)
+                return
+            await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
+        finally:
+            self.is_processing = False
+
+    @discord.ui.button(label="Reroll Manager", style=discord.ButtonStyle.primary, emoji="🎲", row=0)
+    async def reroll_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        if self.is_processing:
+            await interaction.response.send_message("A recruit action is already in progress. Please wait a moment.", ephemeral=True)
+            return
+        self.is_processing = True
+        await _safe_defer(interaction)
+        try:
+            previous_candidate = self.current_candidate
             payload = await self._refresh_assignments_embed(interaction)
             if payload is None:
                 return
             detail, slots, assignments_embed = payload
-            rolling = _build_manager_candidate_embed(
-                user=interaction.user,
-                detail=detail,
-                candidate=ManagerCandidateSnapshot(manager_name="Searching...", rarity="common", runtime_bonus_hours=0, profit_bonus_bp=0, auto_restart_charges=0, reroll_cost=MANAGER_CANDIDATE_REROLL_COST),
-                slots=slots,
-                stage_label="Re-rolling Candidate...",
-                status_line="Searching for a better hire...",
-            )
-            await _safe_edit_panel(interaction, embeds=[rolling, assignments_embed], view=self, message_id=self.panel_message_id)
-            await asyncio.sleep(0.4)
+            stages = (("common", "Re-rolling candidate..."), ("rare", "Scanning candidates..."), ("epic", "Epic..."), ("mythical", "Revealing final candidate..."))
+            for rarity, line in stages:
+                rolling = _build_manager_candidate_embed(
+                    user=interaction.user,
+                    detail=detail,
+                    candidate=ManagerCandidateSnapshot(manager_name="Recruit Scan", rarity=rarity, runtime_bonus_hours=0, profit_bonus_bp=0, auto_restart_charges=0, reroll_cost=MANAGER_CANDIDATE_REROLL_COST),
+                    slots=slots,
+                    current_candidate=previous_candidate,
+                    stage_label="Recruit Spin",
+                    status_line=line,
+                )
+                await _safe_edit_panel(interaction, embeds=[rolling, assignments_embed], view=self, message_id=self.panel_message_id)
+                await asyncio.sleep(0.18)
             async with self.cog.sessionmaker() as session:
                 async with session.begin():
                     result = await roll_manager_candidate(
@@ -4120,74 +4204,9 @@ class ManagerAssignmentsView(BusinessBaseView):
                 await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
                 return
             self.current_candidate = result.manager_candidate
-            await self._show_recruitment_board(interaction, action_message="✨ New candidate found. Hire now for free.")
-            return
-
-        candidate = self.current_candidate
-        async with self.cog.sessionmaker() as session:
-            async with session.begin():
-                result = await hire_manager_manual(
-                    session,
-                    guild_id=self.guild_id,
-                    user_id=self.owner_id,
-                    business_key=self.business_key,
-                    manager_name=str(getattr(candidate, "manager_name", "Manager")),
-                    rarity=str(getattr(candidate, "rarity", "common")),
-                    runtime_bonus_hours=int(getattr(candidate, "runtime_bonus_hours", 0) or 0),
-                    profit_bonus_bp=int(getattr(candidate, "profit_bonus_bp", 0) or 0),
-                    auto_restart_charges=int(getattr(candidate, "auto_restart_charges", 0) or 0),
-                    charge_silver=False,
-                )
-                detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
-                slots = await get_manager_assignment_slots(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
-        if detail is None:
-            await interaction.followup.send("That business could not be found.", ephemeral=True)
-            return
-
-        assignments_embed = _build_manager_assignments_embed(user=interaction.user, detail=detail, slots=slots, page=self.page)
-        if result.ok and result.hired_manager is not None:
-            self.current_candidate = None
-            result_embed = _build_manager_hire_result_embed(user=interaction.user, detail=detail, hired=result.hired_manager)
-            await _safe_edit_panel(interaction, embeds=[result_embed, assignments_embed], view=self, message_id=self.panel_message_id)
-            return
-        await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
-
-    @discord.ui.button(label="Reroll Manager", style=discord.ButtonStyle.primary, emoji="🎲", row=0)
-    async def reroll_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        _ = button
-        await _safe_defer(interaction)
-        previous_candidate = self.current_candidate
-        payload = await self._refresh_assignments_embed(interaction)
-        if payload is None:
-            return
-        detail, slots, assignments_embed = payload
-        stages = (("common", "Re-rolling candidate..."), ("rare", "Scanning candidates..."), ("epic", "Epic..."), ("mythical", "Revealing final candidate..."))
-        for rarity, line in stages:
-            rolling = _build_manager_candidate_embed(
-                user=interaction.user,
-                detail=detail,
-                candidate=ManagerCandidateSnapshot(manager_name="Recruit Scan", rarity=rarity, runtime_bonus_hours=0, profit_bonus_bp=0, auto_restart_charges=0, reroll_cost=MANAGER_CANDIDATE_REROLL_COST),
-                slots=slots,
-                current_candidate=previous_candidate,
-                stage_label="Recruit Spin",
-                status_line=line,
-            )
-            await _safe_edit_panel(interaction, embeds=[rolling, assignments_embed], view=self, message_id=self.panel_message_id)
-            await asyncio.sleep(0.18)
-        async with self.cog.sessionmaker() as session:
-            async with session.begin():
-                result = await roll_manager_candidate(
-                    session,
-                    guild_id=self.guild_id,
-                    user_id=self.owner_id,
-                    business_key=self.business_key,
-                    reroll_cost=MANAGER_CANDIDATE_REROLL_COST,
-                )
-        if not result.ok or result.manager_candidate is None:
-            await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
-            return
-        self.current_candidate = result.manager_candidate
-        await self._show_recruitment_board(interaction, action_message="✨ Recruit reveal complete.")
+            await self._show_recruitment_board(interaction, action_message="✨ Recruit reveal complete.")
+        finally:
+            self.is_processing = False
 
     @discord.ui.button(label="Auto-Hire (VIP)", style=discord.ButtonStyle.secondary, emoji="⭐", row=1)
     async def auto_hire_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
