@@ -40,6 +40,7 @@ VIEW_TIMEOUT_SECONDS = 180
 BTN_ROW_BUY = 0
 BTN_ROW_REROLL = 1
 BTN_ROW_REFRESH = 1
+LIST_ITEMS_PER_PAGE = 5
 
 # Branding
 SHOP_TITLE = "Moist Mart"
@@ -367,6 +368,88 @@ def _rarity_label(r: str) -> str:
     return r
 
 
+RARITY_ORDER: list[ItemRarity] = [
+    ItemRarity.COMMON,
+    ItemRarity.UNCOMMON,
+    ItemRarity.RARE,
+    ItemRarity.EPIC,
+    ItemRarity.LEGENDARY,
+    ItemRarity.MYTHICAL,
+]
+
+
+def _catalog_by_rarity() -> Dict[str, List[ItemDef]]:
+    grouped: Dict[str, List[ItemDef]] = {}
+    for item in ITEMS.values():
+        grouped.setdefault(item.rarity.value, []).append(item)
+    for rarity_items in grouped.values():
+        rarity_items.sort(key=lambda x: (x.price, x.name.lower(), x.key))
+    return grouped
+
+
+def _effect_summary(item: ItemDef) -> str:
+    payload = item.effect.payload
+    if "payout_bonus_bp" in payload:
+        return f"+{payload['payout_bonus_bp'] / 100:.0f}% payout"
+    if "stamina_add" in payload:
+        return f"+{int(payload['stamina_add'])} stamina"
+    if "fail_reduction_bp" in payload:
+        return f"-{payload['fail_reduction_bp'] / 100:.0f}% fail chance"
+    if "job_xp_bonus_bp" in payload:
+        return f"+{payload['job_xp_bonus_bp'] / 100:.0f}% Job XP"
+    if "stamina_cost_flat_delta" in payload:
+        return f"{int(payload['stamina_cost_flat_delta']):+d} stamina cost"
+    if "next_work_payout_bp" in payload:
+        return f"+{payload['next_work_payout_bp'] / 100:.0f}% next /work payout"
+    if "double_payout_chance_bp" in payload:
+        return f"+{payload['double_payout_chance_bp'] / 100:.0f}% double payout chance"
+    if "stamina_cap_add" in payload:
+        return f"+{int(payload['stamina_cap_add'])} max stamina"
+    if "regen_bonus_bp" in payload:
+        return f"+{payload['regen_bonus_bp'] / 100:.0f}% stamina regen"
+    if "job_level_gain" in payload:
+        return f"+{int(payload['job_level_gain'])} next job level gain"
+    if "rare_find_bp" in payload:
+        return f"+{payload['rare_find_bp'] / 100:.0f}% rare-find chance"
+    if "combo_payout_step_bp" in payload:
+        step = payload["combo_payout_step_bp"] / 100
+        stacks = int(payload.get("combo_max_stacks", 0))
+        return f"+{step:.2f}% per combo stack ({stacks} max)"
+    return "Special effect"
+
+
+def _list_embed(*, rarity: str, items: List[ItemDef], page: int, total_pages: int) -> discord.Embed:
+    color = _rarity_color([_offer_from_item(item) for item in items]) if items else discord.Color.blurple()
+    emoji = _rarity_emoji(rarity)
+    label = _rarity_label(rarity)
+    embed = discord.Embed(
+        title=f"🛍️ {SHOP_TITLE} • Item Browser",
+        description=f"{emoji} **{label}** items",
+        color=color,
+    )
+
+    if not items:
+        embed.add_field(name="Nothing here yet", value="No items in this rarity yet.", inline=False)
+    else:
+        for item in items:
+            duration = f" • {int(item.effect.duration_seconds // 60)}m" if item.effect.duration_seconds else ""
+            charges = f" • {int(item.effect.charges)} charges" if item.effect.charges else ""
+            rule = f"Limit: {int(item.daily_limit)}/day"
+            summary = _effect_summary(item)
+            embed.add_field(
+                name=f"{item.name} • {fmt_int(int(item.price))} Silver",
+                value=(
+                    f"{item.description}\n"
+                    f"✨ {summary}\n"
+                    f"📦 {rule}{duration}{charges}"
+                ),
+                inline=False,
+            )
+
+    embed.set_footer(text=f"Page {page + 1}/{max(total_pages, 1)} • Use rarity buttons to browse")
+    return embed
+
+
 def _rarity_color(offers: List[ShopOffer]) -> discord.Color:
     for o in offers:
         if o.rarity == ItemRarity.MYTHICAL.value:
@@ -474,6 +557,110 @@ class ShopView(discord.ui.View):
         return True
 
 
+class ShopListRarityButton(discord.ui.Button):
+    def __init__(self, *, rarity: str, row: int):
+        super().__init__(
+            style=discord.ButtonStyle.secondary,
+            label=_rarity_label(rarity),
+            row=row,
+        )
+        self.rarity = rarity
+
+    async def callback(self, interaction: discord.Interaction):
+        view: ShopListView = self.view  # type: ignore[assignment]
+        await view.change_rarity(interaction, self.rarity)
+
+
+class ShopListPageButton(discord.ui.Button):
+    def __init__(self, *, direction: int):
+        super().__init__(
+            style=discord.ButtonStyle.primary,
+            label="Prev" if direction < 0 else "Next",
+            row=2,
+        )
+        self.direction = direction
+
+    async def callback(self, interaction: discord.Interaction):
+        view: ShopListView = self.view  # type: ignore[assignment]
+        await view.change_page(interaction, self.direction)
+
+
+class ShopListView(discord.ui.View):
+    def __init__(self, *, user_id: int, grouped_items: Dict[str, List[ItemDef]]):
+        super().__init__(timeout=VIEW_TIMEOUT_SECONDS)
+        self.user_id = user_id
+        self.grouped_items = grouped_items
+        self.message: discord.Message | None = None
+
+        self.rarities = [r.value for r in RARITY_ORDER if grouped_items.get(r.value)]
+        if not self.rarities:
+            self.rarities = [ItemRarity.COMMON.value]
+
+        self.selected_rarity = ItemRarity.COMMON.value if ItemRarity.COMMON.value in self.rarities else self.rarities[0]
+        self.page = 0
+
+        for idx, rarity in enumerate(self.rarities):
+            self.add_item(ShopListRarityButton(rarity=rarity, row=0 if idx < 5 else 1))
+
+        self.prev_button = ShopListPageButton(direction=-1)
+        self.next_button = ShopListPageButton(direction=1)
+        self.add_item(self.prev_button)
+        self.add_item(self.next_button)
+        self._sync_button_state()
+
+    def _page_count(self) -> int:
+        current = self.grouped_items.get(self.selected_rarity, [])
+        return max((len(current) + LIST_ITEMS_PER_PAGE - 1) // LIST_ITEMS_PER_PAGE, 1)
+
+    def _sync_button_state(self) -> None:
+        page_count = self._page_count()
+        self.page = clamp_int(self.page, 0, page_count - 1)
+        self.prev_button.disabled = self.page <= 0
+        self.next_button.disabled = self.page >= (page_count - 1)
+
+        for child in self.children:
+            if isinstance(child, ShopListRarityButton):
+                child.style = discord.ButtonStyle.success if child.rarity == self.selected_rarity else discord.ButtonStyle.secondary
+
+    def build_embed(self) -> discord.Embed:
+        items = self.grouped_items.get(self.selected_rarity, [])
+        page_count = self._page_count()
+        start = self.page * LIST_ITEMS_PER_PAGE
+        end = start + LIST_ITEMS_PER_PAGE
+        return _list_embed(
+            rarity=self.selected_rarity,
+            items=items[start:end],
+            page=self.page,
+            total_pages=page_count,
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user is None or interaction.user.id != self.user_id:
+            await interaction.response.send_message("This shop list panel isn’t for you.", ephemeral=True)
+            return False
+        return True
+
+    async def change_rarity(self, interaction: discord.Interaction, rarity: str) -> None:
+        self.selected_rarity = rarity
+        self.page = 0
+        self._sync_button_state()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def change_page(self, interaction: discord.Interaction, direction: int) -> None:
+        self.page += int(direction)
+        self._sync_button_state()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
 class ShopBuyButton(discord.ui.Button):
     def __init__(self, slot: int):
         super().__init__(
@@ -522,6 +709,8 @@ class ShopRefreshButton(discord.ui.Button):
 # ============================================================
 
 class ShopCog(commands.Cog):
+    shop = app_commands.Group(name="shop", description="Open and browse the shop.")
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.sessionmaker = sessions()
@@ -713,14 +902,27 @@ class ShopCog(commands.Cog):
         await interaction.followup.send(f"✅ Added **{bought_name or 'item'}** to your inventory.", ephemeral=True)
         await self._send_shop_panel(interaction)
 
-    @app_commands.command(name="shop", description="Open your daily shop (buttons).")
-    async def shop_cmd(self, interaction: discord.Interaction):
+    @shop.command(name="open", description="Open your daily shop offers (buttons).")
+    async def shop_open_cmd(self, interaction: discord.Interaction):
         if interaction.guild is None:
             await interaction.response.send_message("This only works in a server.", ephemeral=True)
             return
 
         await interaction.response.defer(thinking=True, ephemeral=True)
         await self._send_shop_panel(interaction)
+
+    @shop.command(name="list", description="Browse every shop item by rarity.")
+    async def shop_list_cmd(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message("This only works in a server.", ephemeral=True)
+            return
+
+        grouped_items = _catalog_by_rarity()
+        view = ShopListView(user_id=interaction.user.id, grouped_items=grouped_items)
+        embed = view.build_embed()
+
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        view.message = await interaction.original_response()
 
 
 async def setup(bot: commands.Bot):
