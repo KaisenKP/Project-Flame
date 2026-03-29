@@ -10,6 +10,7 @@ from services.job_progression import level_cap_for, total_xp_from_state, xp_need
 from services.jobs_balance import payout_for_work, prestige_cost, stamina_cost_for_work
 from services.jobs_core import JOB_DEFS, JOB_SWITCH_COST, fmt_int, tier_for_category
 from services.jobs_endgame import event_defs_for_endgame
+from services.tool_procs import third_tool_no_stamina_chance_bp
 
 MAX_JOB_HUB_SLOTS = 3
 DEFAULT_UNLOCKED_SLOTS = 2
@@ -369,15 +370,20 @@ async def set_selected_tool(session, *, guild_id: int, user_id: int, vip: bool, 
     rows[slot_index].selected_tool_key = tool_key
 
 
-def tool_bonus_snapshot(job_key: str, selected_tool_key: str | None, tool_levels: dict[str, int]) -> tuple[int, int, int, str | None]:
-    defs = {tool.key: tool for tool in tool_defs_for(job_key)}
-    if not selected_tool_key or selected_tool_key not in defs:
-        return 0, 0, 0, None
-    tool = defs[selected_tool_key]
+def tool_bonus_snapshot(job_key: str, selected_tool_key: str | None, tool_levels: dict[str, int]) -> tuple[int, int, int, str | None, int | None]:
+    defs = tool_defs_for(job_key)
+    defs_by_key = {tool.key: tool for tool in defs}
+    if not selected_tool_key or selected_tool_key not in defs_by_key:
+        return 0, 0, 0, None, None
+    tool = defs_by_key[selected_tool_key]
     level = max(int(tool_levels.get(selected_tool_key, 0)), 0)
-    stamina_save_chance_bp = tool.stamina_save_chance_bp * level
+    tool_index = next((idx for idx, defn in enumerate(defs) if defn.key == selected_tool_key), None)
+    if tool_index == 2:
+        stamina_save_chance_bp = third_tool_no_stamina_chance_bp(level)
+    else:
+        stamina_save_chance_bp = tool.stamina_save_chance_bp * level
     stamina_save_chance_bp = min(max(int(stamina_save_chance_bp), 0), MAX_TOOL_STAMINA_SAVE_CHANCE_BP)
-    return tool.income_bonus_bp * level, tool.xp_bonus_bp * level, stamina_save_chance_bp, tool.name
+    return tool.income_bonus_bp * level, tool.xp_bonus_bp * level, stamina_save_chance_bp, tool.name, tool_index
 
 
 def unlocked_perks(job_key: str, level: int) -> tuple[list[PerkDefinition], list[PerkDefinition]]:

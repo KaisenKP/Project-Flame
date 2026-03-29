@@ -21,6 +21,7 @@ from services.vip import is_vip_member
 from services.xp_award import award_xp
 from services.work_xp import apply_work_xp_multipliers, is_weekend
 from services.work_drops import roll_and_grant_work_drops, WorkDropResult
+from services.tool_procs import WorkToolProcResolver, resolve_tool_path
 
 from services.jobs_balance import job_xp_for_work, payout_for_work, prestige_cost, stamina_cost_for_work, user_xp_for_work
 from services.achievements import (
@@ -54,7 +55,6 @@ from services.jobs_core import (
     tier_for_category,
 )
 from services.job_hub import (
-    MAX_TOOL_STAMINA_SAVE_CHANCE_BP,
     award_slot_job_xp,
     buy_or_upgrade_tool,
     event_defs_for,
@@ -616,12 +616,13 @@ class WorkCog(commands.Cog):
                         await interaction.followup.send(f"Cooldown. Try again in **{fmt_int(left)}s**.", ephemeral=True)
                         return
 
-                    income_tool_bp, xp_tool_bp, tool_stamina_save_chance_bp, selected_tool_name = tool_bonus_snapshot(
+                    income_tool_bp, xp_tool_bp, tool_stamina_save_chance_bp, selected_tool_name, selected_tool_index = tool_bonus_snapshot(
                         key,
                         slot_snap.selected_tool_key,
                         slot_snap.tool_levels,
                     )
-                    tool_stamina_save_chance_bp = clamp_int(int(tool_stamina_save_chance_bp), 0, MAX_TOOL_STAMINA_SAVE_CHANCE_BP)
+                    tool_stamina_save_chance_bp = clamp_int(int(tool_stamina_save_chance_bp), 0, 9_500)
+                    tool_path = resolve_tool_path(tool_index=selected_tool_index)
                     job_effects = JobEffects(
                         payout_bonus_bp=income_tool_bp,
                         fail_reduction_bp=0,
@@ -654,11 +655,29 @@ class WorkCog(commands.Cog):
                     stamina_cost = sub_bp(stamina_cost_base, int(merged_effects.stamina_discount_bp))
                     stamina_cost = int(stamina_cost) + int(item_mods.stamina_cost_flat_delta)
                     stamina_cost = clamp_int(int(stamina_cost), 1, 10)
+                    proc_messages: list[str] = []
                     effective_stamina_cost = int(stamina_cost)
                     tool_stamina_saved = False
-                    if int(tool_stamina_save_chance_bp) > 0 and roll_bp(int(tool_stamina_save_chance_bp)):
+
+                    success_actions, fail_actions = _split_actions(d)
+
+                    fail_bp = category_fail_bp(d.category, d.fail_chance_bp)
+                    fail_bp = max(int(fail_bp) - int(merged_effects.fail_reduction_bp), 0)
+                    fail_bp = min(10_000, fail_bp + int(item_mods.greed_fail_bp))
+                    fail_bp = clamp_int(fail_bp, 0, 10_000)
+
+                    failed = roll_bp(fail_bp) if fail_bp > 0 else False
+                    if failed and int(item_mods.protection_bp) > 0 and roll_bp(int(item_mods.protection_bp)):
+                        failed = False
+
+                    no_stamina_outcome = WorkToolProcResolver.roll_no_stamina(
+                        tool_path=tool_path,
+                        no_stamina_chance_bp=int(tool_stamina_save_chance_bp),
+                    )
+                    if no_stamina_outcome.skipped_stamina:
                         effective_stamina_cost = 0
                         tool_stamina_saved = True
+                        proc_messages.extend(no_stamina_outcome.messages)
 
                     ok, stam_snap = await self.stamina.try_spend(
                         session,
@@ -674,6 +693,14 @@ class WorkCog(commands.Cog):
                         )
                         return
 
+                    failure_negation_outcome = WorkToolProcResolver.roll_failure_negation(
+                        tool_path=tool_path,
+                        failed=failed,
+                    )
+                    if failure_negation_outcome.failure_negated:
+                        failed = False
+                        proc_messages.extend(failure_negation_outcome.messages)
+
                     wallet = await session.scalar(
                         select(WalletRow).where(
                             WalletRow.guild_id == guild_id,
@@ -685,16 +712,6 @@ class WorkCog(commands.Cog):
                         session.add(wallet)
                         await session.flush()
 
-                    success_actions, fail_actions = _split_actions(d)
-
-                    fail_bp = category_fail_bp(d.category, d.fail_chance_bp)
-                    fail_bp = max(int(fail_bp) - int(merged_effects.fail_reduction_bp), 0)
-                    fail_bp = min(10_000, fail_bp + int(item_mods.greed_fail_bp))
-                    fail_bp = clamp_int(fail_bp, 0, 10_000)
-
-                    failed = roll_bp(fail_bp) if fail_bp > 0 else False
-                    if failed and int(item_mods.protection_bp) > 0 and roll_bp(int(item_mods.protection_bp)):
-                        failed = False
                     extra_roll = roll_bp(int(getattr(merged_effects, "extra_roll_bp", 0))) if int(getattr(merged_effects, "extra_roll_bp", 0)) > 0 else False
 
                     payout = 0
@@ -801,8 +818,29 @@ class WorkCog(commands.Cog):
                         adjusted_job_xp = apply_bp(base_job_xp, int(merged_effects.job_xp_bonus_bp))
                         delta_job_xp = apply_work_xp_multipliers(int(adjusted_job_xp))
 
+                        tool_proc_outcome = await WorkToolProcResolver.apply_success_effects(
+                            session,
+                            guild_id=guild_id,
+                            user_id=user_id,
+                            tool_path=tool_path,
+                            payout=int(payout),
+                            job_xp=int(delta_job_xp),
+                        )
+                        if int(tool_proc_outcome.xp_burst_bonus) > 0:
+                            delta_job_xp += int(tool_proc_outcome.xp_burst_bonus)
+                        if int(tool_proc_outcome.critical_silver_bonus) > 0:
+                            payout += int(tool_proc_outcome.critical_silver_bonus)
+                        if int(tool_proc_outcome.critical_job_xp_bonus) > 0:
+                            delta_job_xp += int(tool_proc_outcome.critical_job_xp_bonus)
+                        if int(tool_proc_outcome.double_action_payout) > 0:
+                            payout += int(tool_proc_outcome.double_action_payout)
+                        if int(tool_proc_outcome.double_action_job_xp) > 0:
+                            delta_job_xp += int(tool_proc_outcome.double_action_job_xp)
+                        proc_messages.extend(tool_proc_outcome.messages)
+
                         danger_triggered = (not failed) and should_trigger_danger(key)
-                        if (not failed) and (not danger_triggered) and should_trigger_normal(key):
+                        force_special_pipeline = bool(tool_proc_outcome.rare_event_triggered)
+                        if (not failed) and (not danger_triggered) and (force_special_pipeline or should_trigger_normal(key)):
                             normal_interaction = pick_normal_interaction(key)
                             if normal_interaction is not None:
                                 normal_resolution = resolve_normal_interaction(
@@ -1007,6 +1045,9 @@ class WorkCog(commands.Cog):
                             lootbox_drop_bp=int(item_mods.lootbox_drop_bp),
                             item_drop_bp=int(item_mods.item_drop_bp),
                         )
+
+                    if proc_messages:
+                        action_text += "\n" + "\n".join(proc_messages)
 
                     work_image_url = job_row_image_get(job_row)
                     next_job_name = d.name
