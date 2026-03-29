@@ -422,7 +422,9 @@ _BUSINESS_DEF_MAP: Dict[str, BusinessDef] = {b.key: b for b in _BUSINESS_DEFS}
 BASE_RUNTIME_HOURS_DEFAULT = 4
 BASE_RUNTIME_HOURS_SHIPPING = 8
 MAX_RUNTIME_HOURS = 48
-STAFF_POWER_BUFF_MULTIPLIER = 10
+# Live rebalance hotfix: keep staff buff active but reduce the previously
+# overpowered multiplier to the intended x3 target for both managers/employees.
+STAFF_POWER_BUFF_MULTIPLIER = 3
 STAFF_BONUS_SOFT_CAP_BP = 250_000
 FINAL_PROFIT_SOFT_CAP_START = 25_000_000
 FINAL_PROFIT_SOFT_CAP_SLOPE_BP = 2500
