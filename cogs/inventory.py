@@ -11,7 +11,7 @@ from discord.ext import commands
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import ActiveEffectRow, ItemInventoryRow, StaminaRow, UserJobHubSlotRow, WalletRow
+from db.models import ActiveEffectRow, ItemInventoryRow, StaminaRow, UserJobHubSlotRow
 from services.db import sessions
 from services.stamina import StaminaService
 from services.users import ensure_user_rows
@@ -19,7 +19,6 @@ from services.users import ensure_user_rows
 from services.items_catalog import EffectStacking, ITEMS, ItemDef
 from services.job_hub import award_slot_job_xp
 from services.jobs_core import clamp_int, fmt_int
-from services.xp_award import award_xp
 
 
 UTC = timezone.utc
@@ -66,8 +65,12 @@ def _rarity_emoji(rarity_value: str) -> str:
         return "🟢"
     if rarity_value == "rare":
         return "🔵"
-    if rarity_value == "mythical":
+    if rarity_value == "epic":
         return "🟣"
+    if rarity_value == "legendary":
+        return "🟠"
+    if rarity_value == "mythical":
+        return "🌌"
     return "📦"
 
 
@@ -93,12 +96,10 @@ def _effect_summary(it: ItemDef) -> str:
 
     if "stamina_add" in p:
         lines.append(f"⚡ +{fmt_int(_payload_int(p, 'stamina_add'))} stamina (instant)")
-    if "silver_add" in p:
-        lines.append(f"💰 +{fmt_int(_payload_int(p, 'silver_add'))} silver (instant)")
-    if "job_xp_add" in p:
-        lines.append(f"🧰 +{fmt_int(_payload_int(p, 'job_xp_add'))} job XP (instant)")
-    if "user_xp_add" in p:
-        lines.append(f"🧠 +{fmt_int(_payload_int(p, 'user_xp_add'))} user XP (instant)")
+    if "job_level_gain" in p:
+        lines.append(f"🧰 +{fmt_int(_payload_int(p, 'job_level_gain'))} job level(s) on next /work")
+    if "job_xp_progress_bp" in p:
+        lines.append(f"🧰 +{_payload_int(p, 'job_xp_progress_bp')/100:.2f}% toward next job level")
 
     if "payout_bonus_bp" in p:
         lines.append(f"💸 +{_payload_int(p, 'payout_bonus_bp')/100:.2f}% payout")
@@ -110,12 +111,18 @@ def _effect_summary(it: ItemDef) -> str:
         lines.append(f"⚡ stamina cost {_payload_int(p, 'stamina_cost_flat_delta'):+d} (flat)")
     if "job_xp_bonus_bp" in p:
         lines.append(f"🧰 +{_payload_int(p, 'job_xp_bonus_bp')/100:.2f}% job XP")
-    if "user_xp_bonus_bp" in p:
-        lines.append(f"🧠 +{_payload_int(p, 'user_xp_bonus_bp')/100:.2f}% user XP")
     if "double_payout_chance_bp" in p:
         lines.append(f"🪙 +{_payload_int(p, 'double_payout_chance_bp')/100:.2f}% 2x payout chance")
     if "stamina_cap_add" in p:
         lines.append(f"🔋 +{fmt_int(_payload_int(p, 'stamina_cap_add'))} max stamina (temp)")
+    if "next_work_payout_bp" in p:
+        lines.append(f"💰 +{_payload_int(p, 'next_work_payout_bp')/100:.2f}% next /work payout")
+    if "rare_find_bp" in p:
+        lines.append(f"✨ +{_payload_int(p, 'rare_find_bp')/100:.2f}% rare-find chance")
+    if "extra_roll_bp" in p:
+        lines.append(f"🎲 +{_payload_int(p, 'extra_roll_bp')/100:.2f}% extra-roll chance")
+    if "protection_bp" in p:
+        lines.append(f"🛡️ +{_payload_int(p, 'protection_bp')/100:.2f}% failure protection")
 
     meta: List[str] = []
     if dur is not None:
@@ -247,12 +254,10 @@ async def _apply_item_use(
     effect_key = str(item.effect.effect_key)
 
     stamina_add = _payload_int(payload, "stamina_add", 0)
-    silver_add = _payload_int(payload, "silver_add", 0)
-    job_xp_add = _payload_int(payload, "job_xp_add", 0)
-    user_xp_add = _payload_int(payload, "user_xp_add", 0)
+    legacy_job_xp_add = _payload_int(payload, "job_xp_add", 0)
 
     is_instant = (duration_seconds is None) and (charges is None) and any(
-        value != 0 for value in (stamina_add, silver_add, job_xp_add, user_xp_add)
+        value != 0 for value in (stamina_add, legacy_job_xp_add)
     )
 
     if is_instant:
@@ -269,32 +274,7 @@ async def _apply_item_use(
             srow.last_regen_at = now
             detail_parts.append(f"⚡ +{fmt_int(int(stamina_add))} stamina")
 
-        if silver_add != 0:
-            wrow = await session.scalar(
-                select(WalletRow).where(
-                    WalletRow.guild_id == guild_id,
-                    WalletRow.user_id == user_id,
-                )
-            )
-            if wrow is None:
-                wrow = WalletRow(guild_id=guild_id, user_id=user_id, silver=0, diamonds=0, silver_earned=0, silver_spent=0)
-                session.add(wrow)
-                await session.flush()
-            wrow.silver = max(int(getattr(wrow, "silver", 0) or 0) + int(silver_add), 0)
-            wrow.silver_earned = max(int(getattr(wrow, "silver_earned", 0) or 0) + int(silver_add), 0)
-            detail_parts.append(f"💰 +{fmt_int(int(silver_add))} silver")
-
-        if user_xp_add != 0:
-            await award_xp(
-                session,
-                guild_id=guild_id,
-                user_id=user_id,
-                amount=int(user_xp_add),
-                apply_weekend_multiplier=False,
-            )
-            detail_parts.append(f"🧠 +{fmt_int(int(user_xp_add))} user XP")
-
-        if job_xp_add != 0:
+        if legacy_job_xp_add != 0:
             active_slot = await session.scalar(
                 select(UserJobHubSlotRow)
                 .where(
@@ -328,9 +308,9 @@ async def _apply_item_use(
                 user_id=user_id,
                 slot_index=int(active_slot.slot_index),
                 job_key=str(active_slot.job_key),
-                amount=int(job_xp_add),
+                amount=int(legacy_job_xp_add),
             )
-            detail_parts.append(f"🧰 +{fmt_int(int(job_xp_add))} job XP")
+            detail_parts.append(f"🧰 +{fmt_int(int(legacy_job_xp_add))} legacy job XP")
 
         _ = stamina_service  # keep param stable if you want to route through service later
 

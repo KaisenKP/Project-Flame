@@ -109,6 +109,8 @@ def _rarity_pools() -> Dict[str, List[ItemDef]]:
         ItemRarity.COMMON.value: [],
         ItemRarity.UNCOMMON.value: [],
         ItemRarity.RARE.value: [],
+        ItemRarity.EPIC.value: [],
+        ItemRarity.LEGENDARY.value: [],
         ItemRarity.MYTHICAL.value: [],
     }
     for it in ITEMS.values():
@@ -148,18 +150,18 @@ def _offer_from_item(it: ItemDef) -> ShopOffer:
             desc = f"Work costs **{int(payload['stamina_cost_flat_delta']):+d}** stamina (flat)."
         elif "job_xp_bonus_bp" in payload:
             desc = f"Boost Job XP by **+{payload['job_xp_bonus_bp'] / 100:.2f}%**."
-        elif "user_xp_bonus_bp" in payload:
-            desc = f"Boost User XP by **+{payload['user_xp_bonus_bp'] / 100:.2f}%**."
-        elif "job_xp_add" in payload:
-            desc = f"Gain **+{int(payload['job_xp_add'])}** Job XP instantly for your active job slot."
-        elif "user_xp_add" in payload:
-            desc = f"Gain **+{int(payload['user_xp_add'])}** User XP instantly."
-        elif "silver_add" in payload:
-            desc = f"Gain **+{int(payload['silver_add'])}** silver instantly."
+        elif "job_level_gain" in payload:
+            desc = f"Gain **+{int(payload['job_level_gain'])}** job level(s) on your next work result."
+        elif "job_xp_progress_bp" in payload:
+            desc = f"Gain **+{payload['job_xp_progress_bp'] / 100:.2f}%** progress toward your next job level."
         elif "double_payout_chance_bp" in payload:
             desc = f"Add **+{payload['double_payout_chance_bp'] / 100:.2f}%** chance to 2x payout."
+        elif "next_work_payout_bp" in payload:
+            desc = f"Boost your next /work payout by **+{payload['next_work_payout_bp'] / 100:.2f}%**."
         elif "stamina_cap_add" in payload:
             desc = f"Increase max stamina by **+{int(payload['stamina_cap_add'])}** (temporary)."
+        elif "rare_find_bp" in payload:
+            desc = f"Increase rare drop findings by **+{payload['rare_find_bp'] / 100:.2f}%**."
         else:
             desc = "A temporary boost. Use it, get paid, repeat."
     return ShopOffer(
@@ -187,6 +189,8 @@ def compute_daily_shop_offers(
     commons = pools[ItemRarity.COMMON.value]
     uncommons = pools[ItemRarity.UNCOMMON.value]
     rares = pools[ItemRarity.RARE.value]
+    epics = pools[ItemRarity.EPIC.value]
+    legendaries = pools[ItemRarity.LEGENDARY.value]
     mythicals = pools[ItemRarity.MYTHICAL.value]
 
     if len(commons) < SHOP_COMMON_SLOTS:
@@ -197,6 +201,10 @@ def compute_daily_shop_offers(
         raise RuntimeError("Not enough rare items in catalog for shop")
     if not mythicals:
         raise RuntimeError("No mythical items in catalog for shop")
+    if not epics:
+        epics = rares
+    if not legendaries:
+        legendaries = epics
 
     chosen: set[str] = set()
 
@@ -221,8 +229,13 @@ def compute_daily_shop_offers(
 
     rare_it = _pick_unique(rares)
     upgrade = MYTHICAL_UPGRADE_VIP if vip else MYTHICAL_UPGRADE_BASE
-    if rng.random() < float(upgrade):
+    roll = rng.random()
+    if roll < float(upgrade):
         rare_it = _pick_unique(mythicals)
+    elif roll < 0.08:
+        rare_it = _pick_unique(legendaries)
+    elif roll < 0.22:
+        rare_it = _pick_unique(epics)
 
     offers.append(_offer_from_item(rare_it))
     return offers
@@ -329,8 +342,12 @@ def _rarity_emoji(r: str) -> str:
         return "🟢"
     if r == ItemRarity.RARE.value:
         return "🔵"
-    if r == ItemRarity.MYTHICAL.value:
+    if r == ItemRarity.EPIC.value:
         return "🟣"
+    if r == ItemRarity.LEGENDARY.value:
+        return "🟠"
+    if r == ItemRarity.MYTHICAL.value:
+        return "🌌"
     return "⚪"
 
 
@@ -341,6 +358,10 @@ def _rarity_label(r: str) -> str:
         return "Uncommon"
     if r == ItemRarity.RARE.value:
         return "Rare"
+    if r == ItemRarity.EPIC.value:
+        return "Epic"
+    if r == ItemRarity.LEGENDARY.value:
+        return "Legendary"
     if r == ItemRarity.MYTHICAL.value:
         return "Mythical"
     return r
@@ -349,6 +370,12 @@ def _rarity_label(r: str) -> str:
 def _rarity_color(offers: List[ShopOffer]) -> discord.Color:
     for o in offers:
         if o.rarity == ItemRarity.MYTHICAL.value:
+            return discord.Color.fuchsia()
+    for o in offers:
+        if o.rarity == ItemRarity.LEGENDARY.value:
+            return discord.Color.gold()
+    for o in offers:
+        if o.rarity == ItemRarity.EPIC.value:
             return discord.Color.purple()
     for o in offers:
         if o.rarity == ItemRarity.RARE.value:

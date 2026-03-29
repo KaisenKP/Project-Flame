@@ -10,6 +10,8 @@ class ItemRarity(str, Enum):
     COMMON = "common"
     UNCOMMON = "uncommon"
     RARE = "rare"
+    EPIC = "epic"
+    LEGENDARY = "legendary"
     MYTHICAL = "mythical"
 
 
@@ -127,7 +129,7 @@ ITEMS: dict[str, ItemDef] = {
     # Each item introduces a distinct modifier field or mechanic.
     # -----------------
 
-    # 1) Instant silver gain (flat)
+    # 1) Burst payout window (scaled, non-flat)
     "found_wallet": ItemDef(
         key="found_wallet",
         name="Found Wallet",
@@ -136,9 +138,11 @@ ITEMS: dict[str, ItemDef] = {
         daily_limit=2,
         tradable=True,
         effect=EffectDef(
-            effect_key="silver_instant",
-            group_key="silver_instant",
-            payload={"silver_add": 1500},
+            effect_key="burst_window",
+            group_key="burst",
+            payload={"burst_chance_bp": 3000, "burst_payout_bp": 2000},
+            duration_seconds=20 * 60,
+            stacking=EffectStacking.REFRESH,
         ),
     ),
 
@@ -153,7 +157,7 @@ ITEMS: dict[str, ItemDef] = {
         effect=EffectDef(
             effect_key="next_work_silver_bonus",
             group_key="next_work_bonus",
-            payload={"next_work_silver_bonus": 250},
+            payload={"next_work_payout_bp": 1200},
             charges=1,
             stacking=EffectStacking.ADD,
         ),
@@ -176,7 +180,7 @@ ITEMS: dict[str, ItemDef] = {
         ),
     ),
 
-    # 4) Job XP instant injection
+    # 4) Job level gain on next work
     "training_manual": ItemDef(
         key="training_manual",
         name="Training Manual",
@@ -185,13 +189,15 @@ ITEMS: dict[str, ItemDef] = {
         daily_limit=2,
         tradable=True,
         effect=EffectDef(
-            effect_key="job_xp_instant",
-            group_key="job_xp_instant",
-            payload={"job_xp_add": 250},
+            effect_key="job_level_gain",
+            group_key="job_level_gain",
+            payload={"job_level_gain": 1},
+            charges=1,
+            stacking=EffectStacking.ADD,
         ),
     ),
 
-    # 5) User XP instant injection
+    # 5) Converted from legacy user XP item -> payout utility
     "study_notes": ItemDef(
         key="study_notes",
         name="Study Notes",
@@ -200,13 +206,15 @@ ITEMS: dict[str, ItemDef] = {
         daily_limit=3,
         tradable=True,
         effect=EffectDef(
-            effect_key="user_xp_instant",
-            group_key="user_xp_instant",
-            payload={"user_xp_add": 200},
+            effect_key="payout_training",
+            group_key="payout",
+            payload={"payout_bonus_bp": 900},
+            duration_seconds=25 * 60,
+            stacking=EffectStacking.REFRESH,
         ),
     ),
 
-    # 6) User XP timed bonus (separate from job_xp/payout)
+    # 6) Converted from legacy user XP timed item -> OP mythical combo
     "study_sprint_timer": ItemDef(
         key="study_sprint_timer",
         name="Study Sprint Timer",
@@ -215,9 +223,15 @@ ITEMS: dict[str, ItemDef] = {
         daily_limit=1,
         tradable=True,
         effect=EffectDef(
-            effect_key="user_xp_boost",
-            group_key="user_xp",
-            payload={"user_xp_bonus_bp": 15000},  # +150%
+            effect_key="mythic_sprint_mode",
+            group_key="mythic_sprint",
+            payload={
+                "payout_bonus_bp": 8000,
+                "job_xp_bonus_bp": 7000,
+                "rare_find_bp": 2800,
+                "extra_roll_bp": 2000,
+                "protection_bp": 3500,
+            },
             duration_seconds=30 * 60,
             stacking=EffectStacking.REPLACE,
         ),
@@ -368,9 +382,39 @@ ITEMS: dict[str, ItemDef] = {
         effect=EffectDef(
             effect_key="next_work_multiplier",
             group_key="next_work_multiplier",
-            payload={"next_work_silver_mult_bp": 2000},  # +20% to next work payout
+            payload={"next_work_payout_bp": 2000},
             charges=1,
             stacking=EffectStacking.ADD,
+        ),
+    ),
+    "golden_contract": ItemDef(
+        key="golden_contract",
+        name="Golden Contract",
+        rarity=ItemRarity.LEGENDARY,
+        price=11500,
+        daily_limit=1,
+        tradable=True,
+        effect=EffectDef(
+            effect_key="legendary_combo_contract",
+            group_key="combo",
+            payload={"combo_payout_step_bp": 550, "combo_max_stacks": 6},
+            duration_seconds=45 * 60,
+            stacking=EffectStacking.REFRESH,
+        ),
+    ),
+    "chaos_dice": ItemDef(
+        key="chaos_dice",
+        name="Chaos Dice",
+        rarity=ItemRarity.EPIC,
+        price=4200,
+        daily_limit=2,
+        tradable=True,
+        effect=EffectDef(
+            effect_key="greed_roll",
+            group_key="greed",
+            payload={"greed_payout_bp": 3500, "greed_fail_bp": 900},
+            duration_seconds=30 * 60,
+            stacking=EffectStacking.REFRESH,
         ),
     ),
     "uno_reverse_wallet": ItemDef(
