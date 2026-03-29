@@ -20,6 +20,7 @@ from services.users import ensure_user_rows
 from services.vip import is_vip_member
 from services.xp_award import award_xp
 from services.work_xp import apply_work_xp_multipliers, is_weekend
+from services.work_drops import roll_and_grant_work_drops, WorkDropResult
 
 from services.jobs_balance import job_xp_for_work, payout_for_work, prestige_cost, stamina_cost_for_work, user_xp_for_work
 from services.achievements import (
@@ -84,6 +85,7 @@ from services.jobs_views import open_job_hub
 # Cooldowns
 # -------------------------
 _COOLDOWNS: Dict[Tuple[int, int, str], float] = {}
+_WORK_COMBO_STREAK: Dict[Tuple[int, int], int] = {}
 
 
 # -------------------------
@@ -170,8 +172,21 @@ class _ItemMods:
     stamina_discount_bp: int = 0
     stamina_cost_flat_delta: int = 0
     job_xp_bonus_bp: int = 0
-    user_xp_bonus_bp: int = 0
     double_payout_chance_bp: int = 0
+    extra_roll_bp: int = 0
+    rare_find_bp: int = 0
+    protection_bp: int = 0
+    greed_payout_bp: int = 0
+    greed_fail_bp: int = 0
+    burst_chance_bp: int = 0
+    burst_payout_bp: int = 0
+    combo_payout_step_bp: int = 0
+    combo_max_stacks: int = 0
+    lootbox_drop_bp: int = 0
+    item_drop_bp: int = 0
+    next_work_payout_bp: int = 0
+    job_xp_progress_bp: int = 0
+    job_level_gain: int = 0
 
 
 async def _cleanup_expired_item_effects(session, *, guild_id: int, user_id: int) -> None:
@@ -211,8 +226,21 @@ async def _get_item_mods(session, *, guild_id: int, user_id: int) -> _ItemMods:
     stamina_discount_bp = 0
     stamina_cost_flat_delta = 0
     job_xp_bonus_bp = 0
-    user_xp_bonus_bp = 0
     double_payout_chance_bp = 0
+    extra_roll_bp = 0
+    rare_find_bp = 0
+    protection_bp = 0
+    greed_payout_bp = 0
+    greed_fail_bp = 0
+    burst_chance_bp = 0
+    burst_payout_bp = 0
+    combo_payout_step_bp = 0
+    combo_max_stacks = 0
+    lootbox_drop_bp = 0
+    item_drop_bp = 0
+    next_work_payout_bp = 0
+    job_xp_progress_bp = 0
+    job_level_gain = 0
 
     for r in rows.scalars():
         payload = r.payload_json
@@ -221,16 +249,43 @@ async def _get_item_mods(session, *, guild_id: int, user_id: int) -> _ItemMods:
         stamina_discount_bp += _int_payload(payload, "stamina_discount_bp")
         stamina_cost_flat_delta += _int_payload(payload, "stamina_cost_flat_delta")
         job_xp_bonus_bp += _int_payload(payload, "job_xp_bonus_bp")
-        user_xp_bonus_bp += _int_payload(payload, "user_xp_bonus_bp")
         double_payout_chance_bp += _int_payload(payload, "double_payout_chance_bp")
+        extra_roll_bp += _int_payload(payload, "extra_roll_bp")
+        rare_find_bp += _int_payload(payload, "rare_find_bp")
+        protection_bp += _int_payload(payload, "protection_bp")
+        greed_payout_bp += _int_payload(payload, "greed_payout_bp")
+        greed_fail_bp += _int_payload(payload, "greed_fail_bp")
+        burst_chance_bp += _int_payload(payload, "burst_chance_bp")
+        burst_payout_bp += _int_payload(payload, "burst_payout_bp")
+        combo_payout_step_bp += _int_payload(payload, "combo_payout_step_bp")
+        combo_max_stacks += _int_payload(payload, "combo_max_stacks")
+        lootbox_drop_bp += _int_payload(payload, "lootbox_drop_bp")
+        item_drop_bp += _int_payload(payload, "item_drop_bp")
+        next_work_payout_bp += _int_payload(payload, "next_work_payout_bp")
+        next_work_payout_bp += _int_payload(payload, "next_work_silver_mult_bp")
+        job_xp_progress_bp += _int_payload(payload, "job_xp_progress_bp")
+        job_level_gain += _int_payload(payload, "job_level_gain")
 
     payout_bonus_bp = clamp_int(payout_bonus_bp, -10_000, 50_000)
     fail_reduction_bp = clamp_int(fail_reduction_bp, 0, 10_000)
     stamina_discount_bp = clamp_int(stamina_discount_bp, 0, 10_000)
     stamina_cost_flat_delta = clamp_int(stamina_cost_flat_delta, -10, 10)
     job_xp_bonus_bp = clamp_int(job_xp_bonus_bp, -10_000, 50_000)
-    user_xp_bonus_bp = clamp_int(user_xp_bonus_bp, -10_000, 50_000)
     double_payout_chance_bp = clamp_int(double_payout_chance_bp, 0, 10_000)
+    extra_roll_bp = clamp_int(extra_roll_bp, 0, 10_000)
+    rare_find_bp = clamp_int(rare_find_bp, 0, 10_000)
+    protection_bp = clamp_int(protection_bp, 0, 10_000)
+    greed_payout_bp = clamp_int(greed_payout_bp, 0, 50_000)
+    greed_fail_bp = clamp_int(greed_fail_bp, 0, 10_000)
+    burst_chance_bp = clamp_int(burst_chance_bp, 0, 10_000)
+    burst_payout_bp = clamp_int(burst_payout_bp, 0, 50_000)
+    combo_payout_step_bp = clamp_int(combo_payout_step_bp, 0, 20_000)
+    combo_max_stacks = clamp_int(combo_max_stacks, 0, 20)
+    lootbox_drop_bp = clamp_int(lootbox_drop_bp, 0, 9_000)
+    item_drop_bp = clamp_int(item_drop_bp, 0, 9_000)
+    next_work_payout_bp = clamp_int(next_work_payout_bp, 0, 40_000)
+    job_xp_progress_bp = clamp_int(job_xp_progress_bp, 0, 10_000)
+    job_level_gain = clamp_int(job_level_gain, 0, 5)
 
     return _ItemMods(
         payout_bonus_bp=payout_bonus_bp,
@@ -238,8 +293,21 @@ async def _get_item_mods(session, *, guild_id: int, user_id: int) -> _ItemMods:
         stamina_discount_bp=stamina_discount_bp,
         stamina_cost_flat_delta=stamina_cost_flat_delta,
         job_xp_bonus_bp=job_xp_bonus_bp,
-        user_xp_bonus_bp=user_xp_bonus_bp,
         double_payout_chance_bp=double_payout_chance_bp,
+        extra_roll_bp=extra_roll_bp,
+        rare_find_bp=rare_find_bp,
+        protection_bp=protection_bp,
+        greed_payout_bp=greed_payout_bp,
+        greed_fail_bp=greed_fail_bp,
+        burst_chance_bp=burst_chance_bp,
+        burst_payout_bp=burst_payout_bp,
+        combo_payout_step_bp=combo_payout_step_bp,
+        combo_max_stacks=combo_max_stacks,
+        lootbox_drop_bp=lootbox_drop_bp,
+        item_drop_bp=item_drop_bp,
+        next_work_payout_bp=next_work_payout_bp,
+        job_xp_progress_bp=job_xp_progress_bp,
+        job_level_gain=job_level_gain,
     )
 
 
@@ -328,6 +396,7 @@ def _build_work_embed(
     prestiged: bool,
     next_job_name: Optional[str],
     weekend_bonus_active: bool,
+    drop_result: Optional[WorkDropResult] = None,
 ) -> discord.Embed:
     color = _work_color(d.category)
 
@@ -380,8 +449,6 @@ def _build_work_embed(
         eff_lines.append(f"⚡ Stamina discount: **{effects.stamina_discount_bp / 100:.2f}%**")
     if int(effects.job_xp_bonus_bp) != 0:
         eff_lines.append(f"🧰 Job XP: **+{effects.job_xp_bonus_bp / 100:.2f}%**")
-    if int(effects.user_xp_bonus_bp) != 0:
-        eff_lines.append(f"🧠 User XP: **+{effects.user_xp_bonus_bp / 100:.2f}%**")
     if int(getattr(effects, "extra_roll_bp", 0)) != 0:
         eff_lines.append(f"🎲 Extra roll chance: **{int(getattr(effects, 'extra_roll_bp', 0)) / 100:.2f}%**")
     if int(getattr(effects, "rare_find_bp", 0)) != 0:
@@ -393,6 +460,10 @@ def _build_work_embed(
         eff_lines.append(f"🧰 Tool stamina save: **{tool_stamina_save_chance_bp / 100:.2f}%** chance")
     if int(item_mods.double_payout_chance_bp) != 0:
         eff_lines.append(f"🪙 2x payout chance: **{item_mods.double_payout_chance_bp / 100:.2f}%**")
+    if int(item_mods.protection_bp) != 0:
+        eff_lines.append(f"🛡️ Fail protection: **{item_mods.protection_bp / 100:.2f}%**")
+    if int(item_mods.combo_payout_step_bp) != 0:
+        eff_lines.append(f"🔥 Combo step: **+{item_mods.combo_payout_step_bp / 100:.2f}%**")
 
     avatar_url = getattr(getattr(user, "display_avatar", None), "url", None)
 
@@ -409,6 +480,16 @@ def _build_work_embed(
 
     if notes:
         embed.add_field(name="Milestone", value="\n".join(notes), inline=True)
+
+    if drop_result is not None and (drop_result.lootbox_rarity or drop_result.item_key):
+        rarity = (drop_result.lootbox_rarity or "").lower()
+        drop_lines: list[str] = []
+        if rarity:
+            flair = "🌌 JACKPOT!" if rarity == "mythical" else "🎁 Drop!"
+            drop_lines.append(f"{flair} Lootbox: **{rarity.upper()}**")
+        if drop_result.item_key:
+            drop_lines.append(f"🧩 Item: **{drop_result.item_key}**")
+        embed.add_field(name="Drops", value="\n".join(drop_lines), inline=False)
 
     if eff_lines:
         embed.add_field(name="Bonuses Active", value="\n".join(eff_lines), inline=False)
@@ -557,7 +638,8 @@ class WorkCog(commands.Cog):
                         fail_reduction_bp=clamp_int(int(job_effects.fail_reduction_bp) + int(item_mods.fail_reduction_bp), 0, 10_000),
                         stamina_discount_bp=clamp_int(int(job_effects.stamina_discount_bp) + int(item_mods.stamina_discount_bp), 0, 10_000),
                         job_xp_bonus_bp=clamp_int(int(job_effects.job_xp_bonus_bp) + int(item_mods.job_xp_bonus_bp), -10_000, 50_000),
-                        user_xp_bonus_bp=clamp_int(int(job_effects.user_xp_bonus_bp) + int(item_mods.user_xp_bonus_bp), -10_000, 50_000),
+                        extra_roll_bp=clamp_int(int(job_effects.extra_roll_bp) + int(item_mods.extra_roll_bp), 0, 10_000),
+                        rare_find_bp=clamp_int(int(job_effects.rare_find_bp) + int(item_mods.rare_find_bp), 0, 10_000),
                     )
                     merged_effects = merged_effects.clamp()
 
@@ -607,14 +689,18 @@ class WorkCog(commands.Cog):
 
                     fail_bp = category_fail_bp(d.category, d.fail_chance_bp)
                     fail_bp = max(int(fail_bp) - int(merged_effects.fail_reduction_bp), 0)
+                    fail_bp = min(10_000, fail_bp + int(item_mods.greed_fail_bp))
                     fail_bp = clamp_int(fail_bp, 0, 10_000)
 
                     failed = roll_bp(fail_bp) if fail_bp > 0 else False
+                    if failed and int(item_mods.protection_bp) > 0 and roll_bp(int(item_mods.protection_bp)):
+                        failed = False
                     extra_roll = roll_bp(int(getattr(merged_effects, "extra_roll_bp", 0))) if int(getattr(merged_effects, "extra_roll_bp", 0)) > 0 else False
 
                     payout = 0
                     action_text = ""
                     did_double = False
+                    drop_result = WorkDropResult()
                     upgrade_level = 0
                     upgrade_bonus_pct = 0
 
@@ -652,6 +738,27 @@ class WorkCog(commands.Cog):
 
                         p1 = _roll_payout_once()
                         payout = max(p1, _roll_payout_once()) if extra_roll else p1
+                        if int(item_mods.greed_payout_bp) > 0:
+                            payout = apply_bp(payout, int(item_mods.greed_payout_bp))
+                        if int(item_mods.burst_chance_bp) > 0 and int(item_mods.burst_payout_bp) > 0 and roll_bp(int(item_mods.burst_chance_bp)):
+                            payout = apply_bp(payout, int(item_mods.burst_payout_bp))
+                            action_text += "\n💥 **Burst proc!** Jackpot multiplier activated."
+                        if int(item_mods.next_work_payout_bp) > 0:
+                            payout = apply_bp(payout, int(item_mods.next_work_payout_bp))
+                            await _consume_charge_from_group(
+                                session,
+                                guild_id=guild_id,
+                                user_id=user_id,
+                                group_key="next_work_bonus",
+                                amount=1,
+                            )
+                            await _consume_charge_from_group(
+                                session,
+                                guild_id=guild_id,
+                                user_id=user_id,
+                                group_key="next_work_multiplier",
+                                amount=1,
+                            )
 
                         upgrade_level = int(slot_snap.tool_levels.get(slot_snap.selected_tool_key or "", 0))
                         upgrade_bonus_pct = income_tool_bp // 100
@@ -791,6 +898,19 @@ class WorkCog(commands.Cog):
                                 group_key="double_payout",
                                 amount=1,
                             )
+                        combo_key = (guild_id, user_id)
+                        if failed:
+                            _WORK_COMBO_STREAK[combo_key] = 0
+                        else:
+                            combo_now = _WORK_COMBO_STREAK.get(combo_key, 0) + 1
+                            combo_cap = int(item_mods.combo_max_stacks or 0)
+                            if combo_cap > 0:
+                                combo_now = min(combo_now, combo_cap)
+                            _WORK_COMBO_STREAK[combo_key] = combo_now
+                            if int(item_mods.combo_payout_step_bp) > 0 and combo_now > 1:
+                                combo_bp = int(item_mods.combo_payout_step_bp) * (combo_now - 1)
+                                payout = apply_bp(payout, combo_bp)
+                                action_text += f"\n🔥 **Combo x{combo_now}**: +{combo_bp / 100:.2f}% payout"
 
                         wallet.silver += int(payout)
                         if hasattr(wallet, "silver_earned"):
@@ -830,6 +950,64 @@ class WorkCog(commands.Cog):
                         amount=int(delta_job_xp),
                     )
 
+                    if int(item_mods.job_xp_progress_bp) > 0:
+                        pct_xp = max((int(xp_needed(key, int(progress_after.level), int(progress_after.prestige))) * int(item_mods.job_xp_progress_bp)) // 10_000, 1)
+                        progress_after, _ = await award_slot_job_xp(
+                            session,
+                            guild_id=guild_id,
+                            user_id=user_id,
+                            slot_index=int(active_slot.slot_index),
+                            job_key=key,
+                            amount=int(pct_xp),
+                        )
+                        await _consume_charge_from_group(
+                            session,
+                            guild_id=guild_id,
+                            user_id=user_id,
+                            group_key="job_level_gain",
+                            amount=1,
+                        )
+
+                    if int(item_mods.job_level_gain) > 0:
+                        level_xp = 0
+                        tmp_level = int(progress_after.level)
+                        tmp_prestige = int(progress_after.prestige)
+                        tmp_into = int(progress_after.xp)
+                        for _ in range(int(item_mods.job_level_gain)):
+                            need = int(xp_needed(key, tmp_level, tmp_prestige))
+                            level_xp += max(need - tmp_into, 1)
+                            tmp_level += 1
+                            tmp_into = 0
+                        progress_after, _ = await award_slot_job_xp(
+                            session,
+                            guild_id=guild_id,
+                            user_id=user_id,
+                            slot_index=int(active_slot.slot_index),
+                            job_key=key,
+                            amount=int(level_xp),
+                        )
+                        await _consume_charge_from_group(
+                            session,
+                            guild_id=guild_id,
+                            user_id=user_id,
+                            group_key="job_level_gain",
+                            amount=1,
+                        )
+
+                    if not failed:
+                        drop_result = await roll_and_grant_work_drops(
+                            session,
+                            guild_id=guild_id,
+                            user_id=user_id,
+                            job_tier=d.category.value,
+                            user_level=user_level,
+                            prestige=job_prestige_now,
+                            rare_find_bp=int(getattr(merged_effects, "rare_find_bp", 0)),
+                            extra_roll_bp=int(getattr(merged_effects, "extra_roll_bp", 0)),
+                            lootbox_drop_bp=int(item_mods.lootbox_drop_bp),
+                            item_drop_bp=int(item_mods.item_drop_bp),
+                        )
+
                     work_image_url = job_row_image_get(job_row)
                     next_job_name = d.name
 
@@ -859,6 +1037,7 @@ class WorkCog(commands.Cog):
                         prestiged=False,
                         next_job_name=next_job_name,
                         weekend_bonus_active=is_weekend(),
+                        drop_result=drop_result,
                     )
                     used_cooldown_seconds = effective_cd
 

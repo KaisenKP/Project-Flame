@@ -29,6 +29,7 @@ class LootboxRarity(str, Enum):
     RARE = "rare"
     EPIC = "epic"
     LEGENDARY = "legendary"
+    MYTHICAL = "mythical"
 
 
 @dataclass(frozen=True)
@@ -92,7 +93,9 @@ def _rarity_color(r: LootboxRarity) -> discord.Color:
         return discord.Color.blue()
     if r == LootboxRarity.EPIC:
         return discord.Color.purple()
-    return discord.Color.gold()
+    if r == LootboxRarity.LEGENDARY:
+        return discord.Color.gold()
+    return discord.Color.fuchsia()
 
 
 def _rarity_emoji(r: LootboxRarity) -> str:
@@ -102,7 +105,9 @@ def _rarity_emoji(r: LootboxRarity) -> str:
         return "🎁"
     if r == LootboxRarity.EPIC:
         return "🧰"
-    return "👑"
+    if r == LootboxRarity.LEGENDARY:
+        return "👑"
+    return "🌌"
 
 
 def _rarity_label(r: LootboxRarity) -> str:
@@ -205,6 +210,7 @@ class LootboxCog(commands.Cog):
         # Epic and Legendary buffed by 10x.
         LootboxRarity.EPIC: RarityConfig(weight=6, min_silver=550000, max_silver=1650000, min_xp=660, max_xp=1760),
         LootboxRarity.LEGENDARY: RarityConfig(weight=1, min_silver=2200000, max_silver=6600000, min_xp=1760, max_xp=4400),
+        LootboxRarity.MYTHICAL: RarityConfig(weight=1, min_silver=8000000, max_silver=16000000, min_xp=5000, max_xp=9500),
     }
 
     # "Animation" tuning
@@ -496,7 +502,7 @@ class LootboxCog(commands.Cog):
 
         rkey = (rarity or "").strip().lower()
         if rkey not in {r.value for r in LootboxRarity}:
-            await interaction.response.send_message("Invalid rarity. Use: common, rare, epic, legendary", ephemeral=True)
+            await interaction.response.send_message("Invalid rarity. Use: common, rare, epic, legendary, mythical", ephemeral=True)
             return
 
         rarity_enum = LootboxRarity(rkey)
@@ -855,7 +861,7 @@ class LootboxCog(commands.Cog):
 
         rkey = (rarity or "").strip().lower()
         if rkey not in {r.value for r in LootboxRarity}:
-            await interaction.response.send_message("Invalid rarity. Use: common, rare, epic, legendary", ephemeral=True)
+            await interaction.response.send_message("Invalid rarity. Use: common, rare, epic, legendary, mythical", ephemeral=True)
             return
 
         amt = max(int(amount or 1), 1)
