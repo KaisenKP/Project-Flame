@@ -1096,7 +1096,7 @@ def _format_manager_special_effects(slot: ManagerAssignmentSlotSnapshot) -> list
     effects: list[str] = []
     power_bp = int(getattr(slot, "profit_bonus_bp", 0) or 0)
     if power_bp > 0:
-        effects.append(f"Productivity +{_format_short_percent_from_bp(power_bp)}")
+        effects.append(f"Profit Multiplier +{_format_short_percent_from_bp(power_bp)}")
     return effects
 
 
@@ -1130,7 +1130,7 @@ def _build_manager_summary_lines(slots: Sequence[ManagerAssignmentSlotSnapshot])
     if auto_total > 0:
         special.append(f"Auto Run {_roman_auto_run(auto_total) if auto_total <= 5 else auto_total}")
     if power_total > 0:
-        special.append(f"Productivity +{_format_short_percent_from_bp(power_total)}")
+        special.append(f"Profit Multiplier +{_format_short_percent_from_bp(power_total)}")
     return summary, (" • ".join(special[:2]) if special else None), f"{_fmt_int(len(active))}/{_fmt_int(len(slots))} Slots Filled"
 
 
