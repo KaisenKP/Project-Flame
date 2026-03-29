@@ -422,6 +422,10 @@ _BUSINESS_DEF_MAP: Dict[str, BusinessDef] = {b.key: b for b in _BUSINESS_DEFS}
 BASE_RUNTIME_HOURS_DEFAULT = 4
 BASE_RUNTIME_HOURS_SHIPPING = 8
 MAX_RUNTIME_HOURS = 48
+STAFF_POWER_BUFF_MULTIPLIER = 10
+STAFF_BONUS_SOFT_CAP_BP = 250_000
+FINAL_PROFIT_SOFT_CAP_START = 25_000_000
+FINAL_PROFIT_SOFT_CAP_SLOPE_BP = 2500
 
 BASE_WORKER_SLOTS = 2
 BASE_MANAGER_SLOTS = 1
@@ -514,6 +518,81 @@ def _upgrade_percent_bp_for_level(level: int) -> int:
 
 def _apply_bp(value: int, basis_points: int) -> int:
     return max(int(round(int(value) * (10_000 + int(basis_points)) / 10_000)), 0)
+
+
+def _buff_staff_flat_bonus(flat_bonus: int) -> int:
+    return max(int(flat_bonus or 0), 0) * STAFF_POWER_BUFF_MULTIPLIER
+
+
+def _buff_staff_bonus_bp(basis_points: int) -> int:
+    return max(int(basis_points or 0), 0) * STAFF_POWER_BUFF_MULTIPLIER
+
+
+def _apply_staff_bonus_soft_cap_bp(total_staff_bonus_bp: int) -> int:
+    """
+    Keep staff buffs explosive while adding non-destructive diminishing returns
+    once combined worker+manager power gets extreme.
+    """
+    total = max(int(total_staff_bonus_bp or 0), 0)
+    if total <= STAFF_BONUS_SOFT_CAP_BP:
+        return total
+    overflow = total - STAFF_BONUS_SOFT_CAP_BP
+    softened_overflow = int(round(overflow * 0.45))
+    return STAFF_BONUS_SOFT_CAP_BP + softened_overflow
+
+
+def _apply_final_profit_soft_cap(value: int) -> int:
+    """
+    Final non-destructive economy protection layer.
+    Keeps ownership data intact while softening only extreme output.
+    """
+    normalized = max(int(value or 0), 0)
+    if normalized <= FINAL_PROFIT_SOFT_CAP_START:
+        return normalized
+    overflow = normalized - FINAL_PROFIT_SOFT_CAP_START
+    softened_overflow = int(round(overflow * (FINAL_PROFIT_SOFT_CAP_SLOPE_BP / 10_000)))
+    return FINAL_PROFIT_SOFT_CAP_START + softened_overflow
+
+
+def compute_employee_contribution(*, base_profit: int, worker_flat_bonus: int, worker_percent_bonus_bp: int) -> int:
+    value = max(int(base_profit or 0), 0) + _buff_staff_flat_bonus(worker_flat_bonus)
+    effective_worker_bp = _buff_staff_bonus_bp(worker_percent_bonus_bp)
+    value = _apply_bp(value, effective_worker_bp)
+    return max(value, 0)
+
+
+def compute_manager_bonus(*, current_profit: int, manager_bonus_bp: int, worker_bonus_bp: int) -> int:
+    boosted_manager_bp = _buff_staff_bonus_bp(manager_bonus_bp)
+    boosted_worker_bp = _buff_staff_bonus_bp(worker_bonus_bp)
+    combined_staff_bp = _apply_staff_bonus_soft_cap_bp(boosted_worker_bp + boosted_manager_bp)
+    manager_effective_bp = max(combined_staff_bp - boosted_worker_bp, 0)
+    return _apply_bp(max(int(current_profit or 0), 0), manager_effective_bp)
+
+
+def compute_business_income(
+    *,
+    base_profit: int,
+    worker_flat_bonus: int,
+    worker_percent_bonus_bp: int,
+    manager_bonus_bp: int,
+    prestige_bonus_bp: int,
+    synergy_bonus_bp: int,
+    temporary_bonus_bp: int,
+) -> int:
+    value = compute_employee_contribution(
+        base_profit=base_profit,
+        worker_flat_bonus=worker_flat_bonus,
+        worker_percent_bonus_bp=worker_percent_bonus_bp,
+    )
+    value = compute_manager_bonus(
+        current_profit=value,
+        manager_bonus_bp=manager_bonus_bp,
+        worker_bonus_bp=worker_percent_bonus_bp,
+    )
+    value = _apply_bp(value, int(prestige_bonus_bp or 0))
+    value = _apply_bp(value, int(synergy_bonus_bp or 0))
+    value = _apply_bp(value, int(temporary_bonus_bp or 0))
+    return _apply_final_profit_soft_cap(value)
 
 
 def _base_runtime_hours_for_key(business_key: str) -> int:
@@ -1069,10 +1148,11 @@ async def _worker_bonus_snapshot(session, *, ownership: BusinessOwnershipRow) ->
     rows = await _get_active_worker_rows_for_ownership(session, ownership_id=int(ownership.id))
     if not rows:
         return 0, "No workers assigned"
-    total_bp = diminishing_worker_bonus_bp(sum(int(row.percent_profit_bonus_bp or 0) for row in rows))
+    total_bp = _buff_staff_bonus_bp(diminishing_worker_bonus_bp(sum(int(row.percent_profit_bonus_bp or 0) for row in rows)))
     parts = []
     for row in rows[:3]:
-        parts.append(f"{worker_role_label(str(row.worker_type), str(ownership.business_key))} +{int(row.percent_profit_bonus_bp or 0)/100:.0f}%")
+        boosted_row_bp = _buff_staff_bonus_bp(int(row.percent_profit_bonus_bp or 0))
+        parts.append(f"{worker_role_label(str(row.worker_type), str(ownership.business_key))} +{boosted_row_bp/100:.0f}%")
     suffix = f" | +{len(rows)-3} more" if len(rows) > 3 else ""
     return total_bp, ", ".join(parts) + suffix
 
@@ -1176,7 +1256,8 @@ async def _calc_display_hourly_profit_for_owned_business(
     )
     state = await _compute_run_state_summary(session, ownership=ownership, defn=defn, running_row=running_row)
 
-    base_after_scaling = _effective_base_income(defn, level=level, prestige=prestige)
+    base_after_scaling = int(defn.base_hourly_income)
+    base_after_scaling = _apply_bp(base_after_scaling, _upgrade_percent_bp_for_level(level))
     base_after_scaling = _apply_bp(base_after_scaling, trait.base_profit_multiplier_bp - 10_000)
 
     flat_bonus = await _sum_active_worker_flat_bonus_for_ownership(
@@ -1187,20 +1268,30 @@ async def _calc_display_hourly_profit_for_owned_business(
         session,
         ownership_id=int(ownership.id),
     )
-    percent_bonus_bp = max(state["worker_bp"], diminishing_worker_bonus_bp(raw_percent_bonus_bp))
+    state_worker_bp_raw = int(state["worker_bp"]) // STAFF_POWER_BUFF_MULTIPLIER if STAFF_POWER_BUFF_MULTIPLIER > 0 else int(state["worker_bp"])
+    percent_bonus_bp = max(
+        diminishing_worker_bonus_bp(raw_percent_bonus_bp),
+        max(state_worker_bp_raw, 0),
+    )
     manager_bonus_bp = await _sum_active_manager_profit_bonus_bp_for_ownership(
         session,
         ownership_id=int(ownership.id),
     )
-
-    value = base_after_scaling + flat_bonus
-    value = _apply_bp(value, percent_bonus_bp)
-    value = _apply_bp(value, manager_bonus_bp)
-    value = _apply_bp(value, state["synergy_bp"])
+    temporary_bonus_bp = 0
     if running_row is not None:
         active_event_bp, _ = summarize_active_events(list((running_row.snapshot_json or {}).get("event_plan", [])), now=_utc_now())
-        value = _apply_bp(value, active_event_bp)
-    return max(value, 0)
+        temporary_bonus_bp += int(active_event_bp)
+    prestige_bonus_bp = int(prestige_multiplier(prestige) * 10_000) - 10_000
+    value = compute_business_income(
+        base_profit=base_after_scaling,
+        worker_flat_bonus=flat_bonus,
+        worker_percent_bonus_bp=percent_bonus_bp,
+        manager_bonus_bp=manager_bonus_bp,
+        prestige_bonus_bp=prestige_bonus_bp,
+        synergy_bonus_bp=int(state["synergy_bp"]),
+        temporary_bonus_bp=temporary_bonus_bp,
+    )
+    return max(int(value), 0)
 
 
 async def _calc_total_runtime_hours_for_owned_business(
@@ -1410,6 +1501,9 @@ async def get_business_manage_snapshot(
     notes = [
         f"Identity: {trait.positive_bias} • {trait.risk_label}",
         f"Workers +{int(state['worker_bp'])/100:.0f}% | Manager: {state['manager_summary']}",
+        f"Manager Power Buff Active: x{STAFF_POWER_BUFF_MULTIPLIER}",
+        f"Employee Efficiency Buff Active: x{STAFF_POWER_BUFF_MULTIPLIER}",
+        f"Final Profit After Staff Bonuses: {hourly_profit:,}/hr",
         f"Mode: {state['run_mode_label']} | Synergy: {state['synergy_summary']}",
     ]
     if running_row is not None:
