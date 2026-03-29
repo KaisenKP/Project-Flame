@@ -416,6 +416,8 @@ ITEMS: dict[str, ItemDef] = {
             duration_seconds=30 * 60,
             stacking=EffectStacking.REFRESH,
         ),
+        description="High-risk buff: +35% work payout, but +9% fail chance for 30 minutes.",
+        inventory_description="Roll the dice for bigger checks. For 30 minutes, successful work pays 35% more, but your job fail chance rises by 9%.",
     ),
     "uno_reverse_wallet": ItemDef(
         key="uno_reverse_wallet",
