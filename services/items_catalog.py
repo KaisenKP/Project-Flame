@@ -62,6 +62,7 @@ ITEMS: dict[str, ItemDef] = {
             group_key="energy",
             payload={"stamina_add": 25},
         ),
+        description="A quick jolt that restores 25 stamina instantly.",
     ),
     "protein_bar": ItemDef(
         key="protein_bar",
@@ -77,6 +78,7 @@ ITEMS: dict[str, ItemDef] = {
             duration_seconds=30 * 60,
             stacking=EffectStacking.REFRESH,
         ),
+        description="Power snack: +10% work payout for 30 minutes.",
     ),
     "caffeine_gum": ItemDef(
         key="caffeine_gum",
@@ -92,6 +94,7 @@ ITEMS: dict[str, ItemDef] = {
             duration_seconds=45 * 60,
             stacking=EffectStacking.REFRESH,
         ),
+        description="Stay sharp and steady with 8% less fail chance for 45 minutes.",
     ),
     "wrist_wraps": ItemDef(
         key="wrist_wraps",
@@ -107,6 +110,7 @@ ITEMS: dict[str, ItemDef] = {
             duration_seconds=30 * 60,
             stacking=EffectStacking.REFRESH,
         ),
+        description="Tight form, fast gains: +25% Job XP for 30 minutes.",
     ),
     "adrenaline_patch": ItemDef(
         key="adrenaline_patch",
@@ -122,6 +126,7 @@ ITEMS: dict[str, ItemDef] = {
             duration_seconds=60 * 60,
             stacking=EffectStacking.REPLACE,
         ),
+        description="Push beyond your limit with +50 max stamina for 1 hour.",
     ),
 
     # -----------------
@@ -144,6 +149,7 @@ ITEMS: dict[str, ItemDef] = {
             duration_seconds=20 * 60,
             stacking=EffectStacking.REFRESH,
         ),
+        description="For 20 minutes, your work has a 30% chance to burst for +20% payout.",
     ),
 
     # 2) Next-work silver bonus (one charge)
@@ -161,6 +167,7 @@ ITEMS: dict[str, ItemDef] = {
             charges=1,
             stacking=EffectStacking.ADD,
         ),
+        description="Pocket tips ready: your next /work pays 12% more.",
     ),
 
     # 3) Stamina cost discount for N works (charges)
@@ -178,6 +185,7 @@ ITEMS: dict[str, ItemDef] = {
             charges=20,
             stacking=EffectStacking.REPLACE,
         ),
+        description="Efficient fuel: your next 20 works cost 1 less stamina each.",
     ),
 
     # 4) Job level gain on next work
@@ -195,6 +203,7 @@ ITEMS: dict[str, ItemDef] = {
             charges=1,
             stacking=EffectStacking.ADD,
         ),
+        description="Cram once, level once: gain +1 job level on your next work result.",
     ),
 
     # 5) Converted from legacy user XP item -> payout utility
@@ -212,6 +221,7 @@ ITEMS: dict[str, ItemDef] = {
             duration_seconds=25 * 60,
             stacking=EffectStacking.REFRESH,
         ),
+        description="Refresher notes that boost work payout by 9% for 25 minutes.",
     ),
 
     # 6) Converted from legacy user XP timed item -> OP mythical combo
@@ -235,6 +245,7 @@ ITEMS: dict[str, ItemDef] = {
             duration_seconds=30 * 60,
             stacking=EffectStacking.REPLACE,
         ),
+        description="Mythic focus mode for 30 minutes: huge payout, XP, and rare-find boosts.",
     ),
 
     # 7) Double payout chance for N works (charges)
@@ -252,6 +263,7 @@ ITEMS: dict[str, ItemDef] = {
             charges=20,
             stacking=EffectStacking.REPLACE,
         ),
+        description="Fortune flips your way: +25% chance to double payout for 20 works.",
     ),
 
     # 8) Fail chance reduction for N works (charges, distinct from timed success)
@@ -269,6 +281,7 @@ ITEMS: dict[str, ItemDef] = {
             charges=25,
             stacking=EffectStacking.REPLACE,
         ),
+        description="Secure every move with 20% less fail chance for your next 25 works.",
     ),
 
     # 9) Regen bonus (bp) but longer and stronger than phone_charger concept (distinct name/use)
@@ -286,6 +299,7 @@ ITEMS: dict[str, ItemDef] = {
             duration_seconds=2 * 60 * 60,
             stacking=EffectStacking.REPLACE,
         ),
+        description="Hydrate up: +25% stamina regeneration for 2 hours.",
     ),
 
     # 10) Mythical regen booster (stronger tier)
@@ -303,6 +317,7 @@ ITEMS: dict[str, ItemDef] = {
             duration_seconds=3 * 60 * 60,
             stacking=EffectStacking.REPLACE,
         ),
+        description="Mythic recovery blend granting +50% stamina regeneration for 3 hours.",
     ),
 
     # 11) Instant stamina bigger hit (distinct from energy_drink)
@@ -318,6 +333,7 @@ ITEMS: dict[str, ItemDef] = {
             group_key="energy",
             payload={"stamina_add": 60},
         ),
+        description="A concentrated kick that restores 60 stamina instantly.",
     ),
 
     # 12) Payout bonus but charge-based (not timed) for N works
@@ -335,6 +351,7 @@ ITEMS: dict[str, ItemDef] = {
             charges=15,
             stacking=EffectStacking.REPLACE,
         ),
+        description="Premium rates unlocked: +15% payout on your next 15 works.",
     ),
 
     # 13) Job XP timed booster higher tier than wrist_wraps
@@ -352,6 +369,7 @@ ITEMS: dict[str, ItemDef] = {
             duration_seconds=30 * 60,
             stacking=EffectStacking.REPLACE,
         ),
+        description="Mastercraft upgrade that doubles Job XP gains for 30 minutes.",
     ),
 
     # 14) Energy cap booster weaker tier (exclusive group, non-myth)
@@ -369,6 +387,7 @@ ITEMS: dict[str, ItemDef] = {
             duration_seconds=45 * 60,
             stacking=EffectStacking.REPLACE,
         ),
+        description="Support gear that raises your max stamina by 25 for 45 minutes.",
     ),
 
     # 15) Silver bonus multiplier on next work only (distinct from flat tip_jar)
@@ -386,6 +405,7 @@ ITEMS: dict[str, ItemDef] = {
             charges=1,
             stacking=EffectStacking.ADD,
         ),
+        description="Cashback special: your next /work payout is boosted by 20%.",
     ),
     "golden_contract": ItemDef(
         key="golden_contract",
@@ -401,6 +421,7 @@ ITEMS: dict[str, ItemDef] = {
             duration_seconds=45 * 60,
             stacking=EffectStacking.REFRESH,
         ),
+        description="Build momentum for 45 minutes with a stacking combo payout bonus.",
     ),
     "chaos_dice": ItemDef(
         key="chaos_dice",
