@@ -415,7 +415,7 @@ def _rarity_emoji(r: str) -> str:
     if r == ItemRarity.LEGENDARY.value:
         return "🟠"
     if r == ItemRarity.MYTHICAL.value:
-        return "🌌"
+        return "🔴"
     return "⚪"
 
 
@@ -431,7 +431,7 @@ def _rarity_label(r: str) -> str:
     if r == ItemRarity.LEGENDARY.value:
         return "Legendary"
     if r == ItemRarity.MYTHICAL.value:
-        return "Mythical"
+        return "Mythic"
     return r
 
 
@@ -483,6 +483,51 @@ def _effect_summary(item: ItemDef) -> str:
         stacks = int(payload.get("combo_max_stacks", 0))
         return f"+{step:.2f}% per combo stack ({stacks} max)"
     return "Special effect"
+
+
+def _stock_line(left: int) -> str:
+    if left <= 1:
+        return "🔥 1 left"
+    if left <= 2:
+        return f"⚠️ {fmt_int(left)} left"
+    return f"📦 {fmt_int(left)} left"
+
+
+def _compact_effect(off: ShopOffer) -> str:
+    item = ITEMS.get(off.item_key)
+    if item is None:
+        return "Special effect"
+    summary = _effect_summary(item)
+    duration_minutes = int(item.effect.duration_seconds // 60) if item.effect.duration_seconds else 0
+    if duration_minutes > 0:
+        return f"{summary} for {duration_minutes}m"
+    return summary
+
+
+def _featured_offer(offers: List[ShopOffer]) -> ShopOffer | None:
+    if not offers:
+        return None
+
+    rarity_rank = {
+        ItemRarity.COMMON.value: 0,
+        ItemRarity.UNCOMMON.value: 1,
+        ItemRarity.RARE.value: 2,
+        ItemRarity.EPIC.value: 3,
+        ItemRarity.LEGENDARY.value: 4,
+        ItemRarity.MYTHICAL.value: 5,
+    }
+    return max(offers, key=lambda o: (rarity_rank.get(o.rarity, -1), int(o.price)))
+
+
+def _slot_emoji(slot: int) -> str:
+    mapping = {
+        1: "1️⃣",
+        2: "2️⃣",
+        3: "3️⃣",
+        4: "4️⃣",
+        5: "5️⃣",
+    }
+    return mapping.get(int(slot), f"{int(slot)}.")
 
 
 def _list_embed(*, rarity: str, items: List[ItemDef], page: int, total_pages: int) -> discord.Embed:
@@ -545,17 +590,53 @@ def build_shop_embed(
     rerolls_used: int,
     wallet_silver: int,
     purchased_map: Dict[str, int],
+    last_purchase_line: str | None = None,
 ) -> discord.Embed:
     reset_in = _pretty_reset_countdown(_utc_now())
     sunday = is_sunday_shop(_utc_now())
     color = _rarity_color(offers)
 
-    event_line = "🔥 **Epic Store Sunday Active**\n" if sunday else ""
+    vip_line = "👑 VIP: Mythical boost active" if vip else None
+    rotation_line = f"Daily Rotation #{day_id}" if day_id > 0 else None
+    event_line = "🔥 Epic Store Sunday active" if sunday else None
+    status_line = f"✅ Last purchase: {last_purchase_line}" if last_purchase_line else None
+
+    header_lines = [
+        "Daily power-ups for your grind.",
+        "",
+        f"💰 Balance: {fmt_int(wallet_silver)} Silver",
+        f"⏳ Reset: {reset_in}",
+    ]
+    if vip_line:
+        header_lines.append(vip_line)
+    if event_line:
+        header_lines.append(event_line)
+    if status_line:
+        header_lines.append(status_line)
+    if rotation_line:
+        header_lines.append(rotation_line)
+
     embed = discord.Embed(
         title=f"🛍️ {SHOP_TITLE}",
-        description=f"_{SHOP_TAGLINE}_\n\n{event_line}💰 **{fmt_int(wallet_silver)}** Silver • ⏳ Resets in **{reset_in}**",
+        description="\n".join(header_lines),
         color=color,
     )
+
+    featured = _featured_offer(offers)
+    if featured is not None:
+        featured_bought = int(purchased_map.get(featured.item_key, 0))
+        featured_limit = max(int(featured.daily_limit), 1)
+        featured_left = max(featured_limit - featured_bought, 0)
+        featured_stock = "Sold out" if featured_left <= 0 else _stock_line(featured_left)
+        embed.add_field(
+            name="⭐ Featured Today",
+            value=(
+                f"{_rarity_emoji(featured.rarity)} {featured.name} • {_rarity_label(featured.rarity)}\n"
+                f"{_compact_effect(featured)}\n"
+                f"💰 {fmt_int(featured.price)} • {featured_stock}"
+            ),
+            inline=False,
+        )
 
     for i, off in enumerate(offers, start=1):
         emoji = _rarity_emoji(off.rarity)
@@ -565,31 +646,18 @@ def build_shop_embed(
         limit = max(int(off.daily_limit), 1)
         left = max(limit - bought, 0)
 
-        if left <= 0:
-            price_line = "✅ **Sold out for you today**"
-        else:
-            price_line = f"💸 Price: **{fmt_int(off.price)}** • Stock: **{fmt_int(left)}**"
-
-        slot_prefix = "⭐ Anchor Slot · " if i == SHOP_ANCHOR_SLOT else ""
+        stock_line = "✅ Sold out for you today" if left <= 0 else _stock_line(left)
+        anchor_prefix = "⭐ " if i == SHOP_ANCHOR_SLOT else ""
         embed.add_field(
-            name=f"{i}. {slot_prefix}{emoji} {off.name}  ·  {rarity}",
-            value=f"{off.description}\n{price_line}",
+            name=f"{_slot_emoji(i)} {anchor_prefix}{off.name} • {emoji} {rarity}",
+            value=(
+                f"{_compact_effect(off)}\n"
+                f"💰 {fmt_int(off.price)} • {stock_line}\n"
+                f"🛒 Buy with button {i}"
+            ),
             inline=False,
         )
-
-    vip_line = "🔒 VIP Reroll: **Locked**"
-    if vip:
-        vip_line = f"👑 VIP Reroll: **{rerolls_used}/1 used** • VIP mythical weight boost active"
-    else:
-        vip_line += " • Anchor guarantee always active"
-
-    embed.add_field(
-        name="Perks",
-        value=f"{vip_line}\n🧾 Limits are per-item per shop day.",
-        inline=False,
-    )
-
-    embed.set_footer(text=f"Shop Day: {day_id} • Use the buttons below. No chat spam.")
+    embed.set_footer(text=f"Reroll {rerolls_used}/1 used • Daily limits apply • Use numbered buttons below")
     avatar_url = getattr(getattr(user, "display_avatar", None), "url", None)
     if avatar_url:
         embed.set_author(name=str(user), icon_url=avatar_url)
@@ -947,7 +1015,7 @@ class ShopCog(commands.Cog):
 
         return offers, wallet, purchased_map, rerolls_used, day_id
 
-    async def _send_shop_panel(self, interaction: discord.Interaction) -> None:
+    async def _send_shop_panel(self, interaction: discord.Interaction, *, last_purchase_line: str | None = None) -> None:
         if interaction.guild is None:
             return
 
@@ -973,6 +1041,7 @@ class ShopCog(commands.Cog):
                     rerolls_used=rerolls_used,
                     wallet_silver=int(wallet.silver),
                     purchased_map=purchased_map,
+                    last_purchase_line=last_purchase_line,
                 )
 
         view = ShopView(cog=self, guild_id=guild_id, user_id=user_id, day_id=day_id)
@@ -1028,7 +1097,8 @@ class ShopCog(commands.Cog):
         user_id = interaction.user.id
         vip = is_vip_member(interaction.user)  # type: ignore[arg-type]
 
-        bought_name = None
+        bought_name: str | None = None
+        bought_price = 0
 
         async with self.sessionmaker() as session:
             async with session.begin():
@@ -1092,8 +1162,12 @@ class ShopCog(commands.Cog):
                 )
 
                 bought_name = off.name
+                bought_price = price
 
         await interaction.followup.send(f"✅ Added **{bought_name or 'item'}** to your inventory.", ephemeral=True)
+        if bought_name:
+            await self._send_shop_panel(interaction, last_purchase_line=f"{bought_name} (-{fmt_int(bought_price)} Silver)")
+            return
         await self._send_shop_panel(interaction)
 
     @shop.command(name="open", description="Open your daily shop offers (buttons).")
