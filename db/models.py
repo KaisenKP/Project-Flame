@@ -767,6 +767,28 @@ class ShopPurchaseRow(Base):
     )
 
 
+class SundayAnnouncementStateRow(Base):
+    __tablename__ = "sunday_announcement_state"
+    __table_args__ = (
+        UniqueConstraint("guild_id", name="uq_sunday_announcement_state_guild"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    last_event_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    launch_sent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    midday_sent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    final_sent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    updated_at: Mapped[datetime] = mapped_column(
+        TS,
+        server_default=NOW,
+        onupdate=NOW,
+        nullable=False,
+    )
+
+
 # =============================================================================
 # Lootboxes + Crowns
 # =============================================================================

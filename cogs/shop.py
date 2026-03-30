@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+import os
 import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -9,10 +11,10 @@ from typing import Dict, List, Optional, Tuple
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from sqlalchemy import func, select
 
-from db.models import ItemInventoryRow, ShopPurchaseRow, WalletRow
+from db.models import ItemInventoryRow, ShopPurchaseRow, SundayAnnouncementStateRow, WalletRow
 from services.db import sessions
 from services.users import ensure_user_rows
 from services.vip import is_vip_member
@@ -25,12 +27,47 @@ from services.jobs_core import clamp_int, fmt_int
 # ============================================================
 
 SHOP_SLOTS = 5
-SHOP_COMMON_SLOTS = 3
-SHOP_UNCOMMON_SLOTS = 1
-SHOP_RARE_SLOT = 1
+SHOP_PRIMARY_SLOTS = 4
+SHOP_ANCHOR_SLOT = 5
 
-MYTHICAL_UPGRADE_BASE = 0.02
-MYTHICAL_UPGRADE_VIP = 0.03
+SHOP_RARITY_TABLES: Dict[str, Dict[str, int]] = {
+    "normal": {
+        ItemRarity.COMMON.value: 52,
+        ItemRarity.UNCOMMON.value: 30,
+        ItemRarity.RARE.value: 14,
+        ItemRarity.EPIC.value: 3,
+        ItemRarity.LEGENDARY.value: 1,
+        ItemRarity.MYTHICAL.value: 0,
+    },
+    "sunday": {
+        ItemRarity.RARE.value: 52,
+        ItemRarity.EPIC.value: 30,
+        ItemRarity.LEGENDARY.value: 14,
+        ItemRarity.MYTHICAL.value: 4,
+    },
+}
+
+ANCHOR_RARITY_TABLES: Dict[str, Dict[str, int]] = {
+    "normal": {
+        ItemRarity.EPIC.value: 65,
+        ItemRarity.LEGENDARY.value: 27,
+        ItemRarity.MYTHICAL.value: 8,
+    },
+    "sunday": {
+        ItemRarity.EPIC.value: 42,
+        ItemRarity.LEGENDARY.value: 40,
+        ItemRarity.MYTHICAL.value: 18,
+    },
+}
+
+SHOP_SUNDAY_ANNOUNCE_CHANNEL_ID = int((os.getenv("SHOP_SUNDAY_ANNOUNCE_CHANNEL_ID") or "0").strip() or "0")
+SUNDAY_ANNOUNCE_INTERVAL_SECONDS = 60
+SUNDAY_MIDDAY_OFFSET_HOURS = 12
+SUNDAY_FINAL_WINDOW_MINUTES_BEFORE_RESET = 120
+VIP_MYTHICAL_WEIGHT_BONUS = {
+    "normal": 1,
+    "sunday": 1,
+}
 
 # VIP reroll bookkeeping uses ShopPurchaseRow with a marker key
 _REROLL_MARKER_ITEM_KEY = "__vip_shop_reroll__"
@@ -46,6 +83,7 @@ LIST_ITEMS_PER_PAGE = 5
 SHOP_TITLE = "Moist Mart"
 SHOP_TAGLINE = "Temporary boosts. Permanent flex."
 SHOP_ICON_URL = None  # set later if you want
+LOG = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -78,6 +116,15 @@ def _shop_day_id(now: Optional[datetime] = None) -> int:
 
 def _shop_expires_at(now: Optional[datetime] = None) -> datetime:
     return _shop_day_anchor_utc(now) + timedelta(days=1)
+
+
+def _anchor_local_weekday(anchor_utc: datetime) -> int:
+    local_offset_hours = 4 if anchor_utc.hour == 2 else 5
+    return (anchor_utc - timedelta(hours=local_offset_hours)).weekday()
+
+
+def is_sunday_shop(now: Optional[datetime] = None) -> bool:
+    return _anchor_local_weekday(_shop_day_anchor_utc(now)) == 6
 
 
 def _pretty_reset_countdown(now: Optional[datetime] = None) -> str:
@@ -119,6 +166,42 @@ def _rarity_pools() -> Dict[str, List[ItemDef]]:
     for k in list(pools.keys()):
         pools[k].sort(key=lambda x: x.key)
     return pools
+
+
+def _weighted_roll(*, rng: random.Random, rarity_table: Dict[str, int]) -> str:
+    valid: list[tuple[str, int]] = [(rarity, int(weight)) for rarity, weight in rarity_table.items() if int(weight) > 0]
+    if not valid:
+        raise RuntimeError("Rarity table must include at least one positive weight")
+    total = sum(weight for _, weight in valid)
+    roll = rng.randint(1, total)
+    cur = 0
+    for rarity, weight in valid:
+        cur += weight
+        if roll <= cur:
+            return rarity
+    return valid[-1][0]
+
+
+def roll_shop_slot(*, rng: random.Random, rarity_table: Dict[str, int]) -> str:
+    return _weighted_roll(rng=rng, rarity_table=rarity_table)
+
+
+def roll_anchor_slot(*, rng: random.Random, anchor_table: Dict[str, int]) -> str:
+    rarity = _weighted_roll(rng=rng, rarity_table=anchor_table)
+    if rarity not in {ItemRarity.EPIC.value, ItemRarity.LEGENDARY.value, ItemRarity.MYTHICAL.value}:
+        raise RuntimeError(f"Anchor rarity table generated invalid rarity: {rarity}")
+    return rarity
+
+
+def get_current_rarity_tables(now: Optional[datetime] = None) -> Tuple[Dict[str, int], Dict[str, int], bool]:
+    sunday = is_sunday_shop(now)
+    key = "sunday" if sunday else "normal"
+    return SHOP_RARITY_TABLES[key], ANCHOR_RARITY_TABLES[key], sunday
+
+
+def _is_sunday_day_id(day_id: int) -> bool:
+    anchor_utc = datetime.fromtimestamp(day_id * 86400, tz=timezone.utc)
+    return _anchor_local_weekday(anchor_utc) == 6
 
 
 # ============================================================
@@ -186,26 +269,21 @@ def compute_daily_shop_offers(
 ) -> List[ShopOffer]:
     pools = _rarity_pools()
     rng = _rng_for(guild_id, user_id, day_id, reroll_index, salt=salt)
+    table_key = "sunday" if _is_sunday_day_id(day_id) else "normal"
+    shop_rarity_table = dict(SHOP_RARITY_TABLES[table_key])
+    anchor_rarity_table = dict(ANCHOR_RARITY_TABLES[table_key])
+    if vip:
+        mythic_bonus = int(VIP_MYTHICAL_WEIGHT_BONUS[table_key])
+        shop_rarity_table[ItemRarity.MYTHICAL.value] = int(shop_rarity_table.get(ItemRarity.MYTHICAL.value, 0)) + mythic_bonus
+        anchor_rarity_table[ItemRarity.MYTHICAL.value] = int(anchor_rarity_table.get(ItemRarity.MYTHICAL.value, 0)) + mythic_bonus
 
-    commons = pools[ItemRarity.COMMON.value]
-    uncommons = pools[ItemRarity.UNCOMMON.value]
-    rares = pools[ItemRarity.RARE.value]
-    epics = pools[ItemRarity.EPIC.value]
-    legendaries = pools[ItemRarity.LEGENDARY.value]
-    mythicals = pools[ItemRarity.MYTHICAL.value]
-
-    if len(commons) < SHOP_COMMON_SLOTS:
-        raise RuntimeError("Not enough common items in catalog for shop")
-    if len(uncommons) < SHOP_UNCOMMON_SLOTS:
-        raise RuntimeError("Not enough uncommon items in catalog for shop")
-    if len(rares) < SHOP_RARE_SLOT:
-        raise RuntimeError("Not enough rare items in catalog for shop")
-    if not mythicals:
-        raise RuntimeError("No mythical items in catalog for shop")
-    if not epics:
-        epics = rares
-    if not legendaries:
-        legendaries = epics
+    for rarity in set(shop_rarity_table) | set(anchor_rarity_table):
+        if rarity not in pools:
+            raise RuntimeError(f"Unknown rarity in table: {rarity}")
+        if int(shop_rarity_table.get(rarity, 0)) > 0 and not pools[rarity]:
+            raise RuntimeError(f"No {rarity} items in catalog for shop")
+        if int(anchor_rarity_table.get(rarity, 0)) > 0 and not pools[rarity]:
+            raise RuntimeError(f"No {rarity} items in catalog for anchor")
 
     chosen: set[str] = set()
 
@@ -222,23 +300,12 @@ def compute_daily_shop_offers(
         return pool[0]
 
     offers: List[ShopOffer] = []
-    for _ in range(SHOP_COMMON_SLOTS):
-        offers.append(_offer_from_item(_pick_unique(commons)))
+    for _ in range(SHOP_PRIMARY_SLOTS):
+        rarity = roll_shop_slot(rng=rng, rarity_table=shop_rarity_table)
+        offers.append(_offer_from_item(_pick_unique(pools[rarity])))
 
-    for _ in range(SHOP_UNCOMMON_SLOTS):
-        offers.append(_offer_from_item(_pick_unique(uncommons)))
-
-    rare_it = _pick_unique(rares)
-    upgrade = MYTHICAL_UPGRADE_VIP if vip else MYTHICAL_UPGRADE_BASE
-    roll = rng.random()
-    if roll < float(upgrade):
-        rare_it = _pick_unique(mythicals)
-    elif roll < 0.08:
-        rare_it = _pick_unique(legendaries)
-    elif roll < 0.22:
-        rare_it = _pick_unique(epics)
-
-    offers.append(_offer_from_item(rare_it))
+    anchor_rarity = roll_anchor_slot(rng=rng, anchor_table=anchor_rarity_table)
+    offers.append(_offer_from_item(_pick_unique(pools[anchor_rarity])))
     return offers
 
 
@@ -469,7 +536,7 @@ def _rarity_color(offers: List[ShopOffer]) -> discord.Color:
     return discord.Color.gold()
 
 
-def _shop_embed(
+def build_shop_embed(
     *,
     user: discord.abc.User,
     offers: List[ShopOffer],
@@ -480,11 +547,13 @@ def _shop_embed(
     purchased_map: Dict[str, int],
 ) -> discord.Embed:
     reset_in = _pretty_reset_countdown(_utc_now())
+    sunday = is_sunday_shop(_utc_now())
     color = _rarity_color(offers)
 
+    event_line = "🔥 **Epic Store Sunday Active**\n" if sunday else ""
     embed = discord.Embed(
         title=f"🛍️ {SHOP_TITLE}",
-        description=f"_{SHOP_TAGLINE}_\n\n💰 **{fmt_int(wallet_silver)}** Silver • ⏳ Resets in **{reset_in}**",
+        description=f"_{SHOP_TAGLINE}_\n\n{event_line}💰 **{fmt_int(wallet_silver)}** Silver • ⏳ Resets in **{reset_in}**",
         color=color,
     )
 
@@ -501,18 +570,18 @@ def _shop_embed(
         else:
             price_line = f"💸 Price: **{fmt_int(off.price)}** • Stock: **{fmt_int(left)}**"
 
+        slot_prefix = "⭐ Anchor Slot · " if i == SHOP_ANCHOR_SLOT else ""
         embed.add_field(
-            name=f"{i}. {emoji} {off.name}  ·  {rarity}",
+            name=f"{i}. {slot_prefix}{emoji} {off.name}  ·  {rarity}",
             value=f"{off.description}\n{price_line}",
             inline=False,
         )
 
     vip_line = "🔒 VIP Reroll: **Locked**"
     if vip:
-        vip_line = f"👑 VIP Reroll: **{rerolls_used}/1 used**"
-        vip_line += f" • Mythical upgrade: **{int(MYTHICAL_UPGRADE_VIP * 100)}%**"
+        vip_line = f"👑 VIP Reroll: **{rerolls_used}/1 used** • VIP mythical weight boost active"
     else:
-        vip_line += f" • Mythical upgrade: **{int(MYTHICAL_UPGRADE_BASE * 100)}%**"
+        vip_line += " • Anchor guarantee always active"
 
     embed.add_field(
         name="Perks",
@@ -716,6 +785,131 @@ class ShopCog(commands.Cog):
         self.sessionmaker = sessions()
 
         self._salt = "moist_arcade_shop_salt_v1"
+        self._announcement_channel_id = SHOP_SUNDAY_ANNOUNCE_CHANNEL_ID
+        self.sunday_announcement_loop.start()
+
+    def cog_unload(self) -> None:
+        self.sunday_announcement_loop.cancel()
+
+    async def _get_or_create_sunday_state(self, session, *, guild_id: int) -> SundayAnnouncementStateRow:
+        row = await session.scalar(select(SundayAnnouncementStateRow).where(SundayAnnouncementStateRow.guild_id == guild_id))
+        if row is None:
+            row = SundayAnnouncementStateRow(guild_id=guild_id, launch_sent=False, midday_sent=False, final_sent=False)
+            session.add(row)
+            await session.flush()
+        return row
+
+    async def _resolve_announcement_channel(self) -> discord.abc.Messageable | None:
+        channel_id = int(self._announcement_channel_id)
+        if channel_id <= 0:
+            return None
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except Exception:
+                LOG.exception("Failed to fetch Sunday shop announcement channel", extra={"channel_id": channel_id})
+                return None
+        if not isinstance(channel, discord.abc.Messageable):
+            return None
+        return channel
+
+    async def _send_sunday_announcement(self, *, phase: str) -> bool:
+        channel = await self._resolve_announcement_channel()
+        if channel is None:
+            return False
+
+        if phase == "launch":
+            embed = discord.Embed(
+                title="🛍️ Epic Store Sunday is LIVE",
+                description="The daily shop just refreshed with elevated rarity odds and a premium Anchor Slot.",
+                color=discord.Color.purple(),
+            )
+        elif phase == "midday":
+            embed = discord.Embed(
+                title="⏰ Epic Store Sunday Midday Check-In",
+                description="Midday reminder: today’s shop is still boosted. Grab your picks before the next reset.",
+                color=discord.Color.blurple(),
+            )
+        elif phase == "final":
+            embed = discord.Embed(
+                title="⚠️ Epic Store Sunday Final Warning",
+                description="Final window before reset. Sunday boosted odds end at the next daily shop refresh.",
+                color=discord.Color.orange(),
+            )
+        else:
+            return False
+
+        await channel.send(embed=embed)
+        return True
+
+    async def handle_sunday_announcements(self) -> None:
+        if self._announcement_channel_id <= 0:
+            return
+        now = _utc_now()
+        if not is_sunday_shop(now):
+            return
+
+        reset_time = _shop_day_anchor_utc(now)
+        expires_at = _shop_expires_at(now)
+        midday_time = reset_time + timedelta(hours=SUNDAY_MIDDAY_OFFSET_HOURS)
+        final_time = expires_at - timedelta(minutes=SUNDAY_FINAL_WINDOW_MINUTES_BEFORE_RESET)
+        event_date = reset_time.date()
+
+        phase: str | None = None
+        if reset_time <= now < midday_time:
+            phase = "launch"
+        elif midday_time <= now < final_time:
+            phase = "midday"
+        elif final_time <= now < expires_at:
+            phase = "final"
+
+        if phase is None:
+            return
+
+        channel = await self._resolve_announcement_channel()
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            return
+
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                state = await self._get_or_create_sunday_state(session, guild_id=guild.id)
+                if state.last_event_date != event_date:
+                    state.last_event_date = event_date
+                    state.launch_sent = False
+                    state.midday_sent = False
+                    state.final_sent = False
+
+                already_sent = {
+                    "launch": bool(state.launch_sent),
+                    "midday": bool(state.midday_sent),
+                    "final": bool(state.final_sent),
+                }[phase]
+                if already_sent:
+                    return
+
+                sent = await self._send_sunday_announcement(phase=phase)
+                if not sent:
+                    return
+
+                if phase == "launch":
+                    state.launch_sent = True
+                elif phase == "midday":
+                    state.midday_sent = True
+                elif phase == "final":
+                    state.final_sent = True
+
+    @tasks.loop(seconds=SUNDAY_ANNOUNCE_INTERVAL_SECONDS)
+    async def sunday_announcement_loop(self) -> None:
+        try:
+            await self.handle_sunday_announcements()
+        except Exception:
+            LOG.exception("Sunday announcement loop tick failed")
+
+    @sunday_announcement_loop.before_loop
+    async def before_sunday_announcement_loop(self) -> None:
+        await self.bot.wait_until_ready()
 
     async def _build_state(
         self,
@@ -771,7 +965,7 @@ class ShopCog(commands.Cog):
                     vip=vip,
                 )
 
-                embed = _shop_embed(
+                embed = build_shop_embed(
                     user=interaction.user,
                     offers=offers,
                     day_id=day_id,
