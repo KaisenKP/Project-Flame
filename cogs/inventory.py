@@ -463,8 +463,11 @@ class InventoryView(discord.ui.View):
     def set_select(self, options: List[discord.SelectOption]) -> None:
         if self.select:
             self.remove_item(self.select)
-        self.select = InventorySelect(options=options)
-        self.add_item(self.select)
+            self.select = None
+
+        if options:
+            self.select = InventorySelect(options=options)
+            self.add_item(self.select)
 
         if self.btn_use not in self.children:
             self.add_item(self.btn_use)
@@ -642,6 +645,7 @@ class InventoryCog(commands.Cog):
         view.set_select(opts)
 
         view.btn_use.disabled = (selected_key is None) or (int(inv_owner.id) != int(viewer.id))
+        view.btn_effects.disabled = bool(not inv_rows and not include_effects)
 
         embed = _inv_embed(
             owner=inv_owner,
