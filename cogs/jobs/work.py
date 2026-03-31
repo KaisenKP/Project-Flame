@@ -369,75 +369,94 @@ class _WorkEffectsAdapter:
         return self.effects
 
 
+@dataclass(frozen=True)
+class _WorkResultPayload:
+    action_text: str
+    failed: bool
+    payout: int
+    base_pay: int
+    item_bonus: int
+    tool_bonus: int
+    proc_bonus: int
+    event_bonus: int
+    other_bonus: int
+    stamina_base_cost: int
+    stamina_after_discount: int
+    stamina_flat_delta: int
+    stamina_final_cost: int
+    tool_stamina_saved: bool
+    tool_stamina_save_chance_bp: int
+    user_xp: int
+    user_xp_base: int
+    user_xp_bonus: int
+    job_xp: int
+    job_xp_base: int
+    job_xp_bonus: int
+    job_title: str
+    job_level: int
+    job_prestige: int
+    job_xp_into: int
+    job_xp_need: int
+    did_double: bool
+    upgrade_level: int
+    upgrade_bonus_pct: int
+    work_image_url: Optional[str]
+    leveled_up: bool
+    prestiged: bool
+    next_job_name: Optional[str]
+    weekend_bonus_active: bool
+    drop_result: Optional[WorkDropResult]
+
+
 def _build_work_embed(
     *,
     user: discord.abc.User,
     d: JobDef,
-    action_text: str,
-    failed: bool,
-    payout: int,
-    stamina_cost: int,
-    user_xp: int,
-    job_xp: int,
-    job_title: str,
-    job_level: int,
-    job_prestige: int,
-    job_xp_into: int,
-    job_xp_need: int,
+    payload: _WorkResultPayload,
     effects: JobEffects,
     item_mods: _ItemMods,
-    tool_stamina_saved: bool,
-    tool_stamina_save_chance_bp: int,
-    did_double: bool,
-    upgrade_level: int,
-    upgrade_bonus_pct: int,
-    work_image_url: Optional[str],
-    leveled_up: bool,
-    prestiged: bool,
-    next_job_name: Optional[str],
-    weekend_bonus_active: bool,
-    drop_result: Optional[WorkDropResult] = None,
+    expanded: bool = False,
 ) -> discord.Embed:
     color = _work_color(d.category)
 
-    outcome_emoji = "❌" if failed else "✅"
-    outcome_word = "FAILED" if failed else "SUCCESS"
+    outcome_emoji = "❌" if payload.failed else "✅"
+    outcome_word = "FAILED" if payload.failed else "SUCCESS"
 
-    stamina_line = f"• ⚡ **-{fmt_int(stamina_cost)}** Stamina"
-    if tool_stamina_saved:
+    stamina_line = f"• ⚡ **-{fmt_int(payload.stamina_final_cost)}** Stamina"
+    if payload.tool_stamina_saved:
         stamina_line = "• ⚡ **0 Stamina** (tool save proc)"
     header_line = (
         f"{outcome_emoji} **{outcome_word}**  "
-        f"• 💰 **{fmt_int(payout)}** Silver  "
+        f"• 💰 **{fmt_int(payload.payout)}** Silver  "
         f"{stamina_line}"
     )
 
-    if did_double:
+    if payload.did_double:
         header_line += "  • 🪙 **2x payout!**"
 
-    prog_bar = bar(job_xp_into, job_xp_need)
-    prog_pct = _pct(job_xp_into, job_xp_need)
+    prog_bar = bar(payload.job_xp_into, payload.job_xp_need)
+    prog_pct = _pct(payload.job_xp_into, payload.job_xp_need)
 
     prog_block = (
-        f"**P{fmt_int(job_prestige)}** • **{job_title}**\n"
-        f"Level **{fmt_int(job_level)}**  "
+        f"**P{fmt_int(payload.job_prestige)}** • **{payload.job_title}**\n"
+        f"Level **{fmt_int(payload.job_level)}**  "
         f"[{prog_bar}]  **{prog_pct}%**"
     )
 
     gain_lines = [
-        f"🧠 User XP: **+{fmt_int(user_xp)}**",
-        f"🧰 Job XP: **+{fmt_int(job_xp)}**",
-        f"⚙️ Upgrade: **Lv {fmt_int(upgrade_level)}** (**+{fmt_int(upgrade_bonus_pct)}% income**)"
+        f"🧠 User XP: **+{fmt_int(payload.user_xp)}**",
+        f"🧰 Job XP: **+{fmt_int(payload.job_xp)}**",
+        f"⚙️ Upgrade: **Lv {fmt_int(payload.upgrade_level)}** (**+{fmt_int(payload.upgrade_bonus_pct)}% income**)"
     ]
-    if weekend_bonus_active:
+    if payload.weekend_bonus_active:
         gain_lines.append("🔥 Weekend Bonus: **2x XP Active**")
     gain_block = "\n".join(gain_lines)
 
     notes: list[str] = []
-    if prestiged:
+    if payload.prestiged:
         notes.append("✨ Prestiged, new title unlocked")
-        notes.append(f"💸 Prestige Cost: **{fmt_int(prestige_cost(job_prestige - 1))} Silver**")
-    elif leveled_up:
+        notes.append(f"💸 Prestige Cost: **{fmt_int(prestige_cost(payload.job_prestige - 1))} Silver**")
+    elif payload.leveled_up:
         notes.append("⬆️ Leveled up")
 
     eff_lines: list[str] = []
@@ -456,8 +475,8 @@ def _build_work_embed(
 
     if int(item_mods.stamina_cost_flat_delta) != 0:
         eff_lines.append(f"⚡ Stamina cost: **{item_mods.stamina_cost_flat_delta:+d}** (flat)")
-    if int(tool_stamina_save_chance_bp) > 0:
-        eff_lines.append(f"🧰 Tool stamina save: **{tool_stamina_save_chance_bp / 100:.2f}%** chance")
+    if int(payload.tool_stamina_save_chance_bp) > 0:
+        eff_lines.append(f"🧰 Tool stamina save: **{payload.tool_stamina_save_chance_bp / 100:.2f}%** chance")
     if int(item_mods.double_payout_chance_bp) != 0:
         eff_lines.append(f"🪙 2x payout chance: **{item_mods.double_payout_chance_bp / 100:.2f}%**")
     if int(item_mods.protection_bp) != 0:
@@ -469,7 +488,7 @@ def _build_work_embed(
 
     embed = discord.Embed(
         title=f"{d.name} Work Result",
-        description=f"{action_text}\n\n{header_line}",
+        description=f"{payload.action_text}\n\n{header_line}",
         color=color,
     )
 
@@ -481,24 +500,58 @@ def _build_work_embed(
     if notes:
         embed.add_field(name="Milestone", value="\n".join(notes), inline=True)
 
-    if drop_result is not None and (drop_result.lootbox_rarity or drop_result.item_key):
-        rarity = (drop_result.lootbox_rarity or "").lower()
+    if payload.drop_result is not None and (payload.drop_result.lootbox_rarity or payload.drop_result.item_key):
+        rarity = (payload.drop_result.lootbox_rarity or "").lower()
         drop_lines: list[str] = []
         if rarity:
             flair = "🌌 JACKPOT!" if rarity == "mythical" else "🎁 Drop!"
             drop_lines.append(f"{flair} Lootbox: **{rarity.upper()}**")
-        if drop_result.item_key:
-            drop_lines.append(f"🧩 Item: **{drop_result.item_key}**")
+        if payload.drop_result.item_key:
+            drop_lines.append(f"🧩 Item: **{payload.drop_result.item_key}**")
+        if expanded:
+            drop_lines.append("Source: Work drop roll succeeded after progression/tier/proc modifiers.")
         embed.add_field(name="Drops", value="\n".join(drop_lines), inline=False)
 
     if eff_lines:
         embed.add_field(name="Bonuses Active", value="\n".join(eff_lines), inline=False)
 
-    if work_image_url:
-        embed.set_image(url=work_image_url)
+    if expanded:
+        income_lines: list[str] = [f"• Base Pay: **{fmt_int(payload.base_pay)}**"]
+        if payload.item_bonus:
+            income_lines.append(f"• Item Bonus: **+{fmt_int(payload.item_bonus)}**")
+        if payload.tool_bonus:
+            income_lines.append(f"• Tool Bonus: **+{fmt_int(payload.tool_bonus)}**")
+        if payload.proc_bonus:
+            income_lines.append(f"• Proc Bonus: **+{fmt_int(payload.proc_bonus)}**")
+        if payload.event_bonus:
+            income_lines.append(f"• Event Bonus: **+{fmt_int(payload.event_bonus)}**")
+        if payload.other_bonus:
+            income_lines.append(f"• Other Bonus: **+{fmt_int(payload.other_bonus)}**")
+        income_lines.append(f"• Final Payout: **{fmt_int(payload.payout)}**")
+        embed.add_field(name="Income Breakdown", value="\n".join(income_lines), inline=False)
 
-    if next_job_name:
-        embed.set_footer(text=f"Next shift: {next_job_name} • Use /job to edit your 3 job slots")
+        xp_lines = [
+            f"• User XP: **{fmt_int(payload.user_xp_base)}** base + **{fmt_int(payload.user_xp_bonus)}** bonus = **{fmt_int(payload.user_xp)}**",
+            f"• Job XP: **{fmt_int(payload.job_xp_base)}** base + **{fmt_int(payload.job_xp_bonus)}** bonus = **{fmt_int(payload.job_xp)}**",
+        ]
+        embed.add_field(name="XP Breakdown", value="\n".join(xp_lines), inline=False)
+
+        stamina_lines = [
+            f"• Base Cost: **{fmt_int(payload.stamina_base_cost)}**",
+            f"• Discounted Cost: **{fmt_int(payload.stamina_after_discount)}**",
+        ]
+        if payload.stamina_flat_delta:
+            stamina_lines.append(f"• Flat Delta: **{payload.stamina_flat_delta:+d}**")
+        if payload.tool_stamina_saved:
+            stamina_lines.append("• Tool Save Proc: **-1 full spend**")
+        stamina_lines.append(f"• Final Cost: **{fmt_int(payload.stamina_final_cost)}**")
+        embed.add_field(name="Stamina Breakdown", value="\n".join(stamina_lines), inline=False)
+
+    if payload.work_image_url:
+        embed.set_image(url=payload.work_image_url)
+
+    if payload.next_job_name:
+        embed.set_footer(text=f"Next shift: {payload.next_job_name} • Use /job to edit your 3 job slots")
     else:
         embed.set_footer(text="Use /job to edit your 3 job slots")
     return embed
@@ -549,6 +602,9 @@ class WorkCog(commands.Cog):
             lock_acquired = True
 
             embed: Optional[discord.Embed] = None
+            result_payload: Optional[_WorkResultPayload] = None
+            result_effects: Optional[JobEffects] = None
+            result_item_mods: Optional[_ItemMods] = None
             key: Optional[str] = None
             used_cooldown_seconds: Optional[float] = None
             next_job_name: Optional[str] = None
@@ -715,11 +771,21 @@ class WorkCog(commands.Cog):
                     extra_roll = roll_bp(int(getattr(merged_effects, "extra_roll_bp", 0))) if int(getattr(merged_effects, "extra_roll_bp", 0)) > 0 else False
 
                     payout = 0
+                    base_pay = 0
+                    item_bonus_total = 0
+                    tool_bonus_total = 0
+                    proc_bonus_total = 0
+                    event_bonus_total = 0
+                    other_bonus_total = 0
                     action_text = ""
                     did_double = False
                     drop_result = WorkDropResult()
                     upgrade_level = 0
                     upgrade_bonus_pct = 0
+                    base_user_xp = 0
+                    adjusted_user_xp = 0
+                    base_job_xp = 0
+                    adjusted_job_xp = 0
 
                     if failed:
                         action = _pick_weighted(fail_actions)
@@ -734,34 +800,62 @@ class WorkCog(commands.Cog):
                         if hi < lo:
                             lo, hi = hi, lo
 
-                        def _roll_payout_once() -> int:
+                        def _roll_payout_once() -> tuple[int, int, int, int]:
                             raw = random.randint(max(lo, 0), max(hi, 0))
+                            raw_start = raw
 
                             if int(getattr(merged_effects, "rare_find_bp", 0)) > 0 and roll_bp(int(getattr(merged_effects, "rare_find_bp", 0))):
                                 bump = max(int(round(raw * 0.25)), 1)
                                 raw += bump
+                            rare_delta = raw - raw_start
 
                             if d.bonus_chance_bp > 0 and d.bonus_multiplier > 1.0 and roll_bp(d.bonus_chance_bp):
                                 raw = int(round(raw * float(d.bonus_multiplier)))
+                            proc_delta = raw - raw_start - rare_delta
 
-                            raw = payout_for_work(
+                            scaled = payout_for_work(
                                 base_payout=raw,
                                 job_key=key,
                                 job_level=job_level_now,
                                 prestige=job_prestige_now,
                             )
-                            raw = apply_bp(raw, int(merged_effects.payout_bonus_bp))
-                            return max(int(raw), 0)
+                            scale_delta = scaled - raw
+                            final = apply_bp(scaled, int(merged_effects.payout_bonus_bp))
+                            effect_delta = final - scaled
+                            return max(int(final), 0), int(scale_delta), int(effect_delta), int(rare_delta + proc_delta)
 
-                        p1 = _roll_payout_once()
-                        payout = max(p1, _roll_payout_once()) if extra_roll else p1
+                        p1, scale_delta_1, effect_delta_1, proc_delta_1 = _roll_payout_once()
+                        if extra_roll:
+                            p2, scale_delta_2, effect_delta_2, proc_delta_2 = _roll_payout_once()
+                            if p2 > p1:
+                                payout = p2
+                                base_pay = payout - scale_delta_2 - effect_delta_2 - proc_delta_2
+                                tool_bonus_total += effect_delta_2
+                                proc_bonus_total += proc_delta_2
+                            else:
+                                payout = p1
+                                base_pay = payout - scale_delta_1 - effect_delta_1 - proc_delta_1
+                                tool_bonus_total += effect_delta_1
+                                proc_bonus_total += proc_delta_1
+                        else:
+                            payout = p1
+                            base_pay = payout - scale_delta_1 - effect_delta_1 - proc_delta_1
+                            tool_bonus_total += effect_delta_1
+                            proc_bonus_total += proc_delta_1
+                        other_bonus_total += max(0, payout - base_pay - tool_bonus_total - proc_bonus_total)
                         if int(item_mods.greed_payout_bp) > 0:
+                            before = payout
                             payout = apply_bp(payout, int(item_mods.greed_payout_bp))
+                            item_bonus_total += max(0, payout - before)
                         if int(item_mods.burst_chance_bp) > 0 and int(item_mods.burst_payout_bp) > 0 and roll_bp(int(item_mods.burst_chance_bp)):
+                            before = payout
                             payout = apply_bp(payout, int(item_mods.burst_payout_bp))
+                            proc_bonus_total += max(0, payout - before)
                             action_text += "\n💥 **Burst proc!** Jackpot multiplier activated."
                         if int(item_mods.next_work_payout_bp) > 0:
+                            before = payout
                             payout = apply_bp(payout, int(item_mods.next_work_payout_bp))
+                            item_bonus_total += max(0, payout - before)
                             await _consume_charge_from_group(
                                 session,
                                 guild_id=guild_id,
@@ -785,7 +879,9 @@ class WorkCog(commands.Cog):
                             chance_bp = int(event.chance_bp)
                             chance_bp += sum(int(perk.event_weight_bonus_bp) for perk in perk_unlocked)
                             if roll_bp(chance_bp):
+                                before = payout
                                 payout = max((payout * (10_000 + int(event.payout_multiplier_bp))) // 10_000, 0) + int(event.bonus_silver_flat)
+                                event_bonus_total += max(0, payout - before)
                                 stamina_cost = clamp_int(stamina_cost + int(event.stamina_delta), 1, 10)
                                 action_text += f"\n🎲 **{event.name}:** {event.description}"
                                 if event.fail_override is False:
@@ -828,12 +924,17 @@ class WorkCog(commands.Cog):
                         )
                         if int(tool_proc_outcome.xp_burst_bonus) > 0:
                             delta_job_xp += int(tool_proc_outcome.xp_burst_bonus)
+                            proc_bonus_total += 0
                         if int(tool_proc_outcome.critical_silver_bonus) > 0:
+                            before = payout
                             payout += int(tool_proc_outcome.critical_silver_bonus)
+                            tool_bonus_total += max(0, payout - before)
                         if int(tool_proc_outcome.critical_job_xp_bonus) > 0:
                             delta_job_xp += int(tool_proc_outcome.critical_job_xp_bonus)
                         if int(tool_proc_outcome.double_action_payout) > 0:
+                            before = payout
                             payout += int(tool_proc_outcome.double_action_payout)
+                            tool_bonus_total += max(0, payout - before)
                         if int(tool_proc_outcome.double_action_job_xp) > 0:
                             delta_job_xp += int(tool_proc_outcome.double_action_job_xp)
                         proc_messages.extend(tool_proc_outcome.messages)
@@ -843,6 +944,7 @@ class WorkCog(commands.Cog):
                         if (not failed) and (not danger_triggered) and (force_special_pipeline or should_trigger_normal(key)):
                             normal_interaction = pick_normal_interaction(key)
                             if normal_interaction is not None:
+                                before = payout
                                 normal_resolution = resolve_normal_interaction(
                                     interaction=normal_interaction,
                                     payout=payout,
@@ -850,6 +952,7 @@ class WorkCog(commands.Cog):
                                 )
                                 payout = int(normal_resolution.payout)
                                 delta_job_xp = int(normal_resolution.job_xp)
+                                proc_bonus_total += max(0, payout - before)
                                 action_text += (
                                     f"\n✨ **{normal_interaction.title}:** {normal_interaction.description}"
                                     f"\n↳ {normal_resolution.outcome.text}"
@@ -928,7 +1031,9 @@ class WorkCog(commands.Cog):
 
                         if int(item_mods.double_payout_chance_bp) > 0 and roll_bp(int(item_mods.double_payout_chance_bp)):
                             did_double = True
+                            before = payout
                             payout *= 2
+                            item_bonus_total += max(0, payout - before)
                             await _consume_charge_from_group(
                                 session,
                                 guild_id=guild_id,
@@ -947,7 +1052,9 @@ class WorkCog(commands.Cog):
                             _WORK_COMBO_STREAK[combo_key] = combo_now
                             if int(item_mods.combo_payout_step_bp) > 0 and combo_now > 1:
                                 combo_bp = int(item_mods.combo_payout_step_bp) * (combo_now - 1)
+                                before = payout
                                 payout = apply_bp(payout, combo_bp)
+                                item_bonus_total += max(0, payout - before)
                                 action_text += f"\n🔥 **Combo x{combo_now}**: +{combo_bp / 100:.2f}% payout"
 
                         wallet.silver += int(payout)
@@ -1052,24 +1159,37 @@ class WorkCog(commands.Cog):
                     work_image_url = job_row_image_get(job_row)
                     next_job_name = d.name
 
-                    embed = _build_work_embed(
-                        user=interaction.user,
-                        d=d,
+                    user_xp_bonus = int(user_xp_gain) - int(base_user_xp)
+                    job_xp_bonus = int(delta_job_xp) - int(base_job_xp)
+                    final_component_sum = base_pay + item_bonus_total + tool_bonus_total + proc_bonus_total + event_bonus_total + other_bonus_total
+                    other_bonus_total += int(payout) - int(final_component_sum)
+                    result_payload = _WorkResultPayload(
                         action_text=action_text,
                         failed=failed,
-                        payout=payout,
-                        stamina_cost=effective_stamina_cost,
+                        payout=int(payout),
+                        base_pay=max(int(base_pay), 0),
+                        item_bonus=int(item_bonus_total),
+                        tool_bonus=int(tool_bonus_total),
+                        proc_bonus=int(proc_bonus_total),
+                        event_bonus=int(event_bonus_total),
+                        other_bonus=int(other_bonus_total),
+                        stamina_base_cost=int(stamina_cost_base),
+                        stamina_after_discount=int(sub_bp(stamina_cost_base, int(merged_effects.stamina_discount_bp))),
+                        stamina_flat_delta=int(item_mods.stamina_cost_flat_delta),
+                        stamina_final_cost=int(effective_stamina_cost),
+                        tool_stamina_saved=tool_stamina_saved,
+                        tool_stamina_save_chance_bp=int(tool_stamina_save_chance_bp),
                         user_xp=int(user_xp_gain),
-                        job_xp=delta_job_xp,
+                        user_xp_base=int(base_user_xp),
+                        user_xp_bonus=int(user_xp_bonus),
+                        job_xp=int(delta_job_xp),
+                        job_xp_base=int(base_job_xp),
+                        job_xp_bonus=int(job_xp_bonus),
                         job_title=title_for(key, int(progress_after.prestige)),
                         job_level=int(progress_after.level),
                         job_prestige=int(progress_after.prestige),
                         job_xp_into=int(progress_after.xp),
                         job_xp_need=int(xp_needed(key, int(progress_after.level), int(progress_after.prestige))),
-                        effects=merged_effects,
-                        item_mods=item_mods,
-                        tool_stamina_saved=tool_stamina_saved,
-                        tool_stamina_save_chance_bp=int(tool_stamina_save_chance_bp),
                         did_double=did_double,
                         upgrade_level=upgrade_level,
                         upgrade_bonus_pct=upgrade_bonus_pct,
@@ -1080,12 +1200,22 @@ class WorkCog(commands.Cog):
                         weekend_bonus_active=is_weekend(),
                         drop_result=drop_result,
                     )
+
+                    embed = _build_work_embed(
+                        user=interaction.user,
+                        d=d,
+                        payload=result_payload,
+                        effects=merged_effects,
+                        item_mods=item_mods,
+                    )
+                    result_effects = merged_effects
+                    result_item_mods = item_mods
                     used_cooldown_seconds = effective_cd
 
             if key is not None and used_cooldown_seconds is not None:
                 _COOLDOWNS[(guild_id, user_id, key)] = now + float(used_cooldown_seconds)
 
-            if embed is not None:
+            if embed is not None and result_payload is not None and result_effects is not None and result_item_mods is not None:
                 cooldown_ready_at = now + float(used_cooldown_seconds or 0.0)
                 prestige_ready = bool(progress_after.level >= level_cap_for(progress_after.prestige))
                 current_prestige = int(progress_after.prestige)
@@ -1101,6 +1231,11 @@ class WorkCog(commands.Cog):
                     prestige_cost_value=prestige_cost(current_prestige),
                     current_earnings_multiplier=current_prestige + 1,
                     next_earnings_multiplier=current_prestige + 2,
+                    job_def=d,
+                    result_payload=result_payload,
+                    result_effects=result_effects,
+                    result_item_mods=result_item_mods,
+                    requesting_user=interaction.user,
                 )
                 sent_msg = await interaction.followup.send(embed=embed, view=view, wait=True)
                 view.bind_message(sent_msg)
@@ -1149,6 +1284,11 @@ class _WorkUpgradeView(discord.ui.View):
         prestige_cost_value: int,
         current_earnings_multiplier: int,
         next_earnings_multiplier: int,
+        job_def: JobDef,
+        result_payload: _WorkResultPayload,
+        result_effects: JobEffects,
+        result_item_mods: _ItemMods,
+        requesting_user: discord.abc.User,
     ):
         super().__init__(timeout=300)
         self.sessionmaker = sessionmaker
@@ -1162,6 +1302,12 @@ class _WorkUpgradeView(discord.ui.View):
         self.prestige_cost_value = int(prestige_cost_value)
         self.current_earnings_multiplier = int(current_earnings_multiplier)
         self.next_earnings_multiplier = int(next_earnings_multiplier)
+        self.job_def = job_def
+        self.result_payload = result_payload
+        self.result_effects = result_effects
+        self.result_item_mods = result_item_mods
+        self.requesting_user = requesting_user
+        self.expanded = False
         self._message: Optional[discord.Message] = None
         self.work_again.disabled = (time.time() < self.cooldown_ready_at)
         if self.prestige_ready:
@@ -1191,6 +1337,33 @@ class _WorkUpgradeView(discord.ui.View):
                 await self._message.edit(view=self)
             except Exception:
                 pass
+
+    def _sync_expand_button(self) -> None:
+        for child in self.children:
+            if isinstance(child, discord.ui.Button) and child.custom_id == "work:expand_toggle":
+                child.label = "Collapse" if self.expanded else "Expand"
+                child.emoji = "🔽" if self.expanded else "🔎"
+                break
+
+    @discord.ui.button(label="Expand", style=discord.ButtonStyle.secondary, emoji="🔎", custom_id="work:expand_toggle")
+    async def toggle_expand(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None or interaction.guild.id != self.guild_id:
+            await interaction.response.send_message("This button only works in the original server.", ephemeral=True)
+            return
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Only the user who ran /work can use this button.", ephemeral=True)
+            return
+        self.expanded = not self.expanded
+        self._sync_expand_button()
+        embed = _build_work_embed(
+            user=self.requesting_user,
+            d=self.job_def,
+            payload=self.result_payload,
+            effects=self.result_effects,
+            item_mods=self.result_item_mods,
+            expanded=self.expanded,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="Upgrade Tool", style=discord.ButtonStyle.primary, emoji="⚙️")
     async def upgrade_tool(self, interaction: discord.Interaction, button: discord.ui.Button):
