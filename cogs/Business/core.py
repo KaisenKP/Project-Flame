@@ -139,6 +139,7 @@ class BusinessCard:
     worker_bonus_bp: int = 0
     manager_summary: str = "None"
     active_event_summary: str = "No active events"
+    active_event_lines: Optional[List[str]] = None
     run_mode: str = "Standard"
     synergy_summary: str = "No synergy"
     trait_summary: str = "Balanced"
@@ -1390,6 +1391,7 @@ async def _build_business_card_for_user(
         worker_bonus_bp=int(state["worker_bp"]),
         manager_summary=str(state["manager_summary"]),
         active_event_summary=str(state["active_event_summary"]),
+        active_event_lines=list(state["active_event_lines"]),
         run_mode=str(state["run_mode_label"]),
         synergy_summary=str(state["synergy_summary"]),
         trait_summary=str(state["trait_summary"]),

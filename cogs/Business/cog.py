@@ -587,6 +587,21 @@ def _fmt_int(n: int) -> str:
         return str(n)
 
 
+def _fmt_compact(n: int) -> str:
+    try:
+        value = float(int(n))
+    except Exception:
+        return str(n)
+    abs_value = abs(value)
+    if abs_value >= 1_000_000_000:
+        return f"{value/1_000_000_000:.1f}B".rstrip("0").rstrip(".")
+    if abs_value >= 1_000_000:
+        return f"{value/1_000_000:.1f}M".rstrip("0").rstrip(".")
+    if abs_value >= 1_000:
+        return f"{value/1_000:.1f}k".rstrip("0").rstrip(".")
+    return f"{int(value)}"
+
+
 def _status_badge(running: bool, owned: bool) -> str:
     if not owned:
         return "🔒 Locked"
@@ -1239,8 +1254,8 @@ def _build_hub_embed(
     total_prestige = sum(max(int(getattr(card, "prestige", 0) or 0), 0) for card in owned_cards)
 
     summary_bits = [
-        f"💰 Silver {_fmt_int(snap.silver_balance)}",
-        f"📈 Active {_fmt_int(snap.total_hourly_income_active)}/hr",
+        f"💰 Silver {_fmt_compact(snap.silver_balance)}",
+        f"📈 Active {_fmt_compact(snap.total_hourly_income_active)}/hr",
         f"🏢 Owned {_fmt_int(snap.owned_count)}",
     ]
     if owned_cards:
@@ -1269,57 +1284,59 @@ def _build_hub_embed(
         return e
 
     rows: list[str] = []
+    active_event_rows: list[str] = []
     for c in owned_cards[:10]:
         marker = "▶" if selected_card and c.key == selected_card.key else "•"
         time_remaining = _format_hours_short(c.runtime_remaining_hours) if c.running else "Ready"
+        status_label = "Running" if c.running else "Idle"
         rows.append(
-            f"{marker} {c.emoji} **{c.name}** • {_status_chip_for_card(c)}\n"
-            f"💰 `{_fmt_int(c.hourly_profit)}/hr` • ⏱ `{time_remaining}` • ⭐ `P{_fmt_int(c.prestige)}`"
+            f"{marker} {c.emoji} **{c.name}**\n"
+            f"💰 `{_fmt_compact(c.hourly_profit)}/hr` • ⏱ `{time_remaining}` • `{status_label}`"
         )
+        for event_line in list(getattr(c, "active_event_lines", []) or [])[:1]:
+            clean = _safe_str(event_line, "")
+            if not clean:
+                continue
+            rarity = "Unknown"
+            event_name = clean
+            effect = "Income modifier active"
+            if "•" in clean:
+                parts = [p.strip() for p in clean.split("•") if p.strip()]
+                if len(parts) >= 2:
+                    rarity = parts[0]
+                    event_name = parts[1]
+                if len(parts) >= 3:
+                    effect = parts[2]
+            active_event_rows.append(
+                f"{c.emoji} **{c.name}**\n"
+                f"Event: `{event_name}` • Rarity: `{rarity}`\n"
+                f"Effect: `{effect}` • Time: `{time_remaining}`"
+            )
     e.add_field(name="Roster", value="\n\n".join(rows), inline=False)
+
+    if active_event_rows:
+        e.add_field(name="🔥 ACTIVE EVENTS", value="\n\n".join(active_event_rows[:5]), inline=False)
 
     if selected_card:
         projected_total = int(getattr(selected_card, "projected_payout", int(selected_card.hourly_profit) * _estimated_cycle_hours_for_card(selected_card)))
-        manager_summary = _format_manager_summary(getattr(selected_card, "manager_summary", None))
-        worker_bp = int(getattr(selected_card, "worker_bonus_bp", 0) or 0)
-        worker_summary = f"+{_format_short_percent_from_bp(worker_bp)} income" if worker_bp > 0 else None
-        event_summary = _safe_str(getattr(selected_card, "active_event_summary", ""), "")
-        synergy_summary = _safe_str(getattr(selected_card, "synergy_summary", ""), "")
-        run_mode = _safe_str(getattr(selected_card, "run_mode", ""), "")
-        next_hint = "Tap Stop to cash out or Manage for deeper control." if selected_card.running else "Tap Run to start the next payout cycle."
-
-        spotlight_lines = [
-            f"{selected_card.emoji} **{selected_card.name}**",
-            f"💰 Income/Hour: `{_fmt_int(selected_card.hourly_profit)}`",
-            f"📊 Status: `{_status_chip_for_card(selected_card)}`",
-            f"⏱ Time Remaining: `{_format_hours_short(selected_card.runtime_remaining_hours) if selected_card.running else 'Ready to run'}`",
-            f"✖️ Main Multiplier: `x{_safe_str(getattr(selected_card, 'prestige_multiplier', None), 'n/a')}`",
-        ]
-        if selected_card.running:
-            spotlight_lines.append(f"🎯 Projected Payout: `{_fmt_int(projected_total)}`")
-        if event_summary and event_summary.lower() != "no active events":
-            spotlight_lines.append(f"🔥 Active Event: `{_trim(event_summary, 60)}`")
-        else:
-            spotlight_lines.append("🔥 Active Event: `None`")
-        spotlight_lines.extend(
-            line for line in [
-                _format_spotlight_line("Workers", worker_summary),
-                _format_spotlight_line("Manager", manager_summary),
-                _format_spotlight_line("Synergy", _trim(synergy_summary, 60) if synergy_summary else None),
-                _format_spotlight_line("Run Mode", _trim(run_mode, 24) if run_mode and run_mode.lower() != "standard" else None),
-                _format_spotlight_line("Next", next_hint),
-            ]
-            if line is not None
-        )
-        e.add_field(name=f"Spotlight • {selected_card.name}", value="\n".join(spotlight_lines), inline=False)
         e.add_field(
-            name="Actions",
+            name=f"Spotlight • {selected_card.name}",
             value=(
-                f"Selected: {selected_card.emoji} **{selected_card.name}**\n"
-                "Buttons below act on the selected business only."
+                f"{selected_card.emoji} **{selected_card.name}**\n"
+                f"💰 `{_fmt_compact(selected_card.hourly_profit)}/hr` • "
+                f"⏱ `{_format_hours_short(selected_card.runtime_remaining_hours) if selected_card.running else 'Ready'}` • "
+                f"`{'Running' if selected_card.running else 'Idle'}`\n"
+                f"💰 Est. Total: `{_fmt_compact(projected_total)}`"
             ),
             inline=False,
         )
+    hint = "Start your idle businesses."
+    idle_count = sum(1 for card in owned_cards if not card.running)
+    if active_event_rows:
+        hint = "Check active events."
+    elif idle_count == 0 and owned_cards:
+        hint = "Upgrade your highest income business."
+    e.add_field(name="Priority Hint", value=f"💡 {hint}", inline=False)
     return e
 
 
@@ -1394,11 +1411,10 @@ def _build_run_menu_embed(
     lines: list[str] = []
     for c in owned[:25]:
         runtime_txt = f"{_fmt_int(c.runtime_remaining_hours)}h" if c.running else "Ready"
-        event_txt = _trim(_safe_str(getattr(c, "active_event_summary", None), "None"), 32)
         lines.append(
             f"{c.emoji} **{c.name}**\n"
-            f"└ 💰 `{_fmt_int(c.hourly_profit)}/hr` • 📊 `{_status_badge(c.running, c.owned)}`\n"
-            f"└ ⏱ `{runtime_txt}` • 🔥 `{event_txt if event_txt else 'None'}`"
+            f"└ 💰 `{_fmt_compact(c.hourly_profit)}/hr` • 📊 `{_status_badge(c.running, c.owned)}`\n"
+            f"└ ⏱ `{runtime_txt}`"
         )
 
     e.add_field(name="Owned Businesses", value="\n\n".join(lines), inline=False)
@@ -1434,11 +1450,10 @@ def _build_manage_menu_embed(
     lines: list[str] = []
     for c in owned[:25]:
         time_txt = f"{_fmt_int(c.runtime_remaining_hours)}h" if c.running else "Ready"
-        event_txt = _trim(_safe_str(getattr(c, "active_event_summary", None), "None"), 30)
         lines.append(
             f"{c.emoji} **{c.name}**\n"
-            f"└ 💰 `{_fmt_int(c.hourly_profit)}/hr` • 📊 `{_status_chip_for_card(c)}`\n"
-            f"└ ⏱ `{time_txt}` • 🔥 `{event_txt if event_txt else 'None'}`\n"
+            f"└ 💰 `{_fmt_compact(c.hourly_profit)}/hr` • 📊 `{_status_chip_for_card(c)}`\n"
+            f"└ ⏱ `{time_txt}`\n"
             f"└ 👷 `{_slot_text(c.worker_slots_used, c.worker_slots_total)}` • 🧠 `{_slot_text(c.manager_slots_used, c.manager_slots_total)}`"
         )
 
@@ -1452,7 +1467,7 @@ def _build_business_detail_embed(
     snap: BusinessManageSnapshot,
     show_details: bool = False,
 ) -> discord.Embed:
-    status = "🟢 Running" if snap.running else "🔴 Stopped"
+    status = "Running" if snap.running else "Idle"
     remaining = f"{_fmt_int(snap.runtime_remaining_hours)}h" if snap.running else "Ready"
     projected_total = int(getattr(snap, "projected_payout", int(snap.hourly_profit) * int(snap.total_runtime_hours)))
     event_summary = _trim(getattr(snap, "active_event_summary", "No active events"), 80)
@@ -1469,60 +1484,71 @@ def _build_business_detail_embed(
 
     e = _base_embed(
         title=f"{snap.emoji} {snap.name}",
-        description="Clear snapshot first. Use **View Details** for staffing, formulas, and progression.",
+        description="Clean view of what matters now.",
     )
     e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
 
     e.add_field(
-        name="Core Stats",
+        name="HEADER",
         value=(
-            f"💰 Income/Hour: `{_fmt_int(snap.hourly_profit)}`\n"
-            f"📊 Status: `{status}`\n"
-            f"⏱ Time Remaining: `{remaining}`\n"
-            f"✖️ Main Multiplier: `x{snap.prestige_multiplier}`"
+            f"Status: `{status}`\n"
+            f"Income/Hour: `{_fmt_compact(snap.hourly_profit)}`\n"
+            f"Time Remaining: `{remaining}`\n"
+            f"💰 Est. Total: `{_fmt_compact(projected_total)}`"
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="MODE",
+        value=(
+            f"Run Mode: `{mode_label}`\n"
+            f"Cycle Runtime: `{_fmt_int(snap.total_runtime_hours)}h`"
         ),
         inline=True,
     )
     e.add_field(
-        name="Run Snapshot",
+        name="PROGRESSION",
         value=(
-            f"Run Mode: `{mode_label}`\n"
-            f"Projected Payout: `{_fmt_int(projected_total)}`\n"
-            f"Cycle Runtime: `{_fmt_int(snap.total_runtime_hours)}h`\n"
-            f"Progress: `Lv {_fmt_int(snap.visible_level)}/{_fmt_int(snap.max_level)}`"
+            f"Level: `{_fmt_int(snap.visible_level)}/{_fmt_int(snap.max_level)}`\n"
+            f"Main Multiplier: `x{snap.prestige_multiplier}`"
         ),
         inline=True,
     )
     if has_active_event:
-        event_value = (
-            "🔥 **ACTIVE EVENT**\n"
-            f"Name: `{event_summary}`\n"
-            "Effect: `Income modifiers active`\n"
-            f"Time Remaining: `{remaining}`"
+        event_lines = list(getattr(snap, "active_event_lines", []) or [])
+        line = event_lines[0] if event_lines else event_summary
+        e.add_field(
+            name="EVENT",
+            value=(
+                f"🔥 `{_trim(line, 110)}`\n"
+                f"Time Remaining: `{remaining}`"
+            ),
+            inline=False,
         )
-    else:
-        event_value = (
-            "🔥 **ACTIVE EVENT**\n"
-            "Name: `None`\n"
-            "Effect: `No active event`\n"
-            "Time Remaining: `—`"
-        )
-    e.add_field(name="Event Spotlight", value=event_value, inline=False)
 
     e.add_field(
-        name="📊 Breakdown",
+        name="INCOME BREAKDOWN",
         value=(
-            f"• Base: `{_fmt_int(snap.base_hourly_income)}/hr`\n"
-            f"• Workers: `+{_fmt_int(worker_est)}/hr` (`+{_format_short_percent_from_bp(worker_bp)}`)\n"
-            f"• Managers: `+{_fmt_int(manager_est)}/hr`\n"
-            f"• Events: `+{_fmt_int(event_est)}/hr`"
+            f"Base: `{_fmt_compact(snap.base_hourly_income)}/hr`\n"
+            f"Workers: `+{_format_short_percent_from_bp(worker_bp)}` (`+{_fmt_compact(worker_est)}/hr`)\n"
+            f"Managers: `+{_fmt_compact(manager_est)}/hr`\n"
+            f"Events: `+{_fmt_compact(event_est)}/hr`\n"
+            f"Synergy: `+{_format_short_percent_from_bp(int(getattr(snap, 'synergy_bonus_bp', 0) or 0))}`"
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="TEAM",
+        value=(
+            f"Workers: `{_slot_text(snap.worker_slots_used, snap.worker_slots_total)}` • {_trim(getattr(snap, 'worker_summary', 'No workers assigned'), 60)}\n"
+            f"Manager: `{_slot_text(snap.manager_slots_used, snap.manager_slots_total)}` • {_trim(getattr(snap, 'manager_summary', 'No managers assigned'), 60)}"
         ),
         inline=False,
     )
 
     next_action = "Press **Run** to start earning."
     if snap.running:
-        next_action = "Keep running for payout, or press **Stop** to cash out now."
+        next_action = "Keep running for payout, or press **Cash Out** now."
     elif snap.worker_slots_used < snap.worker_slots_total:
         next_action = "Hire workers to improve income/hour."
     elif snap.manager_slots_used < snap.manager_slots_total:
@@ -2482,7 +2508,7 @@ class BusinessHubView(BusinessBaseView):
         view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.selected_business_key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
-    @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, emoji="⏹️", row=1)
+    @discord.ui.button(label="Cash Out", style=discord.ButtonStyle.danger, emoji="⏹️", row=1)
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await _safe_defer(interaction)
@@ -2497,11 +2523,11 @@ class BusinessHubView(BusinessBaseView):
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
-        embed.add_field(name="Stop Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
+        embed.add_field(name="Cash Out Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
         view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.selected_business_key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
-    @discord.ui.button(label="Start All", style=discord.ButtonStyle.success, emoji="⏯️", row=1)
+    @discord.ui.button(label="Start All", style=discord.ButtonStyle.success, emoji="▶️", row=3)
     async def start_all_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await self._show_bulk_action_loading(
@@ -2562,12 +2588,12 @@ class BusinessHubView(BusinessBaseView):
         )
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
-    @discord.ui.button(label="Stop All", style=discord.ButtonStyle.danger, emoji="🛑", row=1)
+    @discord.ui.button(label="Stop All", style=discord.ButtonStyle.danger, emoji="⛔", row=3)
     async def stop_all_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await self._show_bulk_action_loading(
             interaction,
-            action_label="Stop All",
+            action_label="Cash Out All",
             progress_text="Stopping businesses…",
         )
         stopped = 0
@@ -2611,7 +2637,7 @@ class BusinessHubView(BusinessBaseView):
             f"Failed: **{failed}**"
         )
         embed = _build_hub_embed(user=interaction.user, snap=snap, selected_business_key=self.selected_business_key)
-        embed.add_field(name="Stop All Businesses", value=summary, inline=False)
+        embed.add_field(name="Cash Out All Businesses", value=summary, inline=False)
         if error_message:
             embed.add_field(name="⚠️ Bulk Action Error", value=error_message, inline=False)
         view = BusinessHubView(
@@ -2643,7 +2669,7 @@ class BusinessHubView(BusinessBaseView):
         view._sync_pagination_buttons(total_slots=len(slots))
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
-    @discord.ui.button(label="Manager", style=discord.ButtonStyle.secondary, emoji="🧑‍💼", row=2)
+    @discord.ui.button(label="Manager", style=discord.ButtonStyle.secondary, emoji="👤", row=2)
     async def managers_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await _safe_defer(interaction)
@@ -2683,7 +2709,7 @@ class BusinessHubView(BusinessBaseView):
         view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.selected_business_key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
-    @discord.ui.button(label="Buy", style=discord.ButtonStyle.success, emoji="🛒", row=3)
+    @discord.ui.button(label="Buy", style=discord.ButtonStyle.success, emoji="🛒", row=4)
     async def buy_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await _safe_defer(interaction)
@@ -2695,7 +2721,7 @@ class BusinessHubView(BusinessBaseView):
         view = BuyBusinessView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, defs=defs, hub_snapshot=snap)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
-    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, emoji="🔄", row=3)
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, emoji="🔄", row=4)
     async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await _safe_defer(interaction)
