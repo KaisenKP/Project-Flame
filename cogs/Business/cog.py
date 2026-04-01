@@ -1726,6 +1726,111 @@ def _build_result_embed(*, title: str, message: str, ok: bool) -> discord.Embed:
     )
 
 
+def _summary_reaction_line(summary: dict) -> str:
+    total = int(summary.get("silver_paid_total", 0))
+    hours = max(int(summary.get("hours_paid_total", 0)), 1)
+    avg = total / hours
+    event_pos = int(summary.get("event_income_positive", 0))
+    event_neg = int(summary.get("event_income_negative", 0))
+    worker = int(summary.get("worker_contribution", 0))
+    manager = int(summary.get("manager_contribution", 0))
+    if total <= max(avg * 1.1, 2_000):
+        return "yeah this run was cursed"
+    if total <= max(avg * 1.4, 6_000):
+        return "profit fighting for its life"
+    if event_pos >= max(total * 0.3, 1) and event_pos > (event_neg * 2):
+        return "ain’t no way you hit that 😭"
+    if worker > manager and worker >= max(total * 0.25, 1):
+        return "your workers carried HARD"
+    if hours >= 10 and total >= 50_000:
+        return "you made all that doing nothing 😭"
+    if total >= 200_000:
+        return "bro just printed money 😭"
+    return "okay yeah this was clean"
+
+
+def _build_run_summary_embed(*, summary: dict) -> discord.Embed:
+    total = int(summary.get("silver_paid_total", 0))
+    hours = max(int(summary.get("hours_paid_total", 0)), 0)
+    avg = int(round(total / max(hours, 1)))
+    best_event = summary.get("best_event") or {"name": "None", "delta": 0}
+    worst_event = summary.get("worst_event") or {"name": "None", "delta": 0}
+    peak_hour = int(summary.get("highest_single_hour_payout", 0))
+    e = _base_embed(title="📊 Business Run Summary", color=discord.Color.gold())
+    e.add_field(
+        name="Main",
+        value=(
+            f"💰 Total Earned: **{_fmt_int(total)}**\n"
+            f"⏱ Duration: **{_fmt_int(hours)} hours**\n"
+            f"📈 Avg/hour: **{_fmt_int(avg)}**"
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="🔥 Highlights",
+        value=(
+            f"- Best Event: **{best_event.get('name', 'None')}** (+{_fmt_int(int(best_event.get('delta', 0)))})\n"
+            f"- Worst Event: **{worst_event.get('name', 'None')}** (-{_fmt_int(abs(int(worst_event.get('delta', 0))))})\n"
+            f"- Peak Hour: **+{_fmt_int(peak_hour)}**"
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="👷 Contributions",
+        value=(
+            f"- Base Income: **{_fmt_int(int(summary.get('base_contribution', 0)))}**\n"
+            f"- Workers: **+{_fmt_int(int(summary.get('worker_contribution', 0)))}**\n"
+            f"- Managers: **+{_fmt_int(int(summary.get('manager_contribution', 0)))}**\n"
+            f"- Events: **+{_fmt_int(int(summary.get('event_income_positive', 0)))} / -{_fmt_int(int(summary.get('event_income_negative', 0)))}**"
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="🎲 Events",
+        value=(
+            f"- Total: **{_fmt_int(int(summary.get('event_count', 0)))}**\n"
+            f"- Positive: **{_fmt_int(int(summary.get('positive_events', 0)))}**\n"
+            f"- Negative: **{_fmt_int(int(summary.get('negative_events', 0)))}**\n"
+            f"- Highest Rarity Triggered: **{str(summary.get('highest_rarity', 'None')).title()}**"
+        ),
+        inline=False,
+    )
+    e.add_field(name="🧠", value=_summary_reaction_line(summary), inline=False)
+    return e
+
+
+def _build_run_detail_embed(*, summary: dict) -> discord.Embed:
+    e = _base_embed(title="🧾 Detailed Run Breakdown", color=discord.Color.blurple())
+    hourly = list(summary.get("hourly_breakdown", []))
+    event_lines = list(summary.get("event_lines", []))
+    hourly_lines = [
+        f"H{int(item.get('hour_index', 0))}: {_fmt_int(int(item.get('total_payout', 0)))} ({int(item.get('event_delta', 0)):+,})"
+        for item in hourly[-12:]
+    ] or ["No hourly ticks recorded."]
+    e.add_field(name="Per-hour Breakdown", value="\n".join(hourly_lines), inline=False)
+    e.add_field(name="Event Log", value="\n".join(event_lines[:12]) if event_lines else "No events triggered.", inline=False)
+    impactful = summary.get("most_impactful_factor", "base")
+    e.add_field(name="Most Impactful Factor", value=f"**{str(impactful).title()}**", inline=False)
+    return e
+
+
+class RunSummaryView(discord.ui.View):
+    def __init__(self, *, owner_id: int, summary: dict):
+        super().__init__(timeout=300)
+        self.owner_id = int(owner_id)
+        self.summary = summary
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if int(interaction.user.id) != self.owner_id:
+            await interaction.response.send_message("This summary belongs to another player.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="View Detailed Breakdown", style=discord.ButtonStyle.secondary, emoji="🧾")
+    async def view_detail(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.send_message(embed=_build_run_detail_embed(summary=self.summary), ephemeral=True)
+
+
 def _build_worker_hire_result_embed(
     *,
     user: discord.abc.User,
@@ -4604,30 +4709,52 @@ class BusinessCog(commands.Cog):
         if matched is not None:
             business_name = f"{matched.emoji} {matched.name}"
 
-        event_summary = "No special events this run."
-        if notice.event_outcomes:
-            net_delta = sum(int(evt.silver_delta) for evt in notice.event_outcomes)
-            sign = "+" if net_delta >= 0 else ""
-            event_summary = (
-                f"Events: **{len(notice.event_outcomes)}** triggered "
-                f"(net {sign}{net_delta:,} Silver vs baseline)."
-            )
-
+        summary_data = dict(notice.summary or {})
+        hourly_breakdown = list(summary_data.get("hourly_breakdown", []))
+        best_event = None
+        worst_event = None
+        event_lines: list[str] = []
+        for evt in notice.event_outcomes:
+            delta = int(evt.silver_delta)
+            line = f"• {evt.title} ({evt.rarity.title()}) {delta:+,}"
+            event_lines.append(line)
+            if best_event is None or delta > int(best_event["delta"]):
+                best_event = {"name": str(evt.title), "delta": int(delta)}
+            if worst_event is None or delta < int(worst_event["delta"]):
+                worst_event = {"name": str(evt.title), "delta": int(delta)}
+        base_total = int(summary_data.get("base_contribution", 0))
+        worker_total = int(summary_data.get("worker_contribution", 0))
+        manager_total = int(summary_data.get("manager_contribution", 0))
+        net_events_total = int(summary_data.get("event_income_positive", 0)) - int(summary_data.get("event_income_negative", 0))
+        factor_pairs = [("base", base_total), ("workers", worker_total), ("managers", manager_total), ("events", abs(net_events_total))]
+        most_impactful_factor = max(factor_pairs, key=lambda item: item[1])[0] if factor_pairs else "base"
         summary = {
             "business_name": business_name,
             "hours_paid_total": int(notice.hours_paid_total),
             "silver_paid_total": int(notice.silver_paid_total),
-            "event_count": len(notice.event_outcomes),
-            "net_event_delta": int(sum(int(evt.silver_delta) for evt in notice.event_outcomes)),
+            "event_count": int(summary_data.get("events_triggered_total", len(notice.event_outcomes))),
+            "net_event_delta": int(net_events_total),
+            "event_income_positive": int(summary_data.get("event_income_positive", 0)),
+            "event_income_negative": int(summary_data.get("event_income_negative", 0)),
+            "worker_contribution": worker_total,
+            "manager_contribution": manager_total,
+            "base_contribution": base_total,
+            "positive_events": int(summary_data.get("positive_events", 0)),
+            "negative_events": int(summary_data.get("negative_events", 0)),
+            "highest_single_hour_payout": int(summary_data.get("highest_single_hour_payout", 0)),
+            "lowest_single_hour_payout": int(summary_data.get("lowest_single_hour_payout", 0)),
+            "highest_rarity": str(summary_data.get("highest_rarity", "none")),
+            "best_event": best_event or {"name": "None", "delta": 0},
+            "worst_event": worst_event or {"name": "None", "delta": 0},
+            "hourly_breakdown": hourly_breakdown,
+            "event_lines": event_lines,
+            "most_impactful_factor": most_impactful_factor,
             "completed_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        message = (
-            f"<@{notice.user_id}> your business run finished: **{business_name}**\n"
-            f"• Runtime paid: **{notice.hours_paid_total}h**\n"
-            f"• Total earned: **{notice.silver_paid_total:,} Silver**\n"
-            f"• {event_summary}"
-        )
+        embed = _build_run_summary_embed(summary=summary)
+        content = f"<@{notice.user_id}> your business run finished: **{business_name}**"
+        view = RunSummaryView(owner_id=int(notice.user_id), summary=summary)
 
         notify_enabled = self._notifications_enabled_for(guild_id=int(notice.guild_id), user_id=int(notice.user_id))
         if not notify_enabled:
@@ -4660,7 +4787,7 @@ class BusinessCog(commands.Cog):
 
         for channel in channels:
             try:
-                await channel.send(message)
+                await channel.send(content=content, embed=embed, view=view)
                 return
             except Exception:
                 continue
@@ -4673,7 +4800,7 @@ class BusinessCog(commands.Cog):
                 user = None
         if user is not None:
             try:
-                await user.send(message)
+                await user.send(embed=embed, view=view)
                 return
             except Exception:
                 self._push_pending_summary(guild_id=int(notice.guild_id), user_id=int(notice.user_id), summary=summary)
@@ -4773,7 +4900,8 @@ class BusinessCog(commands.Cog):
                 hours = int(item.get("hours_paid_total", 0))
                 net = int(item.get("net_event_delta", 0))
                 sign = "+" if net >= 0 else ""
-                lines.append(f"• **{business_name}** — {silver:,} Silver over {hours}h (events {sign}{net:,})")
+                peak = int(item.get("highest_single_hour_payout", 0))
+                lines.append(f"• **{business_name}** — {silver:,} Silver over {hours}h | events {sign}{net:,} | peak {peak:,}/h")
             embed.add_field(
                 name="📋 Offline Business Summary",
                 value="\n".join(lines),
@@ -4786,6 +4914,14 @@ class BusinessCog(commands.Cog):
             hub_snapshot=snap,
         )
         await interaction.followup.send(embed=embed, view=view)
+        if pending:
+            latest = dict(pending[-1])
+            await interaction.followup.send(
+                content="You had completed runs while away. Latest full summary:",
+                embed=_build_run_summary_embed(summary=latest),
+                view=RunSummaryView(owner_id=user_id, summary=latest),
+                ephemeral=True,
+            )
 
     @app_commands.command(name="business_notifications", description="Toggle business completion pings for your account.")
     async def business_notifications_cmd(self, interaction: discord.Interaction, enabled: bool) -> None:

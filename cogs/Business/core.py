@@ -1709,6 +1709,59 @@ async def start_business_run(
         defn=defn,
     )
     hourly_profit = _apply_bp(hourly_profit, run_mode.profit_bp)
+    # Snapshot a presentational-only contribution breakdown for end-of-run summaries.
+    trait = get_business_trait(defn.key)
+    base_after_scaling = int(defn.base_hourly_income)
+    base_after_scaling = _apply_bp(base_after_scaling, _upgrade_percent_bp_for_level(level))
+    base_after_scaling = _apply_bp(base_after_scaling, trait.base_profit_multiplier_bp - 10_000)
+    prestige_bonus_bp = int(prestige_multiplier(prestige) * 10_000) - 10_000
+    flat_bonus = await _sum_active_worker_flat_bonus_for_ownership(
+        session,
+        ownership_id=int(ownership.id),
+    )
+    raw_percent_bonus_bp = await _sum_active_worker_percent_bonus_bp_for_ownership(
+        session,
+        ownership_id=int(ownership.id),
+    )
+    manager_bonus_bp = await _sum_active_manager_profit_bonus_bp_for_ownership(
+        session,
+        ownership_id=int(ownership.id),
+    )
+    baseline_hourly_component = compute_business_income(
+        base_profit=base_after_scaling,
+        worker_flat_bonus=0,
+        worker_percent_bonus_bp=0,
+        manager_bonus_bp=0,
+        prestige_bonus_bp=prestige_bonus_bp,
+        synergy_bonus_bp=0,
+        temporary_bonus_bp=0,
+    )
+    worker_hourly_component = max(
+        compute_business_income(
+            base_profit=base_after_scaling,
+            worker_flat_bonus=flat_bonus,
+            worker_percent_bonus_bp=diminishing_worker_bonus_bp(raw_percent_bonus_bp),
+            manager_bonus_bp=0,
+            prestige_bonus_bp=prestige_bonus_bp,
+            synergy_bonus_bp=0,
+            temporary_bonus_bp=0,
+        )
+        - baseline_hourly_component,
+        0,
+    )
+    manager_hourly_component = max(
+        compute_business_income(
+            base_profit=base_after_scaling,
+            worker_flat_bonus=flat_bonus,
+            worker_percent_bonus_bp=diminishing_worker_bonus_bp(raw_percent_bonus_bp),
+            manager_bonus_bp=manager_bonus_bp,
+            prestige_bonus_bp=prestige_bonus_bp,
+            synergy_bonus_bp=0,
+            temporary_bonus_bp=0,
+        )
+        - (baseline_hourly_component + worker_hourly_component),
+        0,
+    )
 
     now = _utc_now()
     ends_at = now + timedelta(hours=total_runtime_hours)
@@ -1756,6 +1809,11 @@ async def start_business_run(
             "ends_at_iso": ends_at.isoformat(),
             "run_mode": run_mode.key,
             "run_mode_label": run_mode.label,
+            "summary_components": {
+                "base_hourly_income": int(baseline_hourly_component),
+                "worker_hourly_bonus": int(worker_hourly_component),
+                "manager_hourly_bonus": int(manager_hourly_component),
+            },
             "event_plan": event_plan,
         },
         report_json=None,
