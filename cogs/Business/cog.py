@@ -1239,9 +1239,9 @@ def _build_hub_embed(
     total_prestige = sum(max(int(getattr(card, "prestige", 0) or 0), 0) for card in owned_cards)
 
     summary_bits = [
-        f"Silver {_fmt_int(snap.silver_balance)}",
-        f"Active {_fmt_int(snap.total_hourly_income_active)}/hr",
-        f"Owned {_fmt_int(snap.owned_count)}",
+        f"💰 Silver {_fmt_int(snap.silver_balance)}",
+        f"📈 Active {_fmt_int(snap.total_hourly_income_active)}/hr",
+        f"🏢 Owned {_fmt_int(snap.owned_count)}",
     ]
     if owned_cards:
         summary_bits.append(f"Prestige {_fmt_int(total_prestige)}")
@@ -1271,20 +1271,10 @@ def _build_hub_embed(
     rows: list[str] = []
     for c in owned_cards[:10]:
         marker = "▶" if selected_card and c.key == selected_card.key else "•"
-        top_line = (
-            f"{marker} {c.emoji} {c.name} • P{_fmt_int(c.prestige)} • "
-            f"Lv{_fmt_int(c.visible_level)} • {_status_chip_for_card(c)}"
-        )
-        details = [f"{_fmt_int(c.hourly_profit)}/hr"]
-        if c.running:
-            details.append(f"{_format_hours_short(c.runtime_remaining_hours)} left")
-        else:
-            details.append("Ready to run")
-        hint = _compact_business_hint(c)
-        if hint:
-            details.append(hint)
+        time_remaining = _format_hours_short(c.runtime_remaining_hours) if c.running else "Ready"
         rows.append(
-            f"{top_line}\n" + " • ".join(_trim(part, 32) for part in details[:3])
+            f"{marker} {c.emoji} **{c.name}** • {_status_chip_for_card(c)}\n"
+            f"💰 `{_fmt_int(c.hourly_profit)}/hr` • ⏱ `{time_remaining}` • ⭐ `P{_fmt_int(c.prestige)}`"
         )
     e.add_field(name="Roster", value="\n\n".join(rows), inline=False)
 
@@ -1299,18 +1289,22 @@ def _build_hub_embed(
         next_hint = "Tap Stop to cash out or Manage for deeper control." if selected_card.running else "Tap Run to start the next payout cycle."
 
         spotlight_lines = [
-            f"{selected_card.emoji} **{selected_card.name}** • P{_fmt_int(selected_card.prestige)} • Lv{_fmt_int(selected_card.visible_level)}",
-            f"**Status:** {_status_chip_for_card(selected_card)}",
+            f"{selected_card.emoji} **{selected_card.name}**",
+            f"💰 Income/Hour: `{_fmt_int(selected_card.hourly_profit)}`",
+            f"📊 Status: `{_status_chip_for_card(selected_card)}`",
+            f"⏱ Time Remaining: `{_format_hours_short(selected_card.runtime_remaining_hours) if selected_card.running else 'Ready to run'}`",
+            f"✖️ Main Multiplier: `x{_safe_str(getattr(selected_card, 'prestige_multiplier', None), 'n/a')}`",
         ]
         if selected_card.running:
-            spotlight_lines.append(f"**Projected Take:** {_fmt_int(projected_total)}")
+            spotlight_lines.append(f"🎯 Projected Payout: `{_fmt_int(projected_total)}`")
+        if event_summary and event_summary.lower() != "no active events":
+            spotlight_lines.append(f"🔥 Active Event: `{_trim(event_summary, 60)}`")
         else:
-            spotlight_lines.append(f"**Next Run Estimate:** {_fmt_int(projected_total)}")
+            spotlight_lines.append("🔥 Active Event: `None`")
         spotlight_lines.extend(
             line for line in [
                 _format_spotlight_line("Workers", worker_summary),
                 _format_spotlight_line("Manager", manager_summary),
-                _format_spotlight_line("Event", _trim(event_summary, 60) if event_summary else None),
                 _format_spotlight_line("Synergy", _trim(synergy_summary, 60) if synergy_summary else None),
                 _format_spotlight_line("Run Mode", _trim(run_mode, 24) if run_mode and run_mode.lower() != "standard" else None),
                 _format_spotlight_line("Next", next_hint),
@@ -1378,7 +1372,7 @@ def _build_run_menu_embed(
 ) -> discord.Embed:
     owned = [c for c in snap.cards if c.owned]
 
-    desc = "Pick one business to start now and collect hourly profit."
+    desc = "Pick one business. Keep focus on income, event, time, and status."
     e = _base_embed(title="▶️ Run Business", description=desc)
     e.set_author(
         name=_safe_str(user),
@@ -1399,15 +1393,12 @@ def _build_run_menu_embed(
 
     lines: list[str] = []
     for c in owned[:25]:
-        runtime_txt = f"{_fmt_int(c.runtime_remaining_hours)}h left" if c.running else "Ready to start"
-        approx_runtime = _estimated_cycle_hours_for_card(c)
-        cycle_profit = int(c.hourly_profit) * approx_runtime
+        runtime_txt = f"{_fmt_int(c.runtime_remaining_hours)}h" if c.running else "Ready"
+        event_txt = _trim(_safe_str(getattr(c, "active_event_summary", None), "None"), 32)
         lines.append(
             f"{c.emoji} **{c.name}**\n"
-            f"└ {_status_badge(c.running, c.owned)}\n"
-            f"└ Income: `{_fmt_int(c.hourly_profit)}/hr`\n"
-            f"└ Run Profit: `{_fmt_int(cycle_profit)} per run`\n"
-            f"└ ⏱️ {runtime_txt}"
+            f"└ 💰 `{_fmt_int(c.hourly_profit)}/hr` • 📊 `{_status_badge(c.running, c.owned)}`\n"
+            f"└ ⏱ `{runtime_txt}` • 🔥 `{event_txt if event_txt else 'None'}`"
         )
 
     e.add_field(name="Owned Businesses", value="\n\n".join(lines), inline=False)
@@ -1421,7 +1412,7 @@ def _build_manage_menu_embed(
 ) -> discord.Embed:
     owned = [c for c in snap.cards if c.owned]
 
-    desc = "Select a business to view upgrades, staffing, and details."
+    desc = "Select a business to act quickly: Run, Upgrade, or Hire."
     e = _base_embed(title="🛠️ Manage Businesses", description=desc)
     e.set_author(
         name=_safe_str(user),
@@ -1442,13 +1433,13 @@ def _build_manage_menu_embed(
 
     lines: list[str] = []
     for c in owned[:25]:
-        cycle_profit = int(c.hourly_profit) * _estimated_cycle_hours_for_card(c)
+        time_txt = f"{_fmt_int(c.runtime_remaining_hours)}h" if c.running else "Ready"
+        event_txt = _trim(_safe_str(getattr(c, "active_event_summary", None), "None"), 30)
         lines.append(
             f"{c.emoji} **{c.name}**\n"
-            f"└ Level `{_fmt_int(c.visible_level)}/{_fmt_int(c.max_level)}` • Prestige `{_fmt_int(c.prestige)}`\n"
-            f"└ Total Progress `{_fmt_int(c.total_visible_level)}`\n"
-            f"└ Profit `{_fmt_int(c.hourly_profit)}/hr` • Run `{_fmt_int(cycle_profit)}`\n"
-            f"└ Workers `{_slot_text(c.worker_slots_used, c.worker_slots_total)}` • Managers `{_slot_text(c.manager_slots_used, c.manager_slots_total)}`"
+            f"└ 💰 `{_fmt_int(c.hourly_profit)}/hr` • 📊 `{_status_chip_for_card(c)}`\n"
+            f"└ ⏱ `{time_txt}` • 🔥 `{event_txt if event_txt else 'None'}`\n"
+            f"└ 👷 `{_slot_text(c.worker_slots_used, c.worker_slots_total)}` • 🧠 `{_slot_text(c.manager_slots_used, c.manager_slots_total)}`"
         )
 
     e.add_field(name="Your Businesses", value="\n\n".join(lines), inline=False)
@@ -1459,67 +1450,98 @@ def _build_business_detail_embed(
     *,
     user: discord.abc.User,
     snap: BusinessManageSnapshot,
+    show_details: bool = False,
 ) -> discord.Embed:
     status = "🟢 Running" if snap.running else "🔴 Stopped"
-    remaining = f"{_fmt_int(snap.runtime_remaining_hours)}h" if snap.running else "—"
+    remaining = f"{_fmt_int(snap.runtime_remaining_hours)}h" if snap.running else "Ready"
     projected_total = int(getattr(snap, "projected_payout", int(snap.hourly_profit) * int(snap.total_runtime_hours)))
+    event_summary = _trim(getattr(snap, "active_event_summary", "No active events"), 80)
+    has_active_event = event_summary.lower() != "no active events"
+    worker_bp = int(getattr(snap, "worker_bonus_bp", 0) or 0)
+    worker_est = max(int(int(snap.base_hourly_income) * worker_bp / 10_000), 0)
+    total_delta = max(int(snap.hourly_profit) - int(snap.base_hourly_income), 0)
+    manager_est = max(total_delta - worker_est, 0)
+    event_est = 0
+    if has_active_event and manager_est > 0:
+        event_est = max(int(manager_est * 0.35), 0)
+        manager_est = max(manager_est - event_est, 0)
+    mode_label = _safe_str(getattr(snap, "run_mode", None), "Standard")
 
     e = _base_embed(
-        title=f"📊 {snap.emoji} {snap.name}",
-        description=(
-            f"`Status` {status} • `Level` `{_fmt_int(snap.visible_level)}/{_fmt_int(snap.max_level)}` "
-            f"• `Prestige` `{_fmt_int(snap.prestige)}` • `Mode` `{getattr(snap, 'run_mode', 'Standard')}` • `Total Progress` `{_fmt_int(snap.total_visible_level)}`"
-        ),
+        title=f"{snap.emoji} {snap.name}",
+        description="Clear snapshot first. Use **View Details** for staffing, formulas, and progression.",
     )
     e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
 
     e.add_field(
-        name="Run Status",
+        name="Core Stats",
         value=(
-            f"Runtime Remaining: `{remaining}`\n"
+            f"💰 Income/Hour: `{_fmt_int(snap.hourly_profit)}`\n"
+            f"📊 Status: `{status}`\n"
+            f"⏱ Time Remaining: `{remaining}`\n"
+            f"✖️ Main Multiplier: `x{snap.prestige_multiplier}`"
+        ),
+        inline=True,
+    )
+    e.add_field(
+        name="Run Snapshot",
+        value=(
+            f"Run Mode: `{mode_label}`\n"
+            f"Projected Payout: `{_fmt_int(projected_total)}`\n"
             f"Cycle Runtime: `{_fmt_int(snap.total_runtime_hours)}h`\n"
-            f"Projected Cycle Profit: `{_fmt_int(projected_total)} Silver`\n"
-            f"Active Event: `{_trim(getattr(snap, 'active_event_summary', 'No active events'), 60)}`"
+            f"Progress: `Lv {_fmt_int(snap.visible_level)}/{_fmt_int(snap.max_level)}`"
         ),
         inline=True,
     )
+    if has_active_event:
+        event_value = (
+            "🔥 **ACTIVE EVENT**\n"
+            f"Name: `{event_summary}`\n"
+            "Effect: `Income modifiers active`\n"
+            f"Time Remaining: `{remaining}`"
+        )
+    else:
+        event_value = (
+            "🔥 **ACTIVE EVENT**\n"
+            "Name: `None`\n"
+            "Effect: `No active event`\n"
+            "Time Remaining: `—`"
+        )
+    e.add_field(name="Event Spotlight", value=event_value, inline=False)
+
     e.add_field(
-        name="Income",
+        name="📊 Breakdown",
         value=(
-            f"Current Profit: `{_fmt_int(snap.hourly_profit)}/hr`\n"
-            f"Run Profit: `{_fmt_int(projected_total)} per run`\n"
-            f"Base Profit: `{_fmt_int(snap.base_hourly_income)}/hr`\n"
-            f"Workers: `+{_fmt_int(getattr(snap, 'worker_bonus_bp', 0)/100)}%`\n"
-            f"Synergy: `+{_fmt_int(getattr(snap, 'synergy_bonus_bp', 0)/100)}%`\n"
-            f"Output Multiplier: `x{snap.prestige_multiplier}`"
-        ),
-        inline=True,
-    )
-    e.add_field(
-        name="Staff",
-        value=(
-            f"Workers: `{_slot_text(snap.worker_slots_used, snap.worker_slots_total)}` • {_trim(getattr(snap, 'worker_summary', 'No workers assigned'), 80)}\n"
-            f"Managers: `{_slot_text(snap.manager_slots_used, snap.manager_slots_total)}` • {_trim(getattr(snap, 'manager_summary', 'No managers assigned'), 80)}"
+            f"• Base: `{_fmt_int(snap.base_hourly_income)}/hr`\n"
+            f"• Workers: `+{_fmt_int(worker_est)}/hr` (`+{_format_short_percent_from_bp(worker_bp)}`)\n"
+            f"• Managers: `+{_fmt_int(manager_est)}/hr`\n"
+            f"• Events: `+{_fmt_int(event_est)}/hr`"
         ),
         inline=False,
     )
 
-    progression_lines = [
-        f"Bulk x1: {'Unlocked' if snap.bulk_upgrade_1_unlocked else 'Locked'}",
-        f"Bulk x5: {'Unlocked' if snap.bulk_upgrade_5_unlocked else 'Locked'}",
-        f"Bulk x10: {'Unlocked' if snap.bulk_upgrade_10_unlocked else 'Locked'}",
-        f"Legacy equivalent level: {int(snap.total_visible_level)}",
-    ]
-    if snap.can_prestige:
-        progression_lines.append("Prestige available now.")
-    else:
-        progression_lines.append(f"Prestige unlocks at Level {snap.max_level}.")
-    if getattr(snap, 'next_unlock', None):
-        progression_lines.append(str(getattr(snap, 'next_unlock')))
-    e.add_field(name="Progression", value="\n".join(f"• {x}" for x in progression_lines), inline=False)
+    next_action = "Press **Run** to start earning."
+    if snap.running:
+        next_action = "Keep running for payout, or press **Stop** to cash out now."
+    elif snap.worker_slots_used < snap.worker_slots_total:
+        next_action = "Hire workers to improve income/hour."
+    elif snap.manager_slots_used < snap.manager_slots_total:
+        next_action = "Hire a manager to improve control and runtime."
+    elif getattr(snap, "upgrade_cost", None) is not None:
+        next_action = "Upgrade now to improve your base output."
+    e.add_field(name="Actions", value=f"👉 {next_action}", inline=False)
 
-    if snap.notes:
-        e.add_field(name="Active Bonuses", value="\n".join(f"• {x}" for x in snap.notes[:6]), inline=False)
+    if show_details:
+        progression_lines = [
+            f"Workers: `{_slot_text(snap.worker_slots_used, snap.worker_slots_total)}` • {_trim(getattr(snap, 'worker_summary', 'No workers assigned'), 80)}",
+            f"Managers: `{_slot_text(snap.manager_slots_used, snap.manager_slots_total)}` • {_trim(getattr(snap, 'manager_summary', 'No managers assigned'), 80)}",
+            f"Synergy: `+{_format_short_percent_from_bp(int(getattr(snap, 'synergy_bonus_bp', 0) or 0))}` • {_trim(getattr(snap, 'synergy_summary', 'No synergy'), 60)}",
+            f"Bulk x1/x5/x10: `{'Y' if snap.bulk_upgrade_1_unlocked else 'N'}` / `{'Y' if snap.bulk_upgrade_5_unlocked else 'N'}` / `{'Y' if snap.bulk_upgrade_10_unlocked else 'N'}`",
+            f"Legacy Level: `{int(snap.total_visible_level)}`",
+        ]
+        if getattr(snap, "next_unlock", None):
+            progression_lines.append(f"Next Unlock: `{_trim(str(getattr(snap, 'next_unlock')), 80)}`")
+        e.add_field(name="View Details", value="\n".join(f"• {line}" for line in progression_lines), inline=False)
 
     if snap.banner_url:
         e.set_image(url=snap.banner_url)
@@ -2167,7 +2189,7 @@ class ManageBusinessSelect(discord.ui.Select):
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
 
-        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail, show_details=self.show_details)
         view = BusinessDetailView(
             cog=self.cog,
             owner_id=self.owner_id,
@@ -2332,7 +2354,7 @@ class BusinessHubView(BusinessBaseView):
         if detail is None:
             await interaction.followup.send("Select an owned business first.", ephemeral=True)
             return
-        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail, show_details=self.show_details)
         view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=detail.key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
@@ -2350,7 +2372,7 @@ class BusinessHubView(BusinessBaseView):
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
-        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail, show_details=self.show_details)
         embed.add_field(name="Run Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
         view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.selected_business_key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view)
@@ -2791,9 +2813,12 @@ class BusinessDetailView(BusinessBaseView):
         owned: Optional[bool] = None,
         upgrade_enabled: Optional[bool] = None,
         detail: Optional[BusinessManageSnapshot] = None,
+        show_details: bool = False,
     ):
         super().__init__(cog=cog, owner_id=owner_id, guild_id=guild_id)
         self.business_key = business_key
+        self.show_details = bool(show_details)
+        self.status_button.label = "Hide Details" if self.show_details else "View Details"
         is_enabled = bool(upgrade_enabled) if upgrade_enabled is not None else bool(owned)
         self.upgrade_button.disabled = (not is_enabled) or bool(getattr(detail, "upgrade_cost", None) is None)
         self.upgrade_5_button.disabled = (not is_enabled) or (not bool(getattr(detail, "bulk_upgrade_5_unlocked", False))) or bool(getattr(detail, "upgrade_cost", None) is None)
@@ -2831,7 +2856,7 @@ class BusinessDetailView(BusinessBaseView):
             return
         embed = _build_business_detail_embed(user=interaction.user, snap=detail)
         embed.add_field(name="Run Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail, show_details=self.show_details)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="Run Safe", style=discord.ButtonStyle.secondary, emoji="🛡️", row=0)
@@ -2845,9 +2870,9 @@ class BusinessDetailView(BusinessBaseView):
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
-        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail, show_details=self.show_details)
         embed.add_field(name="Run Safe", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail, show_details=self.show_details)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="Run Aggressive", style=discord.ButtonStyle.primary, emoji="🔥", row=0)
@@ -2861,9 +2886,9 @@ class BusinessDetailView(BusinessBaseView):
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
-        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail, show_details=self.show_details)
         embed.add_field(name="Run Aggressive", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail, show_details=self.show_details)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="Stop Business", style=discord.ButtonStyle.danger, emoji="⏹️", row=0)
@@ -2877,12 +2902,12 @@ class BusinessDetailView(BusinessBaseView):
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
-        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail, show_details=self.show_details)
         embed.add_field(name="Stop Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail, show_details=self.show_details)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
-    @discord.ui.button(label="Status", style=discord.ButtonStyle.secondary, emoji="📡", row=0)
+    @discord.ui.button(label="View Details", style=discord.ButtonStyle.secondary, emoji="🧾", row=0)
     async def status_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await _safe_defer(interaction)
@@ -2890,9 +2915,22 @@ class BusinessDetailView(BusinessBaseView):
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
-        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
-        embed.add_field(name="Status", value="Current runtime, bonuses, and staffing shown above.", inline=False)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
+        next_show_details = not self.show_details
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail, show_details=next_show_details)
+        embed.add_field(
+            name="View Details",
+            value="Expanded details shown." if next_show_details else "Showing clean summary view.",
+            inline=False,
+        )
+        view = BusinessDetailView(
+            cog=self.cog,
+            owner_id=self.owner_id,
+            guild_id=self.guild_id,
+            business_key=self.business_key,
+            owned=detail.owned,
+            detail=detail,
+            show_details=next_show_details,
+        )
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="Upgrade Business", style=discord.ButtonStyle.primary, emoji="⬆️", row=1)
@@ -2907,9 +2945,9 @@ class BusinessDetailView(BusinessBaseView):
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
-        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail, show_details=self.show_details)
         embed.add_field(name="Upgrade Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail, show_details=self.show_details)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="Upgrade x5", style=discord.ButtonStyle.primary, emoji="5️⃣", row=1)
@@ -2924,9 +2962,9 @@ class BusinessDetailView(BusinessBaseView):
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
-        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail, show_details=self.show_details)
         embed.add_field(name="Upgrade x5", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail, show_details=self.show_details)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="Upgrade x10", style=discord.ButtonStyle.primary, emoji="🔟", row=1)
@@ -2941,9 +2979,9 @@ class BusinessDetailView(BusinessBaseView):
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
-        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail, show_details=self.show_details)
         embed.add_field(name="Upgrade x10", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail, show_details=self.show_details)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="Prestige Business", style=discord.ButtonStyle.success, emoji="🌟", row=2)
@@ -2958,9 +2996,9 @@ class BusinessDetailView(BusinessBaseView):
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
-        embed = _build_business_detail_embed(user=interaction.user, snap=detail)
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail, show_details=self.show_details)
         embed.add_field(name="Prestige Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
-        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail, show_details=self.show_details)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="View Workers", style=discord.ButtonStyle.secondary, emoji="👷", row=3, disabled=True)
