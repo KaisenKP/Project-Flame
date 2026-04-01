@@ -512,6 +512,8 @@ def build_run_event_plan(*, run_id: int, business_key: str, level: int, worker_c
         elif multiplier_bp > 0:
             multiplier_bp = int(round(multiplier_bp * (1 + min(worker_count * 0.012, 0.15))))
             multiplier_bp = int(round(multiplier_bp * (1 + worker_positive_bp / 10000)))
+        if picked.event_type == EVENT_TYPE_POSITIVE:
+            multiplier_bp = max(multiplier_bp, 5000)
         plan.append({
             "event_key": picked.key,
             "name": picked.name,
