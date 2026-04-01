@@ -145,11 +145,11 @@ ITEMS: dict[str, ItemDef] = {
         effect=EffectDef(
             effect_key="burst_window",
             group_key="burst",
-            payload={"burst_chance_bp": 3000, "burst_payout_bp": 2000},
-            duration_seconds=20 * 60,
+            payload={"burst_chance_bp": 4500, "burst_payout_bp": 4500},
+            duration_seconds=30 * 60,
             stacking=EffectStacking.REFRESH,
         ),
-        description="For 20 minutes, your work has a 30% chance to burst for +20% payout.",
+        description="For 30 minutes, your work has a 45% chance to burst for +45% payout.",
     ),
 
     # 2) Next-work silver bonus (one charge)
@@ -217,11 +217,11 @@ ITEMS: dict[str, ItemDef] = {
         effect=EffectDef(
             effect_key="payout_training",
             group_key="payout",
-            payload={"payout_bonus_bp": 900},
-            duration_seconds=25 * 60,
+            payload={"payout_bonus_bp": 1800},
+            duration_seconds=40 * 60,
             stacking=EffectStacking.REFRESH,
         ),
-        description="Refresher notes that boost work payout by 9% for 25 minutes.",
+        description="Refresher notes that boost work payout by 18% for 40 minutes.",
     ),
 
     # 6) Converted from legacy user XP timed item -> OP mythical combo
@@ -277,11 +277,11 @@ ITEMS: dict[str, ItemDef] = {
         effect=EffectDef(
             effect_key="fail_reduction_charges",
             group_key="success",
-            payload={"fail_reduction_bp": 2000},  # -20%
-            charges=25,
+            payload={"fail_reduction_bp": 3000, "protection_bp": 1000},  # -30%, +10%
+            charges=35,
             stacking=EffectStacking.REPLACE,
         ),
-        description="Secure every move with 20% less fail chance for your next 25 works.",
+        description="Secure every move with 30% less fail chance and 10% failure protection for your next 35 works.",
     ),
 
     # 9) Regen bonus (bp) but longer and stronger than phone_charger concept (distinct name/use)
@@ -347,11 +347,11 @@ ITEMS: dict[str, ItemDef] = {
         effect=EffectDef(
             effect_key="payout_bonus_charges",
             group_key="payout",
-            payload={"payout_bonus_bp": 1500},  # +15%
-            charges=15,
+            payload={"payout_bonus_bp": 2200},  # +22%
+            charges=18,
             stacking=EffectStacking.REPLACE,
         ),
-        description="Premium rates unlocked: +15% payout on your next 15 works.",
+        description="Premium rates unlocked: +22% payout on your next 18 works.",
     ),
 
     # 13) Job XP timed booster higher tier than wrist_wraps
@@ -417,11 +417,11 @@ ITEMS: dict[str, ItemDef] = {
         effect=EffectDef(
             effect_key="legendary_combo_contract",
             group_key="combo",
-            payload={"combo_payout_step_bp": 550, "combo_max_stacks": 6},
+            payload={"combo_payout_step_bp": 850, "combo_max_stacks": 8, "fail_reduction_bp": 1200},
             duration_seconds=45 * 60,
             stacking=EffectStacking.REFRESH,
         ),
-        description="Build momentum for 45 minutes with a stacking combo payout bonus.",
+        description="Build momentum for 45 minutes with an 8-stack combo payout engine and 12% fail reduction.",
     ),
     "chaos_dice": ItemDef(
         key="chaos_dice",
@@ -470,11 +470,11 @@ ITEMS: dict[str, ItemDef] = {
         effect=EffectDef(
             effect_key="epic_overtime_manifest",
             group_key="payout",
-            payload={"payout_bonus_bp": 2200},
-            duration_seconds=40 * 60,
+            payload={"payout_bonus_bp": 3200},
+            duration_seconds=45 * 60,
             stacking=EffectStacking.REFRESH,
         ),
-        description="Lock in +22% payout for a focused 40-minute overtime grind.",
+        description="Lock in +32% payout for a focused 45-minute overtime grind.",
     ),
     "failsafe_boots": ItemDef(
         key="failsafe_boots",
@@ -518,11 +518,11 @@ ITEMS: dict[str, ItemDef] = {
         effect=EffectDef(
             effect_key="epic_headhunter_list",
             group_key="job_xp",
-            payload={"job_xp_bonus_bp": 3600, "payout_bonus_bp": 800},
-            duration_seconds=30 * 60,
+            payload={"job_xp_bonus_bp": 5500, "payout_bonus_bp": 1500},
+            duration_seconds=40 * 60,
             stacking=EffectStacking.REFRESH,
         ),
-        description="Spike growth for 30 minutes with +36% Job XP and +8% payout.",
+        description="Spike growth for 40 minutes with +55% Job XP and +15% payout.",
     ),
     "precision_gloves": ItemDef(
         key="precision_gloves",
@@ -550,11 +550,11 @@ ITEMS: dict[str, ItemDef] = {
         effect=EffectDef(
             effect_key="epic_double_orbit_token",
             group_key="double_payout",
-            payload={"double_payout_chance_bp": 1400, "payout_bonus_bp": 700},
-            charges=25,
+            payload={"double_payout_chance_bp": 2000, "payout_bonus_bp": 1200},
+            charges=30,
             stacking=EffectStacking.REPLACE,
         ),
-        description="For 25 works, gain +14% 2x payout chance and +7% payout.",
+        description="For 30 works, gain +20% 2x payout chance and +12% payout.",
     ),
     "salvage_radar": ItemDef(
         key="salvage_radar",
@@ -721,11 +721,11 @@ ITEMS: dict[str, ItemDef] = {
         effect=EffectDef(
             effect_key="legendary_vaultbreaker_map",
             group_key="rare_find",
-            payload={"rare_find_bp": 3900, "extra_roll_bp": 1100},
-            duration_seconds=45 * 60,
+            payload={"rare_find_bp": 5000, "extra_roll_bp": 1800},
+            duration_seconds=60 * 60,
             stacking=EffectStacking.REPLACE,
         ),
-        description="Treasure route active for 45 minutes: +39% rare-find and +11% extra-roll chance.",
+        description="Treasure route active for 60 minutes: +50% rare-find and +18% extra-roll chance.",
     ),
     "overdrive_exosuit": ItemDef(
         key="overdrive_exosuit",
@@ -758,14 +758,14 @@ ITEMS: dict[str, ItemDef] = {
             effect_key="legendary_fate_arbitrage_engine",
             group_key="arbitrage",
             payload={
-                "payout_bonus_bp": 3600,
-                "fail_reduction_bp": 2600,
-                "double_payout_chance_bp": 1000,
+                "payout_bonus_bp": 4800,
+                "fail_reduction_bp": 3400,
+                "double_payout_chance_bp": 1600,
             },
-            duration_seconds=35 * 60,
+            duration_seconds=45 * 60,
             stacking=EffectStacking.REPLACE,
         ),
-        description="For 35 minutes, rebalance luck with +36% payout, 26% fail reduction, and +10% 2x payout chance.",
+        description="For 45 minutes, rebalance luck with +48% payout, 34% fail reduction, and +16% 2x payout chance.",
     ),
     "crown_of_shifts": ItemDef(
         key="crown_of_shifts",
@@ -798,13 +798,13 @@ ITEMS: dict[str, ItemDef] = {
             effect_key="legendary_jackpot_resonator",
             group_key="double_payout",
             payload={
-                "double_payout_chance_bp": 2300,
-                "extra_roll_bp": 2000,
-                "rare_find_bp": 2400,
+                "double_payout_chance_bp": 3000,
+                "extra_roll_bp": 2600,
+                "rare_find_bp": 3000,
             },
-            charges=16,
+            charges=20,
             stacking=EffectStacking.REPLACE,
         ),
-        description="For 16 works, resonate jackpots with +23% 2x payout, +20% extra-roll, and +24% rare-find chance.",
+        description="For 20 works, resonate jackpots with +30% 2x payout, +26% extra-roll, and +30% rare-find chance.",
     ),
 }
