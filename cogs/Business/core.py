@@ -1718,11 +1718,13 @@ async def start_business_run(
         ownership_id=int(ownership.id),
     )
     manager_rows = await _get_active_manager_rows_for_ownership(session, ownership_id=int(ownership.id))
+    worker_rows = await _get_active_worker_rows_for_ownership(session, ownership_id=int(ownership.id))
     event_plan = build_run_event_plan(
         run_id=random.randint(1, 2_147_483_647),
         business_key=defn.key,
         level=level,
-        worker_count=await _count_active_workers_for_ownership(session, ownership_id=int(ownership.id)),
+        worker_count=len(worker_rows),
+        worker_rows=worker_rows,
         manager_rows=manager_rows,
         started_at=now,
         ends_at=ends_at,

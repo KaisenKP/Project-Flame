@@ -63,7 +63,6 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-import random
 from typing import Awaitable, Callable, Optional, Sequence
 
 from sqlalchemy import select
@@ -88,7 +87,6 @@ log = logging.getLogger(__name__)
 
 DEFAULT_TICK_INTERVAL_SECONDS = 60
 SECONDS_PER_HOUR = 3600
-DEFAULT_EVENT_CHANCE_PER_HOUR = 0.22
 
 
 # =========================================================
@@ -138,62 +136,6 @@ class CompletedRunNotice:
     silver_paid_total: int
     event_outcomes: list[RuntimeEventOutcome]
 
-
-@dataclass(frozen=True, slots=True)
-class BusinessEventDef:
-    key: str
-    title: str
-    description: str
-    multiplier_bp: int
-
-
-_BUSINESS_EVENT_POOLS: dict[str, tuple[BusinessEventDef, ...]] = {
-    "farm": (
-        BusinessEventDef("blight", "Crop Blight", "A plant outbreak damaged part of the fields.", -2000),
-        BusinessEventDef("perfect_rain", "Perfect Rain", "Weather conditions were ideal for growth.", 2000),
-    ),
-    "restaurant": (
-        BusinessEventDef("health_scare", "Health Inspection Delay", "Kitchen operations slowed after a strict inspection.", -1200),
-        BusinessEventDef("viral_review", "Viral Review", "A food post exploded online and bookings surged.", 1800),
-    ),
-    "nightclub": (
-        BusinessEventDef("permit_noise", "Noise Complaint", "A permit warning forced an early close window.", -1700),
-        BusinessEventDef("headline_dj", "Headline DJ Night", "A surprise guest set packed the club.", 2200),
-    ),
-    "factory": (
-        BusinessEventDef("machine_jam", "Machine Jam", "A production line stalled and throughput dipped.", -1500),
-        BusinessEventDef("bulk_order", "Bulk Contract", "A large order boosted line utilization.", 1700),
-    ),
-    "casino": (
-        BusinessEventDef("compliance_audit", "Compliance Audit", "Table access tightened during a compliance review.", -1800),
-        BusinessEventDef("high_roller", "High Roller Rush", "VIP traffic and table volume spiked.", 2100),
-    ),
-    "tech_company": (
-        BusinessEventDef("service_outage", "Service Outage", "A core platform incident reduced billable activity.", -1600),
-        BusinessEventDef("enterprise_deal", "Enterprise Deal", "A major contract landed unexpectedly.", 2000),
-    ),
-    "shipping_company": (
-        BusinessEventDef("port_delay", "Port Delay", "Congestion delayed key routes.", -1500),
-        BusinessEventDef("fuel_efficiency", "Routing Optimization", "Fleet routing improvements lowered burn and waste.", 1600),
-    ),
-    "hotel": (
-        BusinessEventDef("maintenance", "Maintenance Incident", "Unexpected repairs closed premium rooms.", -1400),
-        BusinessEventDef("conference_week", "Conference Week", "A large event drove occupancy above forecast.", 1800),
-    ),
-    "movie_studio": (
-        BusinessEventDef("reshoot", "Reshoot Overrun", "A production reset slowed release commitments.", -1700),
-        BusinessEventDef("box_office_buzz", "Box Office Buzz", "Strong previews drove licensing demand.", 2200),
-    ),
-    "space_mining": (
-        BusinessEventDef("solar_storm", "Solar Storm", "Radiation spikes forced reduced extraction windows.", -2000),
-        BusinessEventDef("rich_vein", "Rich Vein", "A dense ore pocket was discovered on route.", 2400),
-    ),
-}
-
-_DEFAULT_EVENT_POOL: tuple[BusinessEventDef, ...] = (
-    BusinessEventDef("supply_disruption", "Supply Disruption", "A vendor issue reduced output for the hour.", -1200),
-    BusinessEventDef("efficiency_boost", "Efficiency Boost", "Ops worked smoothly with better than expected throughput.", 1200),
-)
 
 
 # =========================================================
@@ -325,19 +267,6 @@ def _spawn_auto_restart_run(session, *, run: BusinessRunRow) -> BusinessRunRow:
     )
     session.add(restarted)
     return restarted
-
-
-def _event_pool_for_business_key(business_key: str) -> tuple[BusinessEventDef, ...]:
-    return _BUSINESS_EVENT_POOLS.get(str(business_key).strip().lower(), _DEFAULT_EVENT_POOL)
-
-
-def _roll_hourly_event(*, business_key: str) -> Optional[BusinessEventDef]:
-    if random.random() >= DEFAULT_EVENT_CHANCE_PER_HOUR:
-        return None
-    pool = _event_pool_for_business_key(business_key)
-    if not pool:
-        return None
-    return random.choice(pool)
 
 
 # =========================================================
