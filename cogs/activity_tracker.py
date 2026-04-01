@@ -58,6 +58,9 @@ class _ChatUserState:
     last_norm_ts: float = 0.0
 
 
+ACHIEVEMENT_CHECK_COOLDOWN_SECONDS = 20.0
+
+
 class ActivityTrackerCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -67,6 +70,8 @@ class ActivityTrackerCog(commands.Cog):
 
         # (guild_id, user_id) -> last_award_unix
         self._vc_last_award: Dict[Tuple[int, int], float] = {}
+        # (guild_id, user_id) -> last_achievement_check_unix
+        self._achievement_last_check: Dict[Tuple[int, int], float] = {}
 
         self.vc_tick.start()
 
@@ -110,6 +115,15 @@ class ActivityTrackerCog(commands.Cog):
         state.last_norm_ts = now
         return True
 
+    def _should_check_achievements(self, *, guild_id: int, user_id: int) -> bool:
+        now = time.time()
+        key = (guild_id, user_id)
+        last = self._achievement_last_check.get(key, 0.0)
+        if now - last < ACHIEVEMENT_CHECK_COOLDOWN_SECONDS:
+            return False
+        self._achievement_last_check[key] = now
+        return True
+
     async def _is_reply_to_jevarius(self, message: discord.Message) -> bool:
         ref = message.reference
         if ref is None or ref.message_id is None:
@@ -119,14 +133,9 @@ class ActivityTrackerCog(commands.Cog):
         if isinstance(resolved, discord.Message):
             return bool(resolved.author and resolved.author.id == JEVARIUS_BOT_ID)
 
-        channel = message.channel
-        if not isinstance(channel, discord.abc.Messageable):
-            return False
-        try:
-            replied = await channel.fetch_message(ref.message_id)
-        except Exception:
-            return False
-        return replied.author.id == JEVARIUS_BOT_ID
+        # Avoid fetching uncached referenced messages from the API in the hot on_message path.
+        # If the message isn't resolved in cache, we skip this optional counter increment.
+        return False
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -208,11 +217,12 @@ class ActivityTrackerCog(commands.Cog):
                     user_id=user_id,
                     amount=CHAT_XP.xp_per_message,
                 )
-                unlocks = await check_and_grant_achievements(
-                    session,
-                    guild_id=guild_id,
-                    user_id=user_id,
-                )
+                if self._should_check_achievements(guild_id=guild_id, user_id=user_id):
+                    unlocks = await check_and_grant_achievements(
+                        session,
+                        guild_id=guild_id,
+                        user_id=user_id,
+                    )
         if unlocks:
             queue_achievement_announcements(
                 bot=self.bot,
@@ -242,11 +252,12 @@ class ActivityTrackerCog(commands.Cog):
                     counter_key="reactions_added",
                     amount=1,
                 )
-                unlocks = await check_and_grant_achievements(
-                    session,
-                    guild_id=guild_id,
-                    user_id=user_id,
-                )
+                if self._should_check_achievements(guild_id=guild_id, user_id=user_id):
+                    unlocks = await check_and_grant_achievements(
+                        session,
+                        guild_id=guild_id,
+                        user_id=user_id,
+                    )
         if unlocks:
             queue_achievement_announcements(
                 bot=self.bot,
