@@ -1,4 +1,4 @@
-# Chatbot Codebase Overview
+# Bartender Codebase Overview
 
 ## Runtime boot flow
 - `main.py` is the process entry point. It configures Rich logging, reads `BOT_TOKEN` from environment, optionally runs `tables.py` migration helper, builds the bot via `build_bot_from_env()`, and starts the Discord client with graceful SIGINT/SIGTERM shutdown handling.
