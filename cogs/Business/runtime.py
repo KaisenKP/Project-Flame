@@ -121,6 +121,8 @@ class RuntimeTickResult:
 class RuntimeEventOutcome:
     event_key: str
     title: str
+    event_type: str
+    rarity: str
     description: str
     multiplier_bp: int
     silver_delta: int
@@ -134,6 +136,7 @@ class CompletedRunNotice:
     business_key: str
     hours_paid_total: int
     silver_paid_total: int
+    summary: dict
     event_outcomes: list[RuntimeEventOutcome]
 
 
@@ -235,6 +238,7 @@ def _build_run_report_json(run: BusinessRunRow, *, completed_at: datetime) -> di
         "hours_paid_total": int(run.hours_paid_total or 0),
         "auto_restart_remaining": int(run.auto_restart_remaining or 0),
         "runtime_events": list((run.report_json or {}).get("runtime_events", [])),
+        "summary_tracking": dict((run.report_json or {}).get("summary_tracking", {})),
     }
 
 
@@ -316,9 +320,19 @@ async def process_single_run(
     if whole_hours_due > 0:
         hourly_profit = max(int(run.hourly_profit_snapshot or 0), 0)
         snapshot = dict(run.snapshot_json or {})
-        plan = list(snapshot.get("event_plan", []))
+        components = dict(snapshot.get("summary_components", {}))
         report = dict(run.report_json or {})
+        tracking = dict(report.get("summary_tracking", {}))
+        hourly_breakdown = list(tracking.get("hourly_breakdown", []))
+        event_log = list(tracking.get("event_log", []))
+        plan = list(snapshot.get("event_plan", []))
         triggered = list(report.get("runtime_events", []))
+        event_income_positive = int(tracking.get("event_income_positive", 0) or 0)
+        event_income_negative = int(tracking.get("event_income_negative", 0) or 0)
+        positive_events = int(tracking.get("positive_events", 0) or 0)
+        negative_events = int(tracking.get("negative_events", 0) or 0)
+        highest_rarity = str(tracking.get("highest_rarity", "none"))
+        rarity_order = {"none": 0, "common": 1, "uncommon": 2, "rare": 3, "epic": 4, "legendary": 5, "mythical": 6}
         for hour_index in range(whole_hours_due):
             hour_start = as_utc(anchor + timedelta(hours=hour_index))
             hour_end = as_utc(hour_start + timedelta(hours=1))
@@ -333,16 +347,54 @@ async def process_single_run(
                     continue
                 if not evt.get("resolved") and evt_start >= hour_start and evt_start < hour_end:
                     evt["resolved"] = True
-                    triggered.append(evt)
+                    estimated_delta = int(round(hourly_profit * (int(evt.get("multiplier_bp", 0) or 0) / 10_000)))
+                    evt_report = {
+                        **evt,
+                        "title": str(evt.get("name", "Business Event")),
+                        "silver_delta": int(estimated_delta + instant_bonus),
+                    }
+                    triggered.append(evt_report)
                     instant_bonus += int(round(hourly_profit * float(evt.get("instant_bonus_hours", 0.0))))
                     pause_minutes = max(pause_minutes, int(evt.get("pause_minutes", 0) or 0))
-                    event_outcomes.append(RuntimeEventOutcome(str(evt.get("event_key","event")), str(evt.get("name","Business Event")), str(evt.get("description","")), int(evt.get("multiplier_bp",0) or 0), int(instant_bonus)))
+                    evt_type = str(evt.get("event_type", "neutral"))
+                    evt_rarity = str(evt.get("rarity", "common"))
+                    if evt_type == "positive":
+                        positive_events += 1
+                    elif evt_type == "negative":
+                        negative_events += 1
+                    if rarity_order.get(evt_rarity, 0) > rarity_order.get(highest_rarity, 0):
+                        highest_rarity = evt_rarity
+                    event_outcomes.append(RuntimeEventOutcome(str(evt.get("event_key","event")), str(evt.get("name","Business Event")), evt_type, evt_rarity, str(evt.get("description","")), int(evt.get("multiplier_bp",0) or 0), int(evt_report["silver_delta"])))
                 if evt_start < hour_end and (evt_end is None or evt_end > hour_start):
                     active_bp += int(evt.get("multiplier_bp", 0) or 0)
             effective_hour_profit = max(int(round(hourly_profit * (10_000 + active_bp) / 10_000)), 0)
             if pause_minutes > 0:
                 effective_hour_profit = int(round(effective_hour_profit * max(0.15, (60 - pause_minutes) / 60)))
-            silver_paid += effective_hour_profit + instant_bonus
+            payout = effective_hour_profit + instant_bonus
+            silver_paid += payout
+            event_delta = payout - hourly_profit
+            if event_delta >= 0:
+                event_income_positive += event_delta
+            else:
+                event_income_negative += abs(event_delta)
+            hourly_breakdown.append(
+                {
+                    "hour_index": int(run.hours_paid_total or 0) + hour_index + 1,
+                    "starts_at_iso": hour_start.isoformat(),
+                    "ends_at_iso": hour_end.isoformat(),
+                    "base_payout": int(hourly_profit),
+                    "event_delta": int(event_delta),
+                    "total_payout": int(payout),
+                }
+            )
+            if event_delta != 0:
+                event_log.append(
+                    {
+                        "hour_index": int(hourly_breakdown[-1]["hour_index"]),
+                        "delta": int(event_delta),
+                        "active_bp": int(active_bp),
+                    }
+                )
         hours_paid = whole_hours_due
         wallet = await _get_wallet(session, guild_id=int(run.guild_id), user_id=int(run.user_id))
         wallet.silver += silver_paid
@@ -353,6 +405,25 @@ async def process_single_run(
         run.hours_paid_total = int(run.hours_paid_total or 0) + hours_paid
         run.last_payout_at = anchor + timedelta(hours=whole_hours_due)
         report["runtime_events"] = triggered
+        per_hour_values = [int(item.get("total_payout", 0)) for item in hourly_breakdown]
+        tracking = {
+            "total_income_generated": int(run.silver_paid_total or 0),
+            "income_per_hour_tick": per_hour_values[-240:],
+            "hourly_breakdown": hourly_breakdown[-240:],
+            "event_log": event_log[-240:],
+            "event_income_positive": int(event_income_positive),
+            "event_income_negative": int(event_income_negative),
+            "worker_contribution": int(components.get("worker_hourly_bonus", 0)) * int(run.hours_paid_total or 0),
+            "manager_contribution": int(components.get("manager_hourly_bonus", 0)) * int(run.hours_paid_total or 0),
+            "base_contribution": int(components.get("base_hourly_income", max(hourly_profit - int(components.get("worker_hourly_bonus", 0)) - int(components.get("manager_hourly_bonus", 0)), 0))) * int(run.hours_paid_total or 0),
+            "events_triggered_total": int(positive_events + negative_events),
+            "positive_events": int(positive_events),
+            "negative_events": int(negative_events),
+            "highest_single_hour_payout": max(per_hour_values) if per_hour_values else 0,
+            "lowest_single_hour_payout": min(per_hour_values) if per_hour_values else 0,
+            "highest_rarity": highest_rarity,
+        }
+        report["summary_tracking"] = tracking
         run.report_json = report
         snapshot["event_plan"] = plan
         run.snapshot_json = snapshot
@@ -421,10 +492,13 @@ async def tick_active_runs_in_session(
                         business_key=str(run.business_key),
                         hours_paid_total=int(run.hours_paid_total or 0),
                         silver_paid_total=int(run.silver_paid_total or 0),
+                        summary=dict(report_json.get("summary_tracking", {})),
                         event_outcomes=[
                             RuntimeEventOutcome(
                                 event_key=str(evt.get("event_key", "event")),
                                 title=str(evt.get("title", "Business Event")),
+                                event_type=str(evt.get("event_type", "neutral")),
+                                rarity=str(evt.get("rarity", "common")),
                                 description=str(evt.get("description", "")),
                                 multiplier_bp=int(evt.get("multiplier_bp", 0)),
                                 silver_delta=int(evt.get("silver_delta", 0)),
