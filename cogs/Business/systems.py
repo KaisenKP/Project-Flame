@@ -12,13 +12,25 @@ RUN_MODE_AGGRESSIVE = "aggressive"
 RUN_MODES = (RUN_MODE_SAFE, RUN_MODE_STANDARD, RUN_MODE_AGGRESSIVE)
 EVENT_TYPE_POSITIVE = "positive"
 EVENT_TYPE_NEGATIVE = "negative"
-EVENT_TYPE_RARE = "rare"
 EVENT_TYPE_NEUTRAL = "neutral"
 
-MAX_EVENT_STACKS = 3
+EVENT_RARITY_COMMON = "common"
+EVENT_RARITY_UNCOMMON = "uncommon"
+EVENT_RARITY_RARE = "rare"
+EVENT_RARITY_EPIC = "epic"
+EVENT_RARITY_LEGENDARY = "legendary"
+EVENT_RARITIES = (
+    EVENT_RARITY_COMMON,
+    EVENT_RARITY_UNCOMMON,
+    EVENT_RARITY_RARE,
+    EVENT_RARITY_EPIC,
+    EVENT_RARITY_LEGENDARY,
+)
+
+MAX_EVENT_STACKS = 2
 EVENT_CHECK_INTERVAL_MINUTES = 60
-EVENT_COOLDOWN_MINUTES = 90
-EVENT_DURATION_CAP_MINUTES = 12 * 60
+EVENT_COOLDOWN_MINUTES = 60
+EVENT_DURATION_CAP_MINUTES = 4 * 60
 WORKER_PERCENT_CAP_BP = 8500
 MANAGER_POSITIVE_CAP_BP = 3000
 MANAGER_NEGATIVE_CAP_BP = 3500
@@ -42,14 +54,14 @@ class EventDef:
     key: str
     name: str
     event_type: str
+    rarity: str
     weight: int
-    duration_minutes: int
+    duration_hours: int
     multiplier_bp: int = 0
-    instant_hours_low: float = 0.0
-    instant_hours_high: float = 0.0
     pause_minutes: int = 0
     description: str = ""
     level_multiplier_bp: int = 0
+    duration_level_bonus_minutes: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,60 +96,131 @@ RUN_MODE_DEFS = {
 }
 
 
-def _event(key: str, name: str, event_type: str, weight: int, duration: int, *, multiplier_bp: int = 0, instant_low: float = 0.0, instant_high: float = 0.0, pause: int = 0, description: str = "", level_bp: int = 0) -> EventDef:
-    return EventDef(key, name, event_type, weight, duration, multiplier_bp, instant_low, instant_high, pause, description, level_bp)
+def _event(
+    key: str,
+    name: str,
+    event_type: str,
+    rarity: str,
+    weight: int,
+    duration_hours: int,
+    *,
+    multiplier_bp: int = 0,
+    pause: int = 0,
+    description: str = "",
+    level_bp: int = 0,
+    duration_level_bonus_minutes: int = 0,
+) -> EventDef:
+    return EventDef(
+        key,
+        name,
+        event_type,
+        rarity,
+        weight,
+        duration_hours,
+        multiplier_bp,
+        pause,
+        description,
+        level_bp,
+        duration_level_bonus_minutes,
+    )
 
 
 BUSINESS_TRAITS: dict[str, BusinessTraitDef] = {
-    "restaurant": BusinessTraitDef("restaurant", "hospitality", 10000, 60, 10500, 13000, 9800, 10600, 10000, "Popularity spikes", "Medium risk", (
-        _event("rush_hour", "Rush Hour", EVENT_TYPE_POSITIVE, 18, 120, multiplier_bp=2200, description="Dinner demand surges and tables flip faster.", level_bp=5),
-        _event("influencer_post", "Influencer Post", EVENT_TYPE_POSITIVE, 10, 180, multiplier_bp=3500, description="A local creator sends a flood of orders."),
-        _event("food_critic", "Food Critic Visit", EVENT_TYPE_POSITIVE, 8, 120, multiplier_bp=2600, instant_low=0.5, instant_high=1.2, description="Great review momentum boosts the current service."),
-        _event("catering_order", "Catering Contract", EVENT_TYPE_RARE, 4, 0, instant_low=2.0, instant_high=3.5, description="A high-margin catering order lands mid-run."),
-        _event("ingredient_shortage", "Ingredient Shortage", EVENT_TYPE_NEGATIVE, 9, 90, multiplier_bp=-1500, description="Short supply forces a weaker menu."),
-        _event("health_inspection", "Health Inspection", EVENT_TYPE_NEGATIVE, 6, 90, multiplier_bp=-1800, pause=20, description="The kitchen slows under inspection pressure."),
-        _event("viral_menu_item", "Viral Menu Item", EVENT_TYPE_RARE, 3, 180, multiplier_bp=4800, description="One dish explodes online and carries the rest of the run."),
+    "restaurant": BusinessTraitDef("restaurant", "hospitality", 10000, 60, 10600, 12000, 9000, 10800, 10000, "Popularity spikes", "Medium risk", (
+        _event("lunch_wave", "Lunch Wave", EVENT_TYPE_POSITIVE, EVENT_RARITY_COMMON, 18, 1, multiplier_bp=4500, description="Office crowds flood your tables."),
+        _event("delivery_app_featured", "Delivery App Feature", EVENT_TYPE_POSITIVE, EVENT_RARITY_UNCOMMON, 14, 2, multiplier_bp=9000, description="Your menu is featured in-app for peak traffic."),
+        _event("food_creator_spotlight", "Food Creator Spotlight", EVENT_TYPE_POSITIVE, EVENT_RARITY_RARE, 8, 2, multiplier_bp=18000, description="A creator post drives explosive paid orders."),
+        _event("citywide_food_frenzy", "Citywide Food Frenzy", EVENT_TYPE_POSITIVE, EVENT_RARITY_EPIC, 4, 1, multiplier_bp=32000, description="A city trend turns your kitchen into a money printer."),
+        _event("celebrity_buyout", "Celebrity Buyout", EVENT_TYPE_POSITIVE, EVENT_RARITY_LEGENDARY, 1, 2, multiplier_bp=80000, description="Private celebrity event buys out service windows."),
+        _event("supply_chain_break", "Supply Chain Break", EVENT_TYPE_NEGATIVE, EVENT_RARITY_UNCOMMON, 9, 1, multiplier_bp=-4000, description="Key ingredients arrive late and premium dishes pause."),
+        _event("inspection_lockdown", "Inspection Lockdown", EVENT_TYPE_NEGATIVE, EVENT_RARITY_RARE, 5, 2, multiplier_bp=-7000, pause=15, description="Compliance checks slow prep and seating flow."),
     )),
-    "farm": BusinessTraitDef("farm", "agriculture", 9400, 86, 8200, 10600, 7600, 9300, 11200, "Reliable harvests", "Low risk", (
-        _event("fertile_harvest", "Fertile Harvest", EVENT_TYPE_POSITIVE, 16, 180, multiplier_bp=2500, description="Exceptional soil conditions lift output."),
-        _event("good_weather", "Good Weather", EVENT_TYPE_POSITIVE, 13, 120, multiplier_bp=1500, description="Clean weather keeps everything on schedule."),
-        _event("livestock_boom", "Livestock Bonus", EVENT_TYPE_POSITIVE, 10, 120, multiplier_bp=1800, instant_low=0.4, instant_high=1.0, description="Animal output spikes unexpectedly."),
-        _event("seasonal_demand", "Seasonal Demand Spike", EVENT_TYPE_RARE, 4, 180, multiplier_bp=3600, description="Regional buyers overpay for fresh stock."),
-        _event("pest_issue", "Pest Infestation", EVENT_TYPE_NEGATIVE, 8, 120, multiplier_bp=-1300, description="Fields need treatment before full output resumes."),
-        _event("drought", "Drought", EVENT_TYPE_NEGATIVE, 6, 150, multiplier_bp=-1800, description="Dry conditions drag production down."),
-        _event("broken_equipment", "Broken Equipment", EVENT_TYPE_NEGATIVE, 5, 90, multiplier_bp=-1400, pause=15, description="One machine goes down for repairs."),
+    "farm": BusinessTraitDef("farm", "agriculture", 9400, 86, 9000, 11000, 7600, 9400, 11200, "Reliable harvests", "Low risk", (
+        _event("ideal_weather", "Ideal Weather", EVENT_TYPE_POSITIVE, EVENT_RARITY_COMMON, 17, 2, multiplier_bp=4000, description="Perfect rain and sunlight maximize crop output."),
+        _event("premium_crop_contract", "Premium Crop Contract", EVENT_TYPE_POSITIVE, EVENT_RARITY_UNCOMMON, 12, 2, multiplier_bp=8000, description="A wholesaler pays premium rates for fresh yield."),
+        _event("mechanized_harvest", "Mechanized Harvest", EVENT_TYPE_POSITIVE, EVENT_RARITY_RARE, 7, 1, multiplier_bp=17000, description="Harvest tooling runs at top speed this shift."),
+        _event("record_harvest", "Record Harvest", EVENT_TYPE_POSITIVE, EVENT_RARITY_EPIC, 3, 2, multiplier_bp=30000, description="Multiple fields hit peak production simultaneously."),
+        _event("genetic_super_yield", "Genetic Super Yield", EVENT_TYPE_POSITIVE, EVENT_RARITY_LEGENDARY, 1, 2, multiplier_bp=70000, description="A breakthrough strain delivers absurdly dense output."),
+        _event("pest_swarm", "Pest Swarm", EVENT_TYPE_NEGATIVE, EVENT_RARITY_UNCOMMON, 8, 1, multiplier_bp=-3500, description="Pests force emergency treatment and lower sellable yield."),
+        _event("water_rights_restriction", "Water Restriction", EVENT_TYPE_NEGATIVE, EVENT_RARITY_RARE, 5, 2, multiplier_bp=-6500, description="Regional restrictions cut irrigation efficiency."),
     )),
-    "nightclub": BusinessTraitDef("nightclub", "entertainment", 10800, 42, 11800, 12400, 11800, 12200, 10000, "Explosive nightlife", "High risk", (
-        _event("vip_party", "VIP Party", EVENT_TYPE_RARE, 5, 0, instant_low=2.0, instant_high=4.0, description="Bottle service prints silver for a few hours at once."),
-        _event("celebrity_visit", "Celebrity Visit", EVENT_TYPE_POSITIVE, 8, 120, multiplier_bp=5000, description="A celebrity sighting sends the line around the block."),
-        _event("viral_dj", "Viral DJ Set", EVENT_TYPE_POSITIVE, 10, 120, multiplier_bp=3200, description="The DJ goes viral and cover sales spike."),
-        _event("premium_bottle_rush", "Premium Bottle Rush", EVENT_TYPE_POSITIVE, 12, 90, multiplier_bp=2400, description="A wealthy crowd leans hard into premium menus."),
-        _event("noise_complaint", "Noise Complaint", EVENT_TYPE_NEGATIVE, 10, 90, multiplier_bp=-1800, description="Security must cool the room and lower the energy."),
-        _event("security_incident", "Security Incident", EVENT_TYPE_NEGATIVE, 7, 60, multiplier_bp=-2200, pause=25, description="A fight disrupts normal service flow."),
-        _event("licensing_inspection", "Police Check", EVENT_TYPE_NEGATIVE, 5, 60, multiplier_bp=-2000, pause=15, description="Compliance checks slow admissions."),
+    "nightclub": BusinessTraitDef("nightclub", "entertainment", 10800, 42, 12200, 12400, 12200, 12600, 10000, "Explosive nightlife", "High risk", (
+        _event("prime_time_stampede", "Prime Time Stampede", EVENT_TYPE_POSITIVE, EVENT_RARITY_COMMON, 15, 1, multiplier_bp=5000, description="Crowd turnout explodes during peak floor time."),
+        _event("vip_bottle_service_rush", "VIP Bottle Rush", EVENT_TYPE_POSITIVE, EVENT_RARITY_UNCOMMON, 12, 2, multiplier_bp=12000, description="High-value tables over-index on bottle service."),
+        _event("headline_dj", "Headline DJ", EVENT_TYPE_POSITIVE, EVENT_RARITY_RARE, 8, 2, multiplier_bp=21000, description="A headliner set spikes entries and premium spend."),
+        _event("global_afterparty", "Global Afterparty", EVENT_TYPE_POSITIVE, EVENT_RARITY_EPIC, 3, 1, multiplier_bp=38000, description="A tour afterparty converts your venue into a hotspot."),
+        _event("ultra_vip_takeover", "Ultra VIP Takeover", EVENT_TYPE_POSITIVE, EVENT_RARITY_LEGENDARY, 1, 2, multiplier_bp=90000, description="Whale guests flood high-margin experiences."),
+        _event("noise_violation", "Noise Violation", EVENT_TYPE_NEGATIVE, EVENT_RARITY_UNCOMMON, 9, 1, multiplier_bp=-4500, description="Restrictions force reduced capacity windows."),
+        _event("security_lockdown", "Security Lockdown", EVENT_TYPE_NEGATIVE, EVENT_RARITY_RARE, 6, 2, multiplier_bp=-8000, pause=20, description="An incident causes prolonged floor disruption."),
     )),
-    "factory": BusinessTraitDef("factory", "industrial", 11200, 58, 9600, 9800, 11200, 9800, 10800, "Heavy base output", "Downtime risk", (
-        _event("machinery_boost", "Machinery Boost", EVENT_TYPE_POSITIVE, 12, 120, multiplier_bp=2400, description="A production line runs above spec."),
-        _event("bulk_contract", "Bulk Contract", EVENT_TYPE_POSITIVE, 9, 180, multiplier_bp=2600, instant_low=0.8, instant_high=1.8, description="A new buyer fills excess capacity immediately."),
-        _event("automation_cycle", "Automation Cycle", EVENT_TYPE_RARE, 4, 180, multiplier_bp=4200, description="Automation tuning squeezes out a huge run."),
-        _event("equipment_jam", "Equipment Jam", EVENT_TYPE_NEGATIVE, 10, 90, multiplier_bp=-1700, pause=25, description="A jam robs the line of key throughput."),
-        _event("maintenance_overrun", "Maintenance Overrun", EVENT_TYPE_NEGATIVE, 8, 120, multiplier_bp=-1900, description="Unexpected servicing eats productive time."),
-        _event("safety_hold", "Safety Hold", EVENT_TYPE_NEGATIVE, 5, 60, multiplier_bp=-1200, pause=20, description="Ops pauses briefly after a safety trigger."),
+    "factory": BusinessTraitDef("factory", "industrial", 11200, 58, 9800, 9800, 11200, 10200, 10800, "Heavy base output", "Downtime risk", (
+        _event("line_efficiency_spike", "Line Efficiency Spike", EVENT_TYPE_POSITIVE, EVENT_RARITY_COMMON, 15, 1, multiplier_bp=4500, description="Assembly timing optimization boosts throughput."),
+        _event("bulk_export_order", "Bulk Export Order", EVENT_TYPE_POSITIVE, EVENT_RARITY_UNCOMMON, 11, 2, multiplier_bp=11000, description="An export customer fills your production queue."),
+        _event("automation_tuning", "Automation Tuning", EVENT_TYPE_POSITIVE, EVENT_RARITY_RARE, 7, 2, multiplier_bp=22000, description="Control systems push precision and volume together."),
+        _event("overnight_hypercycle", "Overnight Hypercycle", EVENT_TYPE_POSITIVE, EVENT_RARITY_EPIC, 3, 1, multiplier_bp=40000, description="Robotic lines sustain peak output across the hour."),
+        _event("defense_contract_surge", "Defense Contract Surge", EVENT_TYPE_POSITIVE, EVENT_RARITY_LEGENDARY, 1, 2, multiplier_bp=85000, description="A classified contract drives extraordinary demand."),
+        _event("machine_jam", "Machine Jam", EVENT_TYPE_NEGATIVE, EVENT_RARITY_UNCOMMON, 9, 1, multiplier_bp=-4200, description="Critical machinery jams and reroutes capacity."),
+        _event("safety_audit_hold", "Safety Audit Hold", EVENT_TYPE_NEGATIVE, EVENT_RARITY_RARE, 5, 2, multiplier_bp=-7600, pause=20, description="Audit actions force reduced line speed."),
     )),
-    "tech_company": BusinessTraitDef("tech_company", "technology", 10400, 38, 12000, 12800, 11000, 13500, 9800, "Explosive growth", "Unstable", (
-        _event("investor_boost", "Investor Boost", EVENT_TYPE_RARE, 4, 180, multiplier_bp=5200, description="Investor hype lifts every revenue stream."),
-        _event("app_launch", "App Launch Success", EVENT_TYPE_POSITIVE, 11, 180, multiplier_bp=3200, instant_low=0.8, instant_high=1.6, description="A product release lands cleanly and drives signups."),
-        _event("viral_trend", "Viral Trend", EVENT_TYPE_POSITIVE, 10, 120, multiplier_bp=3600, description="Word-of-mouth growth bends the run upward."),
-        _event("enterprise_trial", "Enterprise Trial", EVENT_TYPE_POSITIVE, 8, 120, multiplier_bp=2400, description="A B2B trial suddenly converts."),
-        _event("server_outage", "Server Outage", EVENT_TYPE_NEGATIVE, 9, 90, multiplier_bp=-2100, pause=30, description="Downtime slams productivity until systems recover."),
-        _event("feature_regression", "Feature Regression", EVENT_TYPE_NEGATIVE, 7, 90, multiplier_bp=-1600, description="Rollback work steals focus from growth."),
-        _event("compliance_fire", "Compliance Fire Drill", EVENT_TYPE_NEGATIVE, 5, 60, multiplier_bp=-1300, description="Legal review slows rollouts."),
+    "casino": BusinessTraitDef("casino", "gaming", 11400, 34, 12200, 12600, 12400, 13200, 10000, "Whale variance", "Very high risk", (
+        _event("weekend_footfall", "Weekend Footfall", EVENT_TYPE_POSITIVE, EVENT_RARITY_COMMON, 14, 1, multiplier_bp=6000, description="Foot traffic surges across slots and tables."),
+        _event("vip_table_rotation", "VIP Table Rotation", EVENT_TYPE_POSITIVE, EVENT_RARITY_UNCOMMON, 12, 2, multiplier_bp=14000, description="High-stakes tables stay occupied nonstop."),
+        _event("jackpot_streak", "Jackpot Streak", EVENT_TYPE_POSITIVE, EVENT_RARITY_RARE, 7, 1, multiplier_bp=25000, description="Jackpot momentum drives relentless player spend."),
+        _event("international_high_rollers", "International High Rollers", EVENT_TYPE_POSITIVE, EVENT_RARITY_EPIC, 3, 2, multiplier_bp=50000, description="Ultra-wealth guests ignite premium gaming spend."),
+        _event("whale_convention", "Whale Convention", EVENT_TYPE_POSITIVE, EVENT_RARITY_LEGENDARY, 1, 2, multiplier_bp=100000, description="Legendary bettors saturate every top-end table."),
+        _event("compliance_intervention", "Compliance Intervention", EVENT_TYPE_NEGATIVE, EVENT_RARITY_UNCOMMON, 9, 1, multiplier_bp=-5000, description="Enhanced checks reduce active high-stakes seats."),
+        _event("fraud_lockout", "Fraud Lockout", EVENT_TYPE_NEGATIVE, EVENT_RARITY_RARE, 5, 2, multiplier_bp=-9000, pause=20, description="Fraud alarms trigger temporary payout controls."),
+    )),
+    "tech_company": BusinessTraitDef("tech_company", "technology", 10400, 38, 12400, 12800, 11200, 13600, 9800, "Explosive growth", "Unstable", (
+        _event("ad_campaign_breakthrough", "Ad Campaign Breakthrough", EVENT_TYPE_POSITIVE, EVENT_RARITY_COMMON, 16, 1, multiplier_bp=5500, description="Acquisition costs drop while conversion spikes."),
+        _event("enterprise_uplift", "Enterprise Uplift", EVENT_TYPE_POSITIVE, EVENT_RARITY_UNCOMMON, 12, 2, multiplier_bp=13000, description="Enterprise upgrades accelerate monetization."),
+        _event("viral_launch", "Viral Launch", EVENT_TYPE_POSITIVE, EVENT_RARITY_RARE, 8, 1, multiplier_bp=26000, description="A launch wave compounds paid user growth."),
+        _event("platform_blowup", "Platform Blowup", EVENT_TYPE_POSITIVE, EVENT_RARITY_EPIC, 3, 2, multiplier_bp=52000, description="Your platform dominates feeds and app charts."),
+        _event("unicorn_funding_spree", "Unicorn Funding Spree", EVENT_TYPE_POSITIVE, EVENT_RARITY_LEGENDARY, 1, 2, multiplier_bp=95000, description="Huge capital inflow supercharges paid growth loops."),
+        _event("incident_response", "Incident Response", EVENT_TYPE_NEGATIVE, EVENT_RARITY_UNCOMMON, 9, 1, multiplier_bp=-4800, description="Outages and hotfixes stall revenue capture."),
+        _event("regulatory_hold", "Regulatory Hold", EVENT_TYPE_NEGATIVE, EVENT_RARITY_RARE, 5, 2, multiplier_bp=-8500, pause=15, description="Regulatory review pauses key monetization channels."),
+    )),
+    "shipping_company": BusinessTraitDef("shipping_company", "logistics", 11000, 62, 9800, 10000, 9800, 10400, 12200, "Route optimization", "Delay risk", (
+        _event("favorable_currents", "Favorable Currents", EVENT_TYPE_POSITIVE, EVENT_RARITY_COMMON, 15, 1, multiplier_bp=4000, description="Currents and winds reduce transit waste."),
+        _event("priority_manifest", "Priority Manifest", EVENT_TYPE_POSITIVE, EVENT_RARITY_UNCOMMON, 11, 2, multiplier_bp=10000, description="Premium cargo is routed through your fleet."),
+        _event("fleet_overclock", "Fleet Overclock", EVENT_TYPE_POSITIVE, EVENT_RARITY_RARE, 7, 2, multiplier_bp=20000, description="Turnaround speed and load factor spike together."),
+        _event("global_port_window", "Global Port Window", EVENT_TYPE_POSITIVE, EVENT_RARITY_EPIC, 3, 1, multiplier_bp=36000, description="Multiple ports clear congestion simultaneously."),
+        _event("sovereign_contract_corridor", "Sovereign Contract Corridor", EVENT_TYPE_POSITIVE, EVENT_RARITY_LEGENDARY, 1, 2, multiplier_bp=82000, description="Government corridor access unlocks massive routes."),
+        _event("port_backlog", "Port Backlog", EVENT_TYPE_NEGATIVE, EVENT_RARITY_UNCOMMON, 9, 1, multiplier_bp=-3800, description="Container backlog delays your highest-margin lanes."),
+        _event("fuel_shock", "Fuel Shock", EVENT_TYPE_NEGATIVE, EVENT_RARITY_RARE, 5, 2, multiplier_bp=-7200, description="Fuel volatility cuts effective route profitability."),
+    )),
+    "hotel": BusinessTraitDef("hotel", "lodging", 10600, 64, 10200, 10800, 9200, 11000, 10800, "Occupancy waves", "Operational risk", (
+        _event("tourist_surge", "Tourist Surge", EVENT_TYPE_POSITIVE, EVENT_RARITY_COMMON, 16, 1, multiplier_bp=4500, description="Walk-ins and bookings jump above forecast."),
+        _event("conference_block_booking", "Conference Block Booking", EVENT_TYPE_POSITIVE, EVENT_RARITY_UNCOMMON, 12, 2, multiplier_bp=11000, description="Corporate blocks fill premium inventory."),
+        _event("luxury_upsell_run", "Luxury Upsell Run", EVENT_TYPE_POSITIVE, EVENT_RARITY_RARE, 7, 2, multiplier_bp=21000, description="Suites and concierge packages sell out."),
+        _event("global_summit_hosting", "Global Summit Hosting", EVENT_TYPE_POSITIVE, EVENT_RARITY_EPIC, 3, 1, multiplier_bp=39000, description="High-value delegates saturate occupancy."),
+        _event("royal_delegation_stay", "Royal Delegation Stay", EVENT_TYPE_POSITIVE, EVENT_RARITY_LEGENDARY, 1, 2, multiplier_bp=86000, description="Ultra-premium bookings dominate every floor."),
+        _event("staff_shortage", "Staff Shortage", EVENT_TYPE_NEGATIVE, EVENT_RARITY_UNCOMMON, 9, 1, multiplier_bp=-4000, description="Front-desk and service constraints reduce occupancy."),
+        _event("utility_failure", "Utility Failure", EVENT_TYPE_NEGATIVE, EVENT_RARITY_RARE, 5, 2, multiplier_bp=-7600, pause=15, description="Facility systems fail and premium rooms close."),
+    )),
+    "movie_studio": BusinessTraitDef("movie_studio", "media", 11600, 48, 11800, 12000, 11800, 12800, 10400, "Hype cycles", "Blockbuster variance", (
+        _event("trailer_momentum", "Trailer Momentum", EVENT_TYPE_POSITIVE, EVENT_RARITY_COMMON, 14, 1, multiplier_bp=6000, description="Trailer buzz increases licensing value."),
+        _event("streaming_prebuy", "Streaming Pre-Buy", EVENT_TYPE_POSITIVE, EVENT_RARITY_UNCOMMON, 11, 2, multiplier_bp=14000, description="Platform pre-buys lock in strong margins."),
+        _event("festival_breakout", "Festival Breakout", EVENT_TYPE_POSITIVE, EVENT_RARITY_RARE, 7, 1, multiplier_bp=26000, description="Critical acclaim spikes downstream sales."),
+        _event("franchise_resurgence", "Franchise Resurgence", EVENT_TYPE_POSITIVE, EVENT_RARITY_EPIC, 3, 2, multiplier_bp=52000, description="Back-catalog and merch demand surge together."),
+        _event("global_box_office_shockwave", "Global Box Office Shockwave", EVENT_TYPE_POSITIVE, EVENT_RARITY_LEGENDARY, 1, 2, multiplier_bp=98000, description="Massive audience response cascades into every channel."),
+        _event("production_overrun", "Production Overrun", EVENT_TYPE_NEGATIVE, EVENT_RARITY_UNCOMMON, 9, 1, multiplier_bp=-5000, description="Budget and schedule slippage hit margins."),
+        _event("lead_actor_delay", "Lead Actor Delay", EVENT_TYPE_NEGATIVE, EVENT_RARITY_RARE, 5, 2, multiplier_bp=-9000, pause=15, description="A schedule conflict pauses premium scenes."),
+    )),
+    "space_mining": BusinessTraitDef("space_mining", "offworld", 12400, 30, 12600, 13000, 13000, 14000, 9800, "Extreme extraction spikes", "Critical failure risk", (
+        _event("stable_orbit_window", "Stable Orbit Window", EVENT_TYPE_POSITIVE, EVENT_RARITY_COMMON, 13, 1, multiplier_bp=7000, description="Orbital drift stabilizes extraction cadence."),
+        _event("rare_ore_cluster", "Rare Ore Cluster", EVENT_TYPE_POSITIVE, EVENT_RARITY_UNCOMMON, 10, 2, multiplier_bp=16000, description="A profitable mineral band is locked and mined."),
+        _event("deep_core_strike", "Deep Core Strike", EVENT_TYPE_POSITIVE, EVENT_RARITY_RARE, 7, 2, multiplier_bp=30000, description="Deep drilling accesses unusually rich deposits."),
+        _event("prototype_drone_swarm", "Prototype Drone Swarm", EVENT_TYPE_POSITIVE, EVENT_RARITY_EPIC, 3, 1, multiplier_bp=60000, description="Autonomous swarms multiply refined ore throughput."),
+        _event("ancient_megadeposit", "Ancient Megadeposit", EVENT_TYPE_POSITIVE, EVENT_RARITY_LEGENDARY, 1, 2, multiplier_bp=120000, description="A legendary deposit transforms the run economy."),
+        _event("radiation_front", "Radiation Front", EVENT_TYPE_NEGATIVE, EVENT_RARITY_UNCOMMON, 9, 1, multiplier_bp=-5500, description="Radiation shielding protocols reduce operational tempo."),
+        _event("reactor_trip", "Reactor Trip", EVENT_TYPE_NEGATIVE, EVENT_RARITY_RARE, 5, 2, multiplier_bp=-10000, pause=20, description="Power instability forces emergency output limits."),
     )),
 }
 
 DEFAULT_TRAIT = BusinessTraitDef("default", "general", 10000, 60, 10000, 10000, 10000, 10000, 10000, "Balanced", "Medium", (
-    _event("efficiency_boost", "Efficiency Boost", EVENT_TYPE_POSITIVE, 10, 120, multiplier_bp=1600, description="The team finds a cleaner operating rhythm."),
-    _event("supply_delay", "Supply Delay", EVENT_TYPE_NEGATIVE, 10, 90, multiplier_bp=-1500, description="A small delay clips the run."),
+    _event("efficiency_wave", "Efficiency Wave", EVENT_TYPE_POSITIVE, EVENT_RARITY_COMMON, 10, 1, multiplier_bp=3000, description="Operations sync up and output rises."),
+    _event("supplier_drag", "Supplier Drag", EVENT_TYPE_NEGATIVE, EVENT_RARITY_UNCOMMON, 8, 1, multiplier_bp=-3200, description="Suppliers miss SLAs and throughput slips."),
 ))
 
 SYNERGIES = (
@@ -298,18 +381,96 @@ def _weighted_choice(entries: Sequence[tuple[EventDef, float]], *, rng: random.R
     return entries[-1][0] if entries else None
 
 
-def build_run_event_plan(*, run_id: int, business_key: str, level: int, worker_count: int, manager_rows: Sequence, started_at: datetime, ends_at: datetime, run_mode_key: str) -> list[dict]:
+def _rarity_weight_modifier(rarity: str, luck_bp: int) -> float:
+    rarity = str(rarity or EVENT_RARITY_COMMON).lower()
+    luck_scale = 1 + (max(int(luck_bp), 0) / 10000)
+    if rarity == EVENT_RARITY_COMMON:
+        return max(0.45, 1 - min(luck_scale * 0.18, 0.55))
+    if rarity == EVENT_RARITY_UNCOMMON:
+        return max(0.55, 1 - min(luck_scale * 0.09, 0.35))
+    if rarity == EVENT_RARITY_RARE:
+        return 1 + min(luck_scale * 0.16, 0.50)
+    if rarity == EVENT_RARITY_EPIC:
+        return 1 + min(luck_scale * 0.30, 0.95)
+    if rarity == EVENT_RARITY_LEGENDARY:
+        return 1 + min(luck_scale * 0.45, 1.35)
+    return 1.0
+
+
+def worker_event_frequency_bonus_bp(rows: Sequence) -> int:
+    total = 0
+    for row in rows:
+        worker_type = str(getattr(row, "worker_type", "efficient")).lower()
+        worker_bp = int(getattr(row, "percent_profit_bonus_bp", 0) or 0)
+        if worker_type == "fast":
+            total += 250 + min(worker_bp // 8, 500)
+        elif worker_type == "kind":
+            total += 150 + min(worker_bp // 10, 400)
+    return min(total, 2600)
+
+
+def worker_event_duration_bonus_bp(rows: Sequence) -> int:
+    total = 0
+    for row in rows:
+        worker_type = str(getattr(row, "worker_type", "efficient")).lower()
+        worker_bp = int(getattr(row, "percent_profit_bonus_bp", 0) or 0)
+        if worker_type == "kind":
+            total += 220 + min(worker_bp // 7, 750)
+    return min(total, 3200)
+
+
+def worker_positive_event_power_bonus_bp(rows: Sequence) -> int:
+    total = 0
+    for row in rows:
+        worker_type = str(getattr(row, "worker_type", "efficient")).lower()
+        worker_bp = int(getattr(row, "percent_profit_bonus_bp", 0) or 0)
+        if worker_type == "efficient":
+            total += 260 + min(worker_bp // 7, 850)
+        elif worker_type == "fast":
+            total += 120 + min(worker_bp // 12, 300)
+    return min(total, 3500)
+
+
+def worker_negative_event_mitigation_bp(rows: Sequence) -> int:
+    total = 0
+    for row in rows:
+        worker_type = str(getattr(row, "worker_type", "efficient")).lower()
+        worker_bp = int(getattr(row, "percent_profit_bonus_bp", 0) or 0)
+        if worker_type == "kind":
+            total += 300 + min(worker_bp // 6, 900)
+        elif worker_type == "efficient":
+            total += 120 + min(worker_bp // 14, 250)
+    return min(total, 3800)
+
+
+def worker_rarity_luck_bp(rows: Sequence) -> int:
+    total = 0
+    rarity_points = {"common": 40, "uncommon": 70, "rare": 120, "epic": 190, "mythic": 260, "mythical": 260}
+    for row in rows:
+        rarity = str(getattr(row, "rarity", "common")).lower()
+        total += rarity_points.get(rarity, 50)
+    return min(total, 2200)
+
+
+def build_run_event_plan(*, run_id: int, business_key: str, level: int, worker_count: int, worker_rows: Sequence | None, manager_rows: Sequence, started_at: datetime, ends_at: datetime, run_mode_key: str) -> list[dict]:
     trait = get_business_trait(business_key)
     run_mode = get_run_mode_for_level(level, run_mode_key)
     rng = random.Random(f"business-run:{run_id}:{business_key}:{int(as_utc(started_at).timestamp())}")
+    worker_rows = list(worker_rows or [])
     checkpoints = resolve_event_checkpoints(started_at=started_at, ends_at=ends_at)
     cooldown_until: Optional[datetime] = None
     active_events = 0
     plan: list[dict] = []
     base_chance = 0.17 * (trait.event_frequency_bp / 10000) * (1 + run_mode.frequency_bp / 10000)
     base_chance *= 1 + min(worker_count * 0.015, 0.12)
+    base_chance *= 1 + worker_event_frequency_bonus_bp(worker_rows) / 10000
     base_chance *= 1 + manager_positive_bonus_bp(manager_rows) / 40000
     base_chance = max(0.05, min(base_chance, 0.42))
+    worker_positive_bp = worker_positive_event_power_bonus_bp(worker_rows)
+    worker_negative_mitigation_bp = worker_negative_event_mitigation_bp(worker_rows)
+    worker_duration_bp = worker_event_duration_bonus_bp(worker_rows)
+    worker_luck_bp = worker_rarity_luck_bp(worker_rows)
+    rarity_mix_bonus = max(level - 25, 0) * 12
 
     for checkpoint in checkpoints:
         if cooldown_until and checkpoint < cooldown_until:
@@ -321,6 +482,7 @@ def build_run_event_plan(*, run_id: int, business_key: str, level: int, worker_c
         weighted: list[tuple[EventDef, float]] = []
         for event in trait.event_pool:
             weight = float(event.weight)
+            weight *= _rarity_weight_modifier(event.rarity, worker_luck_bp + rarity_mix_bonus)
             if event.event_type == EVENT_TYPE_POSITIVE:
                 weight *= trait.positive_event_weight_bp / 10000
                 weight *= 1 + run_mode.positive_event_bp / 10000
@@ -328,40 +490,39 @@ def build_run_event_plan(*, run_id: int, business_key: str, level: int, worker_c
             elif event.event_type == EVENT_TYPE_NEGATIVE:
                 weight *= trait.negative_event_weight_bp / 10000
                 weight *= 1 + run_mode.negative_event_bp / 10000
-                weight *= 1 - manager_negative_reduction_bp(manager_rows) / 12000
-            elif event.event_type == EVENT_TYPE_RARE:
-                weight *= trait.rare_event_weight_bp / 10000
-                weight *= 1 + max(level - 1, 0) * 0.002
+                weight *= 1 - min(
+                    (manager_negative_reduction_bp(manager_rows) + worker_negative_mitigation_bp) / 11000,
+                    0.75,
+                )
             weighted.append((event, max(weight, 0.1)))
         picked = _weighted_choice(weighted, rng=rng)
         if picked is None:
             continue
-        duration = min(max(int(picked.duration_minutes), 0), EVENT_DURATION_CAP_MINUTES)
+        duration_minutes = int(picked.duration_hours) * 60
+        duration_minutes += max(0, int(level - 1)) * int(picked.duration_level_bonus_minutes)
+        duration_minutes = int(round(duration_minutes * (1 + worker_duration_bp / 10000)))
+        duration = min(max(duration_minutes, 60), EVENT_DURATION_CAP_MINUTES)
         pause = max(int(picked.pause_minutes), 0)
         if pause > 0:
             pause = max(5, int(round(pause * (1 - manager_downtime_reduction_bp(manager_rows) / 10000))))
         multiplier_bp = int(round(picked.multiplier_bp + (max(level - 1, 0) * picked.level_multiplier_bp)))
         if multiplier_bp < 0:
-            multiplier_bp = int(round(multiplier_bp * (1 - manager_negative_reduction_bp(manager_rows) / 10000)))
+            mitigation = manager_negative_reduction_bp(manager_rows) + worker_negative_mitigation_bp
+            multiplier_bp = int(round(multiplier_bp * (1 - mitigation / 10000)))
         elif multiplier_bp > 0:
             multiplier_bp = int(round(multiplier_bp * (1 + min(worker_count * 0.012, 0.15))))
-        instant_low = picked.instant_hours_low
-        instant_high = picked.instant_hours_high
-        if instant_high > 0:
-            instant_hours = rng.uniform(instant_low, instant_high)
-            instant_hours *= 1 + manager_instant_reward_bonus_bp(manager_rows) / 10000
-        else:
-            instant_hours = 0.0
+            multiplier_bp = int(round(multiplier_bp * (1 + worker_positive_bp / 10000)))
         plan.append({
             "event_key": picked.key,
             "name": picked.name,
             "event_type": picked.event_type,
+            "rarity": picked.rarity,
             "description": picked.description,
             "starts_at_iso": checkpoint.isoformat(),
             "ends_at_iso": (checkpoint + timedelta(minutes=duration)).isoformat() if duration > 0 else None,
             "duration_minutes": duration,
             "multiplier_bp": multiplier_bp,
-            "instant_bonus_hours": round(instant_hours, 3),
+            "instant_bonus_hours": 0.0,
             "pause_minutes": pause,
         })
         cooldown_until = checkpoint + timedelta(minutes=EVENT_COOLDOWN_MINUTES)
@@ -383,5 +544,7 @@ def summarize_active_events(event_plan: Sequence[dict], *, now: datetime) -> tup
             continue
         total_bp += int(evt.get("multiplier_bp", 0) or 0)
         rem = format_duration_minutes(int((ends - now).total_seconds() // 60)) if ends is not None else "instant"
-        lines.append(f"{evt.get('name', 'Event')} {('+' if int(evt.get('multiplier_bp',0)) >= 0 else '')}{int(evt.get('multiplier_bp',0))/100:.0f}% • {rem}")
+        rarity = str(evt.get("rarity", "")).strip().title()
+        rarity_tag = f"{rarity} • " if rarity else ""
+        lines.append(f"{rarity_tag}{evt.get('name', 'Event')} {('+' if int(evt.get('multiplier_bp',0)) >= 0 else '')}{int(evt.get('multiplier_bp',0))/100:.0f}% • {rem}")
     return total_bp, lines[:3]
