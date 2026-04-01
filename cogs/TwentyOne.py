@@ -17,7 +17,7 @@ from services.users import ensure_user_rows
 
 
 # =========================
-# Static Assets (Chatbox)
+# Static Assets (Licka Store)
 # =========================
 
 START_BANNER_URL = "https://cdn.discordapp.com/attachments/1464802631846330398/1465169440793428163/111388bb-2e71-4463-919f-c7e155f172df.png?ex=697820e0&is=6976cf60&hm=cb4bc80b60d2ea4e063f712ad36e8a3f4095a56258ef2a96c7b962bc9eac807f&"
@@ -371,7 +371,7 @@ def _winner_embed(game: TwentyOneGame, guild: discord.Guild, winner_id: int) -> 
     )
     embed.add_field(name="💰 Winnings", value=f"**{_fmt_int(game.pot)} Silver**", inline=False)
     embed.set_image(url=WINNER_IMAGE_URL)
-    embed.set_footer(text="Twenty One • Chatbox")
+    embed.set_footer(text="Twenty One • Licka Store")
     return embed
 
 

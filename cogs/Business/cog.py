@@ -1164,7 +1164,7 @@ def _format_spotlight_line(label: str, value: Optional[str]) -> Optional[str]:
 
 def _base_embed(*, title: str, description: str = "", color: discord.Color = EMBED_COLOR) -> discord.Embed:
     e = discord.Embed(title=title, description=description or "", color=color)
-    e.set_footer(text="Business System • Chatbox Economy")
+    e.set_footer(text="Business System • Licka Store Economy")
     return e
 
 
