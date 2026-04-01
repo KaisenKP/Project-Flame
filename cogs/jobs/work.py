@@ -522,11 +522,12 @@ def _build_work_embed(
         if payload.tool_bonus:
             income_lines.append(f"• Tool Bonus: **+{fmt_int(payload.tool_bonus)}**")
         if payload.proc_bonus:
-            income_lines.append(f"• Proc Bonus: **+{fmt_int(payload.proc_bonus)}**")
+            income_lines.append(f"• Triggered Bonus (tool/item procs): **+{fmt_int(payload.proc_bonus)}**")
         if payload.event_bonus:
             income_lines.append(f"• Event Bonus: **+{fmt_int(payload.event_bonus)}**")
         if payload.other_bonus:
             income_lines.append(f"• Other Bonus: **+{fmt_int(payload.other_bonus)}**")
+        income_lines.append("• Triggered Bonus = random extra payout from proc effects that activated this shift.")
         income_lines.append(f"• Final Payout: **{fmt_int(payload.payout)}**")
         embed.add_field(name="Income Breakdown", value="\n".join(income_lines), inline=False)
 
@@ -1341,11 +1342,11 @@ class _WorkUpgradeView(discord.ui.View):
     def _sync_expand_button(self) -> None:
         for child in self.children:
             if isinstance(child, discord.ui.Button) and child.custom_id == "work:expand_toggle":
-                child.label = "Collapse" if self.expanded else "Expand"
+                child.label = "Hide Details" if self.expanded else "View Details"
                 child.emoji = "🔽" if self.expanded else "🔎"
                 break
 
-    @discord.ui.button(label="Expand", style=discord.ButtonStyle.secondary, emoji="🔎", custom_id="work:expand_toggle")
+    @discord.ui.button(label="View Details", style=discord.ButtonStyle.secondary, emoji="🔎", custom_id="work:expand_toggle")
     async def toggle_expand(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.guild is None or interaction.guild.id != self.guild_id:
             await interaction.response.send_message("This button only works in the original server.", ephemeral=True)
