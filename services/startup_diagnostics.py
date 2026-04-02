@@ -27,6 +27,7 @@ PHASE_RUNTIME = "runtime"
 
 EMBED_FIELD_CHAR_LIMIT = 1024
 DEFAULT_FALLBACK_CHANNEL_ID = 1460862634143256803
+DISCORD_MESSAGE_LIMIT = 2000
 
 
 @dataclass(slots=True)
@@ -119,6 +120,8 @@ class StartupDiagnostics:
         self._bot_ref: discord.Client | None = None
         self._report_sent = False
         self._runtime_report_task: asyncio.Task[Any] | None = None
+        self._last_runtime_delivery_at: float = 0.0
+        self._runtime_delivery_cooldown_seconds: float = 30.0
         self._loop_handler_installed = False
         self._sys_hook_installed = False
         self._old_sys_hook = sys.excepthook
@@ -264,7 +267,35 @@ class StartupDiagnostics:
         )
         self.entries.append(entry)
         self._log_entry(entry)
+        self._schedule_automatic_runtime_delivery(entry)
         return entry
+
+    def _schedule_automatic_runtime_delivery(self, entry: DiagnosticEntry) -> None:
+        if entry.phase != PHASE_RUNTIME or entry.status not in {STATUS_FAIL, STATUS_WARN}:
+            return
+        if self._bot_ref is None or self._runtime_report_task is not None:
+            return
+        now = time.monotonic()
+        if now - self._last_runtime_delivery_at < self._runtime_delivery_cooldown_seconds:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._last_runtime_delivery_at = now
+        self._runtime_report_task = loop.create_task(
+            self.deliver_report(self._bot_ref, reason="runtime", force_channel=True),
+            name="diagnostics.runtime.delivery",
+        )
+
+        def _done(task: asyncio.Task[Any]) -> None:
+            self._runtime_report_task = None
+            try:
+                task.result()
+            except Exception:
+                self.logger.exception("Automatic runtime diagnostics delivery crashed")
+
+        self._runtime_report_task.add_done_callback(_done)
 
     def capture_exception(
         self,
@@ -709,6 +740,163 @@ class StartupDiagnostics:
             return True
         return isinstance(user, discord.Member) and user.guild_permissions.administrator
 
+    def _entry_to_copy_text(self, entry: DiagnosticEntry) -> str:
+        lines = [
+            f"timestamp: {entry.timestamp.isoformat()}",
+            f"phase: {entry.phase}",
+            f"status: {entry.status}",
+            f"subsystem: {entry.subsystem}",
+            f"source: {entry.source}",
+            f"exception: {entry.exception_type or 'n/a'}",
+            f"message: {entry.exception_message or entry.summary}",
+            f"summary: {entry.summary}",
+            f"fatal: {entry.fatal}",
+            f"entry_id: {entry.id}",
+        ]
+        if entry.command_name:
+            lines.append(f"command: {entry.command_name}")
+        if entry.task_name:
+            lines.append(f"task: {entry.task_name}")
+        if entry.channel_id is not None:
+            lines.append(f"channel_id: {entry.channel_id}")
+        if entry.guild_id is not None:
+            lines.append(f"guild_id: {entry.guild_id}")
+        return "\n".join(lines)
+
+    def _code_block_chunks(self, content: str, *, lang: str = "text") -> list[str]:
+        safe = content or "No details available."
+        fence = f"```{lang}\n"
+        suffix = "\n```"
+        max_payload = DISCORD_MESSAGE_LIMIT - len(fence) - len(suffix)
+        chunks: list[str] = []
+        for index in range(0, len(safe), max_payload):
+            chunk = safe[index:index + max_payload]
+            chunks.append(f"{fence}{chunk}\n```")
+        return chunks or [f"{fence}No details available.\n```"]
+
+    def render_entries_text_blocks(self, *, phase: str | None = None, status: str | None = None) -> list[str]:
+        entries = self._entries(phase=phase, status=status)
+        blocks: list[str] = []
+        for entry in entries:
+            blocks.extend(self._code_block_chunks(self._entry_to_copy_text(entry), lang="text"))
+        return blocks
+
+    def render_traceback_text_blocks(self, *, phase: str | None = None) -> list[str]:
+        entries = [e for e in self._entries(phase=phase) if e.traceback_text]
+        blocks: list[str] = []
+        for entry in entries:
+            header = f"entry_id: {entry.id}\nsource: {entry.subsystem}/{entry.source}\ntraceback:"
+            blocks.extend(self._code_block_chunks(f"{header}\n{entry.traceback_text.rstrip()}", lang="py"))
+        return blocks
+
+    async def _send_text_blocks(self, destination: discord.abc.Messageable, blocks: list[str]) -> None:
+        for block in blocks:
+            await destination.send(block)
+
+    async def send_report_to_owner_dm(
+        self,
+        bot: discord.Client,
+        *,
+        summary: discord.Embed,
+        view: discord.ui.View,
+        report_path: Path | None,
+    ) -> tuple[bool, str | None]:
+        owner = await self.resolve_owner_user(bot)
+        if owner is None:
+            return False, "owner_not_resolved"
+        try:
+            files = [discord.File(report_path, filename="diagnostics_report.txt")] if report_path else []
+            await owner.send(embed=summary, view=view, files=files)
+            await self._send_text_blocks(owner, self.render_entries_text_blocks(status=STATUS_FAIL)[-15:])
+            await self._send_text_blocks(owner, self.render_traceback_text_blocks()[-8:])
+            return True, None
+        except discord.Forbidden as exc:
+            return False, f"owner_dm_forbidden: {exc}"
+        except discord.HTTPException as exc:
+            return False, f"owner_dm_http_exception: {exc}"
+        except Exception as exc:
+            return False, f"owner_dm_failed: {exc}"
+
+    async def send_report_to_channel(
+        self,
+        bot: discord.Client,
+        *,
+        summary: discord.Embed,
+        view: discord.ui.View,
+        report_path: Path | None,
+    ) -> tuple[bool, str]:
+        channel_id = self.fallback_channel_id
+        self.logger.info("Diagnostics channel delivery step: bot.get_channel(%s)", channel_id)
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            self.logger.warning("Diagnostics channel delivery step failed: get_channel returned None")
+            try:
+                self.logger.info("Diagnostics channel delivery step: bot.fetch_channel(%s)", channel_id)
+                channel = await bot.fetch_channel(channel_id)
+            except discord.NotFound as exc:
+                return False, f"fetch_channel_not_found: {exc}"
+            except discord.Forbidden as exc:
+                return False, f"fetch_channel_forbidden_missing_guild_or_permissions: {exc}"
+            except discord.HTTPException as exc:
+                return False, f"fetch_channel_http_exception: {exc}"
+            except Exception as exc:
+                return False, f"fetch_channel_failed: {exc}"
+
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return False, f"wrong_channel_type: {type(channel).__name__}"
+
+        permissions = channel.permissions_for(channel.guild.me) if isinstance(channel, discord.TextChannel) and channel.guild else None
+        if permissions is not None and not permissions.send_messages:
+            return False, "missing_permissions: send_messages"
+
+        try:
+            files = [discord.File(report_path, filename="diagnostics_report.txt")] if report_path else []
+            await channel.send(embed=summary, view=view, files=files)
+            await self._send_text_blocks(channel, self.render_entries_text_blocks(status=STATUS_FAIL)[-20:])
+            await self._send_text_blocks(channel, self.render_traceback_text_blocks()[-10:])
+            return True, "channel_send_success"
+        except discord.NotFound as exc:
+            return False, f"channel_send_not_found: {exc}"
+        except discord.Forbidden as exc:
+            return False, f"channel_send_forbidden_missing_permissions: {exc}"
+        except discord.HTTPException as exc:
+            return False, f"channel_send_http_exception: {exc}"
+        except Exception as exc:
+            return False, f"channel_send_failed: {exc}"
+
+    async def deliver_report(
+        self,
+        bot: discord.Client,
+        *,
+        reason: str,
+        force_channel: bool = False,
+    ) -> None:
+        summary = self.render_summary_embed(bot)
+        view = DiagnosticsReportView(self)
+        report_path = self.write_local_report_file(bot)
+        counts = self.counts()
+        attachment_path = report_path if (counts["errors"] > 0 or counts["warnings"] > 0) else None
+
+        send_errors: list[str] = []
+        dm_ok = False
+        if not force_channel:
+            dm_ok, dm_error = await self.send_report_to_owner_dm(bot, summary=summary, view=view, report_path=attachment_path)
+            if dm_error:
+                send_errors.append(dm_error)
+
+        channel_ok, channel_status = await self.send_report_to_channel(bot, summary=summary, view=view, report_path=attachment_path)
+        if not channel_ok:
+            send_errors.append(channel_status)
+        self.logger.info(
+            "Diagnostics delivery result reason=%s dm_ok=%s channel_ok=%s",
+            reason,
+            dm_ok,
+            channel_ok,
+        )
+        if send_errors and not channel_ok:
+            self.logger.error("Diagnostics delivery failure reason=%s details=%s", reason, " | ".join(send_errors))
+            self.write_local_report_file(bot)
+
     async def send_report(self, bot: discord.Client, *, include_success_message: bool = True) -> None:
         if self._report_sent:
             return
@@ -716,47 +904,11 @@ class StartupDiagnostics:
         self._bot_ref = bot
         self.mark_startup_complete()
 
-        report_path = self.write_local_report_file(bot)
         counts = self.counts()
         if counts["errors"] == 0 and counts["warnings"] == 0 and include_success_message:
             pass
 
-        if not self.settings.discord_notifications_enabled:
-            self.logger.info("Discord diagnostics notifications disabled; local logging remains enabled.")
-            return
-
-        summary = self.render_summary_embed(bot)
-        view = DiagnosticsReportView(self)
-        attachments: list[discord.File] = []
-        if counts["errors"] > 0 or counts["warnings"] > 0:
-            attachments.append(discord.File(report_path, filename="diagnostics_report.txt"))
-
-        send_errors: list[str] = []
-        owner = await self.resolve_owner_user(bot)
-        if owner is not None:
-            try:
-                await owner.send(embed=summary, view=view, files=attachments)
-                return
-            except Exception as exc:
-                send_errors.append(f"owner_dm_failed: {exc}")
-
-        channel = bot.get_channel(self.fallback_channel_id)
-        if channel is None:
-            try:
-                channel = await bot.fetch_channel(self.fallback_channel_id)
-            except Exception as exc:
-                send_errors.append(f"fetch_fallback_channel_failed: {exc}")
-                channel = None
-
-        if isinstance(channel, (discord.TextChannel, discord.Thread, discord.VoiceChannel)):
-            try:
-                await channel.send(embed=summary, view=view, files=attachments)
-                return
-            except Exception as exc:
-                send_errors.append(f"fallback_channel_send_failed: {exc}")
-
-        if send_errors:
-            self.logger.error("All diagnostics delivery paths failed: %s", " | ".join(send_errors))
+        await self.deliver_report(bot, reason="startup")
 
 
 class DiagnosticsReportView(discord.ui.View):
@@ -770,13 +922,13 @@ class DiagnosticsReportView(discord.ui.View):
             if isinstance(child, discord.ui.Button) and child.custom_id == "diag:toggle":
                 child.label = f"Diagnostics: {'ON' if self.diagnostics.settings.discord_notifications_enabled else 'OFF'}"
 
-    async def _send_embeds(self, interaction: discord.Interaction, embeds: list[discord.Embed]) -> None:
-        if not embeds:
+    async def _send_text_blocks(self, interaction: discord.Interaction, blocks: list[str]) -> None:
+        if not blocks:
             await interaction.response.send_message("No data available.", ephemeral=True)
             return
-        await interaction.response.send_message(embed=embeds[0], ephemeral=True)
-        for embed in embeds[1:]:
-            await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.response.send_message(blocks[0], ephemeral=True)
+        for block in blocks[1:]:
+            await interaction.followup.send(block, ephemeral=True)
 
     @discord.ui.button(label="Summary", style=discord.ButtonStyle.primary, custom_id="diag:summary")
     async def summary_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -784,29 +936,35 @@ class DiagnosticsReportView(discord.ui.View):
 
     @discord.ui.button(label="Startup Errors", style=discord.ButtonStyle.danger, custom_id="diag:startup_errors")
     async def startup_errors_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._send_embeds(interaction, self.diagnostics.render_entries_embeds(phase=PHASE_STARTUP, status=STATUS_FAIL, title="Startup Errors"))
+        await self._send_text_blocks(interaction, self.diagnostics.render_entries_text_blocks(phase=PHASE_STARTUP, status=STATUS_FAIL))
 
     @discord.ui.button(label="Runtime Errors", style=discord.ButtonStyle.danger, custom_id="diag:runtime_errors")
     async def runtime_errors_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._send_embeds(interaction, self.diagnostics.render_entries_embeds(phase=PHASE_RUNTIME, status=STATUS_FAIL, title="Runtime Errors"))
+        await self._send_text_blocks(interaction, self.diagnostics.render_entries_text_blocks(phase=PHASE_RUNTIME, status=STATUS_FAIL))
 
     @discord.ui.button(label="Warnings", style=discord.ButtonStyle.secondary, custom_id="diag:warnings")
     async def warnings_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._send_embeds(interaction, self.diagnostics.render_entries_embeds(status=STATUS_WARN, title="Warnings"))
+        await self._send_text_blocks(interaction, self.diagnostics.render_entries_text_blocks(status=STATUS_WARN))
 
     @discord.ui.button(label="Tracebacks", style=discord.ButtonStyle.secondary, custom_id="diag:tracebacks")
     async def tracebacks_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._send_embeds(interaction, self.diagnostics.render_traceback_embeds())
+        await self._send_text_blocks(interaction, self.diagnostics.render_traceback_text_blocks())
 
     @discord.ui.button(label="Subsystems", style=discord.ButtonStyle.secondary, custom_id="diag:subsystems")
     async def subsystems_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._send_embeds(interaction, self.diagnostics.render_subsystems_embeds())
+        buckets: dict[str, int] = {}
+        for entry in self.diagnostics.entries:
+            buckets[entry.subsystem] = buckets.get(entry.subsystem, 0) + 1
+        lines = [f"{name}: {count}" for name, count in sorted(buckets.items(), key=lambda kv: kv[1], reverse=True)]
+        blocks = self.diagnostics._code_block_chunks("\n".join(lines) if lines else "No data available.")
+        await self._send_text_blocks(interaction, blocks)
 
     @discord.ui.button(label="Recent Errors", style=discord.ButtonStyle.secondary, custom_id="diag:recent")
     async def recent_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         recent = self.diagnostics.entries[-25:]
-        lines = [self.diagnostics._entry_line(e) for e in reversed(recent)]
-        await self._send_embeds(interaction, self.diagnostics._chunk("Recent Errors", lines, discord.Color.orange()))
+        lines = [self.diagnostics._entry_to_copy_text(e) for e in reversed(recent)]
+        blocks = self.diagnostics._code_block_chunks("\n\n".join(lines) if lines else "No data available.")
+        await self._send_text_blocks(interaction, blocks)
 
     @discord.ui.button(label="Diagnostics: ON", style=discord.ButtonStyle.success, custom_id="diag:toggle")
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
