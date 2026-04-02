@@ -114,7 +114,7 @@ class BankRobberyCog(commands.Cog):
         await finalize_lobby(session, lobby=lobby)
         return outcome
 
-    async def _send_panel(self, interaction: discord.Interaction, *, embed: discord.Embed, ephemeral: bool = True):
+    async def _send_panel(self, interaction: discord.Interaction, *, embed: discord.Embed, ephemeral: bool = False):
         view = HeistHubView(self, interaction.user.id)
         validate_view_component_rows(view, context="heist hub panel")
         if interaction.response.is_done():
@@ -163,11 +163,11 @@ class BankRobberyCog(commands.Cog):
         await self._show_hub(interaction)
 
     async def handle_refresh_hub(self, interaction: discord.Interaction, *, owner_id: int):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         await self._show_hub(interaction)
 
     async def handle_lobby_status(self, interaction: discord.Interaction, *, owner_id: int):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         try:
             await self._show_lobby(interaction)
         except Exception as e:
@@ -177,7 +177,7 @@ class BankRobberyCog(commands.Cog):
         if interaction.guild is None:
             await self._send_error(interaction, "Server only.")
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(thinking=True)
         approach = BankApproach.SILENT
         try:
             async with self.sessionmaker() as session:
@@ -195,7 +195,7 @@ class BankRobberyCog(commands.Cog):
         if interaction.guild is None:
             await self._send_error(interaction, "Server only.")
             return
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         try:
             async with self.sessionmaker() as session:
                 async with session.begin():
@@ -217,7 +217,7 @@ class BankRobberyCog(commands.Cog):
         if interaction.guild is None:
             await self._send_error(interaction, "Server only.")
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(thinking=True)
         try:
             async with self.sessionmaker() as session:
                 async with session.begin():
@@ -234,7 +234,7 @@ class BankRobberyCog(commands.Cog):
         if interaction.guild is None:
             await self._send_error(interaction, "Server only.")
             return
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         try:
             async with self.sessionmaker() as session:
                 async with session.begin():
@@ -250,7 +250,7 @@ class BankRobberyCog(commands.Cog):
         if interaction.guild is None:
             await self._send_error(interaction, "Server only.")
             return
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         try:
             async with self.sessionmaker() as session:
                 async with session.begin():
@@ -271,7 +271,7 @@ class BankRobberyCog(commands.Cog):
         if interaction.guild is None:
             await self._send_error(interaction, "Server only.")
             return
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         try:
             async with self.sessionmaker() as session:
                 async with session.begin():
@@ -290,7 +290,7 @@ class BankRobberyCog(commands.Cog):
         if interaction.guild is None:
             await self._send_error(interaction, "Server only.")
             return
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         async with self.sessionmaker() as session:
             async with session.begin():
                 lobby, disbanded = await leave_lobby(session, guild_id=interaction.guild.id, user_id=interaction.user.id)
@@ -303,7 +303,7 @@ class BankRobberyCog(commands.Cog):
         if interaction.guild is None:
             await self._send_error(interaction, "Server only.")
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(thinking=True)
         try:
             async with self.sessionmaker() as session:
                 async with session.begin():
@@ -322,7 +322,7 @@ class BankRobberyCog(commands.Cog):
         if interaction.guild is None:
             await self._send_error(interaction, "Server only.")
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(thinking=True)
         try:
             async with self.sessionmaker() as session:
                 async with session.begin():
