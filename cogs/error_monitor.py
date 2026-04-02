@@ -6,21 +6,11 @@ import sys
 from typing import Any
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 from services.error_logging import build_context_from_command, build_context_from_interaction, merge_logging_context
 
 log = logging.getLogger("error_monitor.cog")
-
-
-def _is_owner_or_admin(bot: commands.Bot, user: discord.abc.User | discord.Member | None) -> bool:
-    if user is None:
-        return False
-    owner_ids = getattr(bot, "owner_ids", set())
-    if getattr(user, "id", None) in owner_ids:
-        return True
-    return isinstance(user, discord.Member) and user.guild_permissions.administrator
 
 
 class ErrorMonitor(commands.Cog):
@@ -166,48 +156,6 @@ class ErrorMonitor(commands.Cog):
             category="event",
             context=merge_logging_context(event_name=event_method, extras={"arg_count": len(args), "kwarg_keys": list(kwargs.keys())}),
         )
-
-    @app_commands.command(name="recenterrors", description="Show the most recent diagnostics errors.")
-    @app_commands.default_permissions(administrator=True)
-    async def recent_errors(self, interaction: discord.Interaction, limit: app_commands.Range[int, 1, 20] = 10) -> None:
-        if not _is_owner_or_admin(self.bot, interaction.user):
-            await interaction.response.send_message("You are not allowed to inspect diagnostics.", ephemeral=True)
-            return
-
-        if self.diagnostics is None:
-            await interaction.response.send_message("Diagnostics service is unavailable.", ephemeral=True)
-            return
-
-        entries = [e for e in self.diagnostics.entries if e.status == "FAIL"][-limit:]
-        if not entries:
-            await interaction.response.send_message("No recent errors have been captured yet.", ephemeral=True)
-            return
-
-        lines = [
-            f"• `{e.timestamp.isoformat()}` | `{e.exception_type or e.category}` | {e.subsystem}/{e.source} | {e.summary[:160]}"
-            for e in reversed(entries)
-        ]
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
-
-    @app_commands.command(name="diagnostics", description="Open the central diagnostics report.")
-    @app_commands.default_permissions(administrator=True)
-    async def diagnostics_report(self, interaction: discord.Interaction) -> None:
-        if not _is_owner_or_admin(self.bot, interaction.user):
-            await interaction.response.send_message("You are not allowed to inspect diagnostics.", ephemeral=True)
-            return
-
-        if self.diagnostics is None:
-            await interaction.response.send_message("Diagnostics service is unavailable.", ephemeral=True)
-            return
-
-        from services.startup_diagnostics import DiagnosticsReportView
-
-        await interaction.response.send_message(
-            embed=self.diagnostics.render_summary_embed(self.bot),
-            view=DiagnosticsReportView(self.diagnostics),
-            ephemeral=True,
-        )
-
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(ErrorMonitor(bot))
