@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Awaitable, Callable, Literal
 
+import discord
 from sqlalchemy import func, select
 
 from db.models import BusinessRunRow, SundayAnnouncementStateRow, UserRow, WalletRow
@@ -90,6 +91,22 @@ class BotStartupCache:
     feature_flags: dict[str, Any] = field(default_factory=dict)
     lookup_maps: dict[str, dict[str, Any]] = field(default_factory=dict)
     counters: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class DiscordTargetSpec:
+    key: str
+    target_id: int
+    target_type: Literal["role", "channel"]
+    required: bool
+    reason: str
+
+
+@dataclass(slots=True)
+class DiscordTargetCheckResult:
+    spec: DiscordTargetSpec
+    found: bool
+    detail: str
 
 
 class StartupManager:
@@ -281,28 +298,136 @@ def _warm_static_lookup_indexes(bot: Any, cache: BotStartupCache) -> str:
     return f"items={len(ITEMS)} rarities={len(rarity_counts)}"
 
 
-def _boot_validate_discord_targets(bot: Any, cache: BotStartupCache) -> str:
+def _configured_discord_targets() -> list[DiscordTargetSpec]:
     from cogs.shop import SHOP_SUNDAY_ANNOUNCE_CHANNEL_ID
 
-    checked = 0
-    missing: list[str] = []
+    targets: list[DiscordTargetSpec] = []
 
     if int(VIP_ROLE_ID) > 0:
-        checked += 1
-        role_found = any(guild.get_role(int(VIP_ROLE_ID)) is not None for guild in bot.guilds)
-        if not role_found:
-            missing.append(f"VIP_ROLE_ID={VIP_ROLE_ID}")
+        targets.append(
+            DiscordTargetSpec(
+                key="VIP_ROLE_ID",
+                target_id=int(VIP_ROLE_ID),
+                target_type="role",
+                required=False,
+                reason="VIP bonuses and VIP sync can degrade safely if this role is missing.",
+            )
+        )
 
     if int(SHOP_SUNDAY_ANNOUNCE_CHANNEL_ID) > 0:
-        checked += 1
-        channel = bot.get_channel(int(SHOP_SUNDAY_ANNOUNCE_CHANNEL_ID))
-        if channel is None:
-            missing.append(f"SHOP_SUNDAY_ANNOUNCE_CHANNEL_ID={SHOP_SUNDAY_ANNOUNCE_CHANNEL_ID}")
+        targets.append(
+            DiscordTargetSpec(
+                key="SHOP_SUNDAY_ANNOUNCE_CHANNEL_ID",
+                target_id=int(SHOP_SUNDAY_ANNOUNCE_CHANNEL_ID),
+                target_type="channel",
+                required=False,
+                reason="Sunday shop announcements are feature-specific and can be skipped.",
+            )
+        )
 
-    if missing:
-        raise RuntimeError("Missing configured Discord targets: " + ", ".join(missing))
+    return targets
 
-    return f"checked={checked}"
+
+async def _resolve_configured_role(bot: Any, cache: BotStartupCache, *, role_id: int) -> tuple[bool, str]:
+    role_cache = cache.lookup_maps.setdefault("discord_role_resolution", {})
+    cache_key = str(role_id)
+    if cache_key in role_cache:
+        return bool(role_cache[cache_key]), "resolved from startup cache"
+
+    for guild in bot.guilds:
+        if guild.get_role(role_id) is not None:
+            role_cache[cache_key] = True
+            return True, f"resolved from guild cache ({guild.id})"
+
+    for guild in bot.guilds:
+        try:
+            roles = await guild.fetch_roles()
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            continue
+        if any(int(role.id) == role_id for role in roles):
+            role_cache[cache_key] = True
+            return True, f"resolved from API fetch_roles ({guild.id})"
+
+    role_cache[cache_key] = False
+    return False, "not found in guild cache or fetch_roles"
+
+
+async def _resolve_configured_channel(bot: Any, cache: BotStartupCache, *, channel_id: int) -> tuple[bool, str]:
+    channel_cache = cache.lookup_maps.setdefault("discord_channel_resolution", {})
+    cache_key = str(channel_id)
+    if cache_key in channel_cache:
+        return bool(channel_cache[cache_key]), "resolved from startup cache"
+
+    channel = bot.get_channel(channel_id)
+    if channel is not None:
+        channel_cache[cache_key] = True
+        return True, "resolved from bot channel cache"
+
+    for guild in bot.guilds:
+        if guild.get_channel(channel_id) is not None:
+            channel_cache[cache_key] = True
+            return True, f"resolved from guild cache ({guild.id})"
+
+    try:
+        fetched = await bot.fetch_channel(channel_id)
+    except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+        fetched = None
+    if fetched is not None:
+        channel_cache[cache_key] = True
+        return True, "resolved from API fetch_channel"
+
+    channel_cache[cache_key] = False
+    return False, "not found in caches or fetch_channel"
+
+
+async def _boot_validate_discord_targets(bot: Any, cache: BotStartupCache) -> str:
+    checks: list[DiscordTargetCheckResult] = []
+
+    for target in _configured_discord_targets():
+        if target.target_type == "role":
+            found, detail = await _resolve_configured_role(bot, cache, role_id=target.target_id)
+        else:
+            found, detail = await _resolve_configured_channel(bot, cache, channel_id=target.target_id)
+        checks.append(DiscordTargetCheckResult(spec=target, found=found, detail=detail))
+
+    required_missing = [c for c in checks if c.spec.required and not c.found]
+    optional_missing = [c for c in checks if not c.spec.required and not c.found]
+
+    if required_missing:
+        missing = ", ".join(f"{c.spec.key}={c.spec.target_id} ({c.detail})" for c in required_missing)
+        raise RuntimeError(f"Required Discord targets missing: {missing}")
+
+    if optional_missing:
+        missing = ", ".join(f"{c.spec.key}={c.spec.target_id} ({c.detail})" for c in optional_missing)
+        msg = f"Optional Discord targets missing: {missing}"
+        log.warning(msg)
+        diagnostics = getattr(bot, "startup_diagnostics", None)
+        if diagnostics is not None:
+            diagnostics.record_entry(
+                phase="startup",
+                status=STATUS_WARN,
+                fatal=False,
+                category="startup",
+                subsystem="startup_manager",
+                source="custom_boot.validate_configured_discord_targets",
+                summary=msg,
+                extra_context={
+                    "required_count": len([c for c in checks if c.spec.required]),
+                    "optional_count": len([c for c in checks if not c.spec.required]),
+                },
+            )
+
+    required_checked = len([c for c in checks if c.spec.required])
+    optional_checked = len([c for c in checks if not c.spec.required])
+    if optional_missing:
+        return (
+            f"WARN: Optional Discord targets missing: {len(optional_missing)} "
+            f"(required_checked={required_checked}, optional_checked={optional_checked})"
+        )
+    return (
+        f"PASS: All configured required Discord targets resolved "
+        f"(required_checked={required_checked}, optional_checked={optional_checked})"
+    )
 
 
 async def _boot_sanitize_sunday_state(bot: Any, cache: BotStartupCache) -> str:
