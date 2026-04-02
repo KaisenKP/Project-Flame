@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -9,7 +10,7 @@ import sys
 import textwrap
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -21,9 +22,37 @@ STATUS_WARN = "WARN"
 STATUS_FAIL = "FAIL"
 STATUS_SKIP = "SKIP"
 
+PHASE_STARTUP = "startup"
+PHASE_RUNTIME = "runtime"
+
 EMBED_FIELD_CHAR_LIMIT = 1024
-MAX_TRACEBACK_PREVIEW = 900
 DEFAULT_FALLBACK_CHANNEL_ID = 1460862634143256803
+
+
+@dataclass(slots=True)
+class DiagnosticEntry:
+    id: str
+    timestamp: datetime
+    phase: str
+    status: str
+    fatal: bool
+    category: str
+    subsystem: str
+    stage: str | None
+    source: str
+    summary: str
+    exception_type: str | None = None
+    exception_message: str | None = None
+    traceback_text: str | None = None
+    guild_id: int | None = None
+    channel_id: int | None = None
+    user_id: int | None = None
+    command_name: str | None = None
+    interaction_type: str | None = None
+    extension_name: str | None = None
+    task_name: str | None = None
+    extra_context: dict[str, Any] = field(default_factory=dict)
+    fingerprint: str = ""
 
 
 @dataclass(slots=True)
@@ -40,16 +69,9 @@ class StartupStageResult:
     fatal: bool = False
 
 
-@dataclass(slots=True)
-class StartupWarning:
-    message: str
-    timestamp: datetime
-    stage_name: str | None = None
-
-
-class StartupDiagnosticsSettings:
+class DiagnosticsSettings:
     def __init__(self, *, path: Path | None = None):
-        self.path = path or Path("data/startup_diagnostics_settings.json")
+        self.path = path or Path("data/diagnostics_settings.json")
         self.discord_notifications_enabled = True
         self._loaded = False
 
@@ -80,92 +102,36 @@ class StartupDiagnosticsSettings:
         return self.discord_notifications_enabled
 
 
-class StartupReportView(discord.ui.View):
-    def __init__(self, diagnostics: "StartupDiagnostics"):
-        super().__init__(timeout=None)
-        self.diagnostics = diagnostics
-        self._refresh_toggle_label()
-
-    def _refresh_toggle_label(self) -> None:
-        for child in self.children:
-            if isinstance(child, discord.ui.Button) and child.custom_id == "startup:toggle_diagnostics":
-                child.label = f"Diagnostics: {'ON' if self.diagnostics.settings.discord_notifications_enabled else 'OFF'}"
-
-    async def _send_embeds(self, interaction: discord.Interaction, embeds: list[discord.Embed]) -> None:
-        if not embeds:
-            await interaction.response.send_message("No data available.", ephemeral=True)
-            return
-        await interaction.response.send_message(embed=embeds[0], ephemeral=True)
-        for embed in embeds[1:]:
-            await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="Summary", style=discord.ButtonStyle.primary, custom_id="startup:summary")
-    async def summary_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.send_message(embed=self.diagnostics.render_summary_embed(), ephemeral=True)
-
-    @discord.ui.button(label="Errors", style=discord.ButtonStyle.danger, custom_id="startup:errors")
-    async def errors_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._send_embeds(interaction, self.diagnostics.render_errors_embeds())
-
-    @discord.ui.button(label="Warnings", style=discord.ButtonStyle.secondary, custom_id="startup:warnings")
-    async def warnings_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._send_embeds(interaction, self.diagnostics.render_warnings_embeds())
-
-    @discord.ui.button(label="Passed Stages", style=discord.ButtonStyle.success, custom_id="startup:passed")
-    async def passed_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._send_embeds(interaction, self.diagnostics.render_passed_embeds())
-
-    @discord.ui.button(label="Environment", style=discord.ButtonStyle.secondary, custom_id="startup:environment")
-    async def environment_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.send_message(embed=self.diagnostics.render_environment_embed(), ephemeral=True)
-
-    @discord.ui.button(label="Tracebacks", style=discord.ButtonStyle.danger, custom_id="startup:tracebacks")
-    async def tracebacks_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._send_embeds(interaction, self.diagnostics.render_traceback_embeds())
-
-    @discord.ui.button(label="Diagnostics: ON", style=discord.ButtonStyle.secondary, custom_id="startup:toggle_diagnostics")
-    async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not await self.diagnostics.is_authorized_actor(interaction.user, interaction.guild):
-            await interaction.response.send_message("You are not allowed to change startup diagnostics settings.", ephemeral=True)
-            return
-
-        enabled = self.diagnostics.settings.toggle()
-        self._refresh_toggle_label()
-        await interaction.response.edit_message(view=self)
-        msg = "Startup diagnostics notifications enabled" if enabled else "Startup diagnostics notifications disabled"
-        await interaction.followup.send(msg, ephemeral=True)
-
-
 class StartupDiagnostics:
-    def __init__(
-        self,
-        *,
-        fallback_channel_id: int = DEFAULT_FALLBACK_CHANNEL_ID,
-        settings: StartupDiagnosticsSettings | None = None,
-    ):
+    def __init__(self, *, fallback_channel_id: int = DEFAULT_FALLBACK_CHANNEL_ID, settings: DiagnosticsSettings | None = None):
         self.boot_started_at = datetime.now(timezone.utc)
         self._boot_perf_started = time.perf_counter()
+        self._startup_complete = False
+        self._entry_seq = 0
+        self._dedupe_window_seconds = 2.0
+        self._seen_fingerprints: dict[str, datetime] = {}
+        self.entries: list[DiagnosticEntry] = []
         self.stages: list[StartupStageResult] = []
-        self.warnings: list[StartupWarning] = []
-        self.unhandled_exceptions: list[str] = []
         self.fallback_channel_id = fallback_channel_id
-        self.settings = settings or StartupDiagnosticsSettings()
+        self.settings = settings or DiagnosticsSettings()
         self.settings.load()
-        self.logger = self._build_logger()
+        self.owner_id_hint: int | None = None
+        self._bot_ref: discord.Client | None = None
         self._report_sent = False
+        self._runtime_report_task: asyncio.Task[Any] | None = None
         self._loop_handler_installed = False
         self._sys_hook_installed = False
         self._old_sys_hook = sys.excepthook
         self._startup_task_names: set[str] = set()
-        self.owner_id_hint: int | None = None
-        self._bot_ref: discord.Client | None = None
+        self.logger = self._build_logger()
+        self._install_logging_handler()
 
-        self.logger.info("Startup diagnostics initialized at %s", self.boot_started_at.isoformat())
+        self.logger.info("Diagnostics initialized at %s", self.boot_started_at.isoformat())
 
     def _build_logger(self) -> logging.Logger:
-        logger = logging.getLogger("startup_diagnostics")
+        logger = logging.getLogger("diagnostics")
         logger.setLevel(logging.INFO)
-        log_path = Path("logs/startup.log")
+        log_path = Path("logs/diagnostics.log")
         log_path.parent.mkdir(parents=True, exist_ok=True)
         has_file = any(isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "").endswith(str(log_path)) for h in logger.handlers)
         if not has_file:
@@ -173,6 +139,215 @@ class StartupDiagnostics:
             fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
             logger.addHandler(fh)
         return logger
+
+    def _install_logging_handler(self) -> None:
+        if getattr(logging, "_pulse_diagnostics_hook_installed", False):
+            return
+
+        recorder = self
+
+        class _DiagnosticsHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                if record.levelno < logging.ERROR or not record.exc_info:
+                    return
+                exc_type, exc, exc_tb = record.exc_info
+                if not isinstance(exc, BaseException):
+                    return
+                tb = "".join(traceback.format_exception(exc_type, exc, exc_tb))
+                recorder.capture_exception(
+                    exc,
+                    phase=recorder.current_phase,
+                    status=STATUS_FAIL,
+                    category="logger",
+                    subsystem=record.name,
+                    source="logger.exception",
+                    summary=record.getMessage(),
+                    traceback_text=tb,
+                    fatal=False,
+                    extra_context={"logger": record.name},
+                )
+
+        root = logging.getLogger()
+        root.addHandler(_DiagnosticsHandler())
+        setattr(logging, "_pulse_diagnostics_hook_installed", True)
+
+    @property
+    def current_phase(self) -> str:
+        return PHASE_RUNTIME if self._startup_complete else PHASE_STARTUP
+
+    def mark_startup_complete(self) -> None:
+        self._startup_complete = True
+
+    def _next_id(self) -> str:
+        self._entry_seq += 1
+        return f"diag-{self._entry_seq:06d}"
+
+    def _fingerprint_for(
+        self,
+        *,
+        phase: str,
+        subsystem: str,
+        source: str,
+        exception_type: str | None,
+        exception_message: str | None,
+        traceback_text: str | None,
+    ) -> str:
+        trace_hash = hashlib.sha1((traceback_text or "").encode("utf-8", errors="ignore")).hexdigest()[:16]
+        raw = "|".join([phase, subsystem, source, exception_type or "", exception_message or "", trace_hash])
+        return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _is_duplicate(self, fingerprint: str, now: datetime) -> bool:
+        last = self._seen_fingerprints.get(fingerprint)
+        self._seen_fingerprints[fingerprint] = now
+        if last is None:
+            return False
+        return (now - last).total_seconds() <= self._dedupe_window_seconds
+
+    def record_entry(
+        self,
+        *,
+        phase: str,
+        status: str,
+        fatal: bool,
+        category: str,
+        subsystem: str,
+        source: str,
+        summary: str,
+        exception_type: str | None = None,
+        exception_message: str | None = None,
+        traceback_text: str | None = None,
+        stage: str | None = None,
+        guild_id: int | None = None,
+        channel_id: int | None = None,
+        user_id: int | None = None,
+        command_name: str | None = None,
+        interaction_type: str | None = None,
+        extension_name: str | None = None,
+        task_name: str | None = None,
+        extra_context: dict[str, Any] | None = None,
+    ) -> DiagnosticEntry | None:
+        now = datetime.now(timezone.utc)
+        fp = self._fingerprint_for(
+            phase=phase,
+            subsystem=subsystem,
+            source=source,
+            exception_type=exception_type,
+            exception_message=exception_message,
+            traceback_text=traceback_text,
+        )
+        if self._is_duplicate(fp, now):
+            return None
+
+        entry = DiagnosticEntry(
+            id=self._next_id(),
+            timestamp=now,
+            phase=phase,
+            status=status,
+            fatal=fatal,
+            category=category,
+            subsystem=subsystem,
+            stage=stage,
+            source=source,
+            summary=summary,
+            exception_type=exception_type,
+            exception_message=exception_message,
+            traceback_text=traceback_text,
+            guild_id=guild_id,
+            channel_id=channel_id,
+            user_id=user_id,
+            command_name=command_name,
+            interaction_type=interaction_type,
+            extension_name=extension_name,
+            task_name=task_name,
+            extra_context=extra_context or {},
+            fingerprint=fp,
+        )
+        self.entries.append(entry)
+        self._log_entry(entry)
+        return entry
+
+    def capture_exception(
+        self,
+        error: BaseException,
+        *,
+        phase: str | None = None,
+        status: str = STATUS_FAIL,
+        fatal: bool = False,
+        category: str = "exception",
+        subsystem: str = "general",
+        source: str = "unknown",
+        summary: str | None = None,
+        traceback_text: str | None = None,
+        stage: str | None = None,
+        guild_id: int | None = None,
+        channel_id: int | None = None,
+        user_id: int | None = None,
+        command_name: str | None = None,
+        interaction_type: str | None = None,
+        extension_name: str | None = None,
+        task_name: str | None = None,
+        extra_context: dict[str, Any] | None = None,
+    ) -> DiagnosticEntry | None:
+        tb = traceback_text or "".join(traceback.format_exception(type(error), error, error.__traceback__))
+        return self.record_entry(
+            phase=phase or self.current_phase,
+            status=status,
+            fatal=fatal,
+            category=category,
+            subsystem=subsystem,
+            source=source,
+            summary=summary or str(error),
+            exception_type=type(error).__name__,
+            exception_message=str(error),
+            traceback_text=tb,
+            stage=stage,
+            guild_id=guild_id,
+            channel_id=channel_id,
+            user_id=user_id,
+            command_name=command_name,
+            interaction_type=interaction_type,
+            extension_name=extension_name,
+            task_name=task_name,
+            extra_context=extra_context,
+        )
+
+    def add_warning(self, message: str, *, stage_name: str | None = None, subsystem: str = "startup") -> None:
+        self.record_entry(
+            phase=self.current_phase,
+            status=STATUS_WARN,
+            fatal=False,
+            category="warning",
+            subsystem=subsystem,
+            source=stage_name or subsystem,
+            summary=message,
+            stage=stage_name,
+        )
+
+    def record_failure(self, *, stage_name: str, summary: str, exception: BaseException, traceback_text: str, fatal: bool) -> None:
+        self.capture_exception(
+            exception,
+            phase=PHASE_STARTUP,
+            status=STATUS_FAIL,
+            fatal=fatal,
+            category="startup",
+            subsystem="startup",
+            source=stage_name,
+            summary=summary,
+            traceback_text=traceback_text,
+            stage=stage_name,
+        )
+
+    def _log_entry(self, entry: DiagnosticEntry) -> None:
+        msg = f"[{entry.phase}] [{entry.status}] subsystem={entry.subsystem} source={entry.source} summary={entry.summary}"
+        if entry.status == STATUS_WARN:
+            self.logger.warning(msg)
+        else:
+            self.logger.error(msg)
+        if entry.traceback_text:
+            self.logger.error(entry.traceback_text.rstrip())
+
+    def total_duration_ms(self) -> int:
+        return int((time.perf_counter() - self._boot_perf_started) * 1000)
 
     def install_global_exception_hooks(self, loop: asyncio.AbstractEventLoop) -> None:
         if not self._loop_handler_installed:
@@ -185,16 +360,27 @@ class StartupDiagnostics:
                     task = context.get("task")
                     task_name = task.get_name() if task and hasattr(task, "get_name") else "unknown"
                     if isinstance(exception, BaseException):
-                        tb = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
-                        self.record_failure(
-                            stage_name=f"asyncio-loop:{task_name}",
+                        self.capture_exception(
+                            exception,
+                            category="asyncio",
+                            subsystem="tasks",
+                            source="asyncio.loop",
                             summary=message,
-                            exception=exception,
-                            traceback_text=tb,
-                            fatal=False,
+                            task_name=task_name,
+                            extra_context={k: repr(v) for k, v in context.items() if k != "exception"},
                         )
                     else:
-                        self.add_warning(f"Asyncio loop warning: {message}", stage_name=f"asyncio-loop:{task_name}")
+                        self.record_entry(
+                            phase=self.current_phase,
+                            status=STATUS_WARN,
+                            fatal=False,
+                            category="asyncio",
+                            subsystem="tasks",
+                            source="asyncio.loop",
+                            summary=message,
+                            task_name=task_name,
+                            extra_context={k: repr(v) for k, v in context.items()},
+                        )
                 except Exception:
                     self.logger.exception("Failed in custom asyncio loop exception handler")
                 if previous is not None:
@@ -206,12 +392,15 @@ class StartupDiagnostics:
             self._loop_handler_installed = True
 
         if not self._sys_hook_installed:
+
             def handle_sys_exception(exc_type: type[BaseException], exc_value: BaseException, exc_traceback: Any) -> None:
                 tb = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
-                self.record_failure(
-                    stage_name="sys.excepthook",
+                self.capture_exception(
+                    exc_value,
+                    category="unhandled",
+                    subsystem="process",
+                    source="sys.excepthook",
                     summary="Unhandled top-level exception",
-                    exception=exc_value,
                     traceback_text=tb,
                     fatal=True,
                 )
@@ -236,18 +425,30 @@ class StartupDiagnostics:
             if asyncio.iscoroutine(value):
                 value = await value
             finished = datetime.now(timezone.utc)
+            status = STATUS_SKIP if summary_on_skip else STATUS_PASS
+            summary = summary_on_skip or summary_on_pass
             self.stages.append(
                 StartupStageResult(
                     stage_name=stage_name,
-                    status=STATUS_SKIP if summary_on_skip else STATUS_PASS,
-                    summary=summary_on_skip or summary_on_pass,
+                    status=status,
+                    summary=summary,
                     started_at=started,
                     finished_at=finished,
                     duration_ms=int((time.perf_counter() - perf) * 1000),
                     fatal=False,
                 )
             )
-            self.logger.info("[%s] %s", stage_name, summary_on_skip or summary_on_pass)
+            if status == STATUS_SKIP:
+                self.record_entry(
+                    phase=PHASE_STARTUP,
+                    status=STATUS_WARN,
+                    fatal=False,
+                    category="startup",
+                    subsystem="startup",
+                    source=stage_name,
+                    summary=summary,
+                    stage=stage_name,
+                )
             return value
         except Exception as exc:
             tb = traceback.format_exc()
@@ -266,41 +467,20 @@ class StartupDiagnostics:
                     fatal=fatal,
                 )
             )
-            self.logger.exception("[%s] failed", stage_name)
+            self.capture_exception(
+                exc,
+                phase=PHASE_STARTUP,
+                fatal=fatal,
+                category="startup",
+                subsystem="startup",
+                source=stage_name,
+                summary=str(exc),
+                traceback_text=tb,
+                stage=stage_name,
+            )
             if fatal:
                 raise
             return None
-
-    def add_warning(self, message: str, *, stage_name: str | None = None) -> None:
-        entry = StartupWarning(message=message, timestamp=datetime.now(timezone.utc), stage_name=stage_name)
-        self.warnings.append(entry)
-        self.logger.warning("[%s] %s", stage_name or "startup", message)
-
-    def record_failure(
-        self,
-        *,
-        stage_name: str,
-        summary: str,
-        exception: BaseException,
-        traceback_text: str,
-        fatal: bool,
-    ) -> None:
-        now = datetime.now(timezone.utc)
-        self.stages.append(
-            StartupStageResult(
-                stage_name=stage_name,
-                status=STATUS_FAIL,
-                summary=summary,
-                started_at=now,
-                finished_at=now,
-                duration_ms=0,
-                exception_type=type(exception).__name__,
-                exception_message=str(exception),
-                traceback_text=traceback_text,
-                fatal=fatal,
-            )
-        )
-        self.logger.error("[%s] %s | %s", stage_name, type(exception).__name__, summary)
 
     def add_startup_task(self, task: asyncio.Task[Any]) -> None:
         self._startup_task_names.add(task.get_name())
@@ -311,39 +491,59 @@ class StartupDiagnostics:
             except asyncio.CancelledError:
                 return
             except Exception as exc:
-                tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-                self.record_failure(
-                    stage_name=f"startup-task:{t.get_name()}",
+                self.capture_exception(
+                    exc,
+                    phase=PHASE_STARTUP,
+                    category="task",
+                    subsystem="tasks",
+                    source="startup-task",
                     summary="Startup-created task failed",
-                    exception=exc,
-                    traceback_text=tb,
-                    fatal=False,
+                    task_name=t.get_name(),
                 )
 
         task.add_done_callback(_done)
 
-    def _counts(self) -> dict[str, int]:
+    def attach_task(self, task: asyncio.Task[Any], *, subsystem: str, source: str, recurring: bool = False) -> None:
+        def _done(t: asyncio.Task[Any]) -> None:
+            try:
+                t.result()
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                self.capture_exception(
+                    exc,
+                    category="task",
+                    subsystem=subsystem,
+                    source=source,
+                    summary="Background task failed",
+                    task_name=t.get_name(),
+                    extra_context={"recurring": recurring},
+                )
+
+        task.add_done_callback(_done)
+
+    def _entries(self, *, phase: str | None = None, status: str | None = None) -> list[DiagnosticEntry]:
+        values = self.entries
+        if phase:
+            values = [e for e in values if e.phase == phase]
+        if status:
+            values = [e for e in values if e.status == status]
+        return values
+
+    def counts(self) -> dict[str, int]:
+        fail = len([e for e in self.entries if e.status == STATUS_FAIL])
+        warn = len([e for e in self.entries if e.status == STATUS_WARN])
+        startup_fail = len([e for e in self.entries if e.phase == PHASE_STARTUP and e.status == STATUS_FAIL])
+        runtime_fail = len([e for e in self.entries if e.phase == PHASE_RUNTIME and e.status == STATUS_FAIL])
+        fatal = len([e for e in self.entries if e.fatal])
         return {
-            "pass": len([s for s in self.stages if s.status == STATUS_PASS]),
-            "warn_stage": len([s for s in self.stages if s.status == STATUS_WARN]),
-            "fail": len([s for s in self.stages if s.status == STATUS_FAIL]),
-            "skip": len([s for s in self.stages if s.status == STATUS_SKIP]),
-            "fatal": len([s for s in self.stages if s.status == STATUS_FAIL and s.fatal]),
-            "warnings": len(self.warnings),
+            "errors": fail,
+            "warnings": warn,
+            "startup_errors": startup_fail,
+            "runtime_errors": runtime_fail,
+            "fatal": fatal,
+            "passed_stages": len([s for s in self.stages if s.status == STATUS_PASS]),
         }
-
-    def total_duration_ms(self) -> int:
-        return int((time.perf_counter() - self._boot_perf_started) * 1000)
-
-    def overall_status(self) -> str:
-        counts = self._counts()
-        if counts["fatal"] > 0:
-            return "FAILED"
-        if counts["fail"] > 0:
-            return "DEGRADED"
-        if counts["warnings"] > 0:
-            return "WARN"
-        return "OK"
 
     def environment_summary(self, bot: discord.Client | None = None) -> dict[str, str]:
         user_tag = str(bot.user) if bot and bot.user else "unavailable"
@@ -357,125 +557,124 @@ class StartupDiagnostics:
             "guilds": guild_count,
         }
 
-    def render_summary_embed(self, bot: discord.Client | None = None) -> discord.Embed:
-        counts = self._counts()
-        env = self.environment_summary(bot)
-        status = self.overall_status()
-        description = (
-            "Bot started successfully. No startup issues detected."
-            if counts["fail"] == 0 and counts["warnings"] == 0
-            else f"Bot started with {counts['fail']} startup errors and {counts['warnings']} warnings."
-        )
-        if status == "FAILED":
-            description = "Startup failed before full readiness."
+    def overall_status(self) -> str:
+        c = self.counts()
+        if c["fatal"] > 0:
+            return "FAILED"
+        if c["errors"] > 0:
+            return "DEGRADED"
+        if c["warnings"] > 0:
+            return "WARN"
+        return "OK"
 
-        e = discord.Embed(title="Bot Startup Report", description=description, color=discord.Color.blurple())
+    def render_summary_embed(self, bot: discord.Client | None = None) -> discord.Embed:
+        counts = self.counts()
+        status = self.overall_status()
+        if counts["errors"] == 0 and counts["warnings"] == 0:
+            desc = "Bot started cleanly. No issues detected."
+        else:
+            desc = f"Diagnostics recorded {counts['runtime_errors']} runtime errors and {counts['warnings']} warnings."
+        if counts["startup_errors"] > 0:
+            desc = f"Startup completed with {counts['startup_errors']} error(s)."
+
+        e = discord.Embed(title="Bot Diagnostics Report", description=desc, color=discord.Color.blurple())
         e.add_field(name="Overall Status", value=status, inline=True)
-        e.add_field(name="Passed Stages", value=str(counts["pass"]), inline=True)
+        e.add_field(name="Startup Errors", value=str(counts["startup_errors"]), inline=True)
+        e.add_field(name="Runtime Errors", value=str(counts["runtime_errors"]), inline=True)
         e.add_field(name="Warnings", value=str(counts["warnings"]), inline=True)
-        e.add_field(name="Errors", value=str(counts["fail"]), inline=True)
-        e.add_field(name="Fatal Errors", value=str(counts["fatal"]), inline=True)
-        e.add_field(name="Startup Duration", value=f"{self.total_duration_ms()} ms", inline=True)
-        e.add_field(name="Environment", value=f"Python {env['python']} | discord.py {env['discord_py']}", inline=False)
+        e.add_field(name="Fatal", value=str(counts["fatal"]), inline=True)
+        e.add_field(name="Passed Startup Stages", value=str(counts["passed_stages"]), inline=True)
+        env = self.environment_summary(bot)
         e.add_field(name="Bot", value=f"{env['bot_user']} | guilds={env['guilds']}", inline=False)
+        subsystems = sorted({x.subsystem for x in self.entries if x.status == STATUS_FAIL})
+        e.add_field(name="Affected Subsystems", value=", ".join(subsystems[:8]) or "None", inline=False)
+        if self.entries:
+            e.add_field(name="Last Error", value=max(self.entries, key=lambda x: x.timestamp).timestamp.isoformat(), inline=False)
         e.timestamp = datetime.now(timezone.utc)
         return e
 
-    def _chunk_lines_embed(self, title: str, lines: list[str], *, color: discord.Color) -> list[discord.Embed]:
+    def _chunk(self, title: str, lines: list[str], color: discord.Color) -> list[discord.Embed]:
         if not lines:
             return [discord.Embed(title=title, description="None", color=color)]
         embeds: list[discord.Embed] = []
-        chunk: list[str] = []
+        buf: list[str] = []
         size = 0
         for line in lines:
-            if size + len(line) + 1 > 3500 and chunk:
-                embeds.append(discord.Embed(title=title, description="\n".join(chunk), color=color))
-                chunk = [line]
+            if size + len(line) + 1 > 3500 and buf:
+                embeds.append(discord.Embed(title=title, description="\n".join(buf), color=color))
+                buf = [line]
                 size = len(line)
             else:
-                chunk.append(line)
+                buf.append(line)
                 size += len(line) + 1
-        if chunk:
-            embeds.append(discord.Embed(title=title, description="\n".join(chunk), color=color))
+        if buf:
+            embeds.append(discord.Embed(title=title, description="\n".join(buf), color=color))
         return embeds
 
-    def render_errors_embeds(self) -> list[discord.Embed]:
-        lines = []
-        for s in self.stages:
-            if s.status != STATUS_FAIL:
-                continue
-            lines.append(f"• `{s.stage_name}` | `{s.exception_type or 'Error'}` | fatal={s.fatal} | {s.summary[:180]}")
-        return self._chunk_lines_embed("Startup Errors", lines, color=discord.Color.red())
+    def _entry_line(self, e: DiagnosticEntry) -> str:
+        ctx = []
+        if e.command_name:
+            ctx.append(f"cmd={e.command_name}")
+        if e.task_name:
+            ctx.append(f"task={e.task_name}")
+        if e.extension_name:
+            ctx.append(f"ext={e.extension_name}")
+        return (
+            f"• `{e.timestamp.isoformat()}` | `{e.subsystem}/{e.source}` | `{e.exception_type or e.category}` | "
+            f"fatal={e.fatal} | {textwrap.shorten(e.summary, width=120)}"
+            + (f" | {' '.join(ctx)}" if ctx else "")
+        )
 
-    def render_warnings_embeds(self) -> list[discord.Embed]:
-        lines = [f"• `{w.stage_name or 'startup'}` | {w.message[:220]}" for w in self.warnings]
-        return self._chunk_lines_embed("Startup Warnings", lines, color=discord.Color.gold())
+    def render_entries_embeds(self, *, phase: str | None = None, status: str | None = None, title: str = "Diagnostics") -> list[discord.Embed]:
+        entries = self._entries(phase=phase, status=status)
+        lines = [self._entry_line(e) for e in entries]
+        color = discord.Color.red() if status == STATUS_FAIL else discord.Color.gold() if status == STATUS_WARN else discord.Color.blurple()
+        return self._chunk(title, lines, color)
 
-    def render_passed_embeds(self) -> list[discord.Embed]:
-        lines = [f"• `{s.stage_name}` | {s.duration_ms}ms | {s.summary}" for s in self.stages if s.status == STATUS_PASS]
-        return self._chunk_lines_embed("Passed Startup Stages", lines, color=discord.Color.green())
+    def render_traceback_embeds(self, *, phase: str | None = None) -> list[discord.Embed]:
+        entries = [e for e in self._entries(phase=phase) if e.traceback_text]
+        lines = [f"• `{e.id}` {e.subsystem}/{e.source} `{e.exception_type}`\n```py\n{e.traceback_text[-700:]}\n```" for e in entries]
+        return self._chunk("Tracebacks", lines, discord.Color.dark_red())
 
-    def render_environment_embed(self, bot: discord.Client | None = None) -> discord.Embed:
-        env = self.environment_summary(bot)
-        e = discord.Embed(title="Startup Environment", color=discord.Color.blue())
-        for k, v in env.items():
-            e.add_field(name=k.replace("_", " ").title(), value=str(v), inline=False)
-        return e
-
-    def render_traceback_embeds(self) -> list[discord.Embed]:
-        embeds: list[discord.Embed] = []
-        for s in self.stages:
-            if s.status != STATUS_FAIL or not s.traceback_text:
-                continue
-            preview = s.traceback_text[-MAX_TRACEBACK_PREVIEW:]
-            preview = preview if len(preview) <= EMBED_FIELD_CHAR_LIMIT else preview[-EMBED_FIELD_CHAR_LIMIT:]
-            e = discord.Embed(title=f"Traceback: {s.stage_name}", color=discord.Color.dark_red())
-            e.add_field(name="Exception", value=f"{s.exception_type}: {s.exception_message}"[:EMBED_FIELD_CHAR_LIMIT], inline=False)
-            e.add_field(name="Preview", value=f"```py\n{preview}\n```"[:EMBED_FIELD_CHAR_LIMIT], inline=False)
-            embeds.append(e)
-        return embeds or [discord.Embed(title="Tracebacks", description="No traceback data", color=discord.Color.dark_red())]
+    def render_subsystems_embeds(self) -> list[discord.Embed]:
+        buckets: dict[str, int] = {}
+        for e in self.entries:
+            buckets[e.subsystem] = buckets.get(e.subsystem, 0) + 1
+        lines = [f"• `{name}`: {count}" for name, count in sorted(buckets.items(), key=lambda kv: kv[1], reverse=True)]
+        return self._chunk("Subsystems", lines, discord.Color.blue())
 
     def build_report_text(self, bot: discord.Client | None = None) -> str:
         env = self.environment_summary(bot)
-        counts = self._counts()
+        c = self.counts()
         lines = [
-            "Bot Startup Diagnostics Report",
+            "Bot Diagnostics Report",
             "=" * 80,
             f"Timestamp (UTC): {datetime.now(timezone.utc).isoformat()}",
             f"Boot started (UTC): {self.boot_started_at.isoformat()}",
             f"Duration ms: {self.total_duration_ms()}",
-            f"Overall status: {self.overall_status()}",
-            f"Pass={counts['pass']} Warn={counts['warnings']} Fail={counts['fail']} Fatal={counts['fatal']} Skip={counts['skip']}",
+            f"Status: {self.overall_status()}",
+            f"Startup errors={c['startup_errors']} Runtime errors={c['runtime_errors']} Warnings={c['warnings']} Fatal={c['fatal']}",
             "",
             "Environment",
             "-" * 80,
         ]
         lines.extend(f"{k}: {v}" for k, v in env.items())
-        lines.extend(["", "Stages", "-" * 80])
-        for s in self.stages:
-            lines.append(
-                f"[{s.status}] {s.stage_name} | duration={s.duration_ms}ms | started={s.started_at.isoformat()} | finished={s.finished_at.isoformat()}"
-            )
-            lines.append(f"summary: {s.summary}")
-            if s.exception_type:
-                lines.append(f"exception: {s.exception_type}: {s.exception_message}")
-            if s.traceback_text:
+        lines.extend(["", "Entries", "-" * 80])
+        for e in self.entries:
+            lines.append(f"[{e.phase}][{e.status}] {e.subsystem}/{e.source} | {e.exception_type}: {e.exception_message}")
+            lines.append(f"summary: {e.summary}")
+            if e.command_name or e.task_name:
+                lines.append(f"command={e.command_name} task={e.task_name}")
+            if e.traceback_text:
                 lines.append("traceback:")
-                lines.append(s.traceback_text.rstrip())
+                lines.append(e.traceback_text.rstrip())
             lines.append("")
-        lines.extend(["Warnings", "-" * 80])
-        if not self.warnings:
-            lines.append("None")
-        else:
-            for w in self.warnings:
-                lines.append(f"[{w.timestamp.isoformat()}] {w.stage_name or 'startup'}: {w.message}")
         return "\n".join(lines)
 
     def write_local_report_file(self, bot: discord.Client | None = None) -> Path:
-        path = Path("logs/startup_report.txt")
+        path = Path("logs/diagnostics_report.txt")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self.build_report_text(bot), encoding="utf-8")
-        self.logger.info("Wrote startup report file to %s", path)
         return path
 
     async def resolve_owner_user(self, bot: discord.Client) -> discord.User | None:
@@ -510,39 +709,36 @@ class StartupDiagnostics:
             return True
         return isinstance(user, discord.Member) and user.guild_permissions.administrator
 
-    async def send_startup_report(self, bot: discord.Client) -> None:
+    async def send_report(self, bot: discord.Client, *, include_success_message: bool = True) -> None:
         if self._report_sent:
             return
         self._report_sent = True
         self._bot_ref = bot
+        self.mark_startup_complete()
 
         report_path = self.write_local_report_file(bot)
+        counts = self.counts()
+        if counts["errors"] == 0 and counts["warnings"] == 0 and include_success_message:
+            pass
 
         if not self.settings.discord_notifications_enabled:
-            self.logger.info("Discord delivery disabled by diagnostics settings; local logs only.")
+            self.logger.info("Discord diagnostics notifications disabled; local logging remains enabled.")
             return
 
         summary = self.render_summary_embed(bot)
-        view = StartupReportView(self)
+        view = DiagnosticsReportView(self)
         attachments: list[discord.File] = []
-        if self._counts()["fail"] > 0 or self._counts()["warnings"] > 0:
-            attachments.append(discord.File(report_path, filename="startup_report.txt"))
+        if counts["errors"] > 0 or counts["warnings"] > 0:
+            attachments.append(discord.File(report_path, filename="diagnostics_report.txt"))
 
         send_errors: list[str] = []
-
         owner = await self.resolve_owner_user(bot)
         if owner is not None:
             try:
                 await owner.send(embed=summary, view=view, files=attachments)
-                for embed in self.render_errors_embeds()[:4]:
-                    await owner.send(embed=embed)
-                for embed in self.render_warnings_embeds()[:4]:
-                    await owner.send(embed=embed)
-                self.logger.info("Startup report sent to owner DM: %s", owner.id)
                 return
             except Exception as exc:
                 send_errors.append(f"owner_dm_failed: {exc}")
-                self.logger.exception("Failed to DM startup report to owner")
 
         channel = bot.get_channel(self.fallback_channel_id)
         if channel is None:
@@ -555,18 +751,75 @@ class StartupDiagnostics:
         if isinstance(channel, (discord.TextChannel, discord.Thread, discord.VoiceChannel)):
             try:
                 await channel.send(embed=summary, view=view, files=attachments)
-                for embed in self.render_errors_embeds()[:4]:
-                    await channel.send(embed=embed)
-                for embed in self.render_warnings_embeds()[:4]:
-                    await channel.send(embed=embed)
-                self.logger.info("Startup report sent to fallback channel: %s", self.fallback_channel_id)
                 return
             except Exception as exc:
                 send_errors.append(f"fallback_channel_send_failed: {exc}")
-                self.logger.exception("Failed to send startup report to fallback channel")
 
         if send_errors:
-            self.logger.error("All Discord startup report delivery paths failed: %s", " | ".join(send_errors))
+            self.logger.error("All diagnostics delivery paths failed: %s", " | ".join(send_errors))
+
+
+class DiagnosticsReportView(discord.ui.View):
+    def __init__(self, diagnostics: StartupDiagnostics):
+        super().__init__(timeout=None)
+        self.diagnostics = diagnostics
+        self._refresh_toggle_label()
+
+    def _refresh_toggle_label(self) -> None:
+        for child in self.children:
+            if isinstance(child, discord.ui.Button) and child.custom_id == "diag:toggle":
+                child.label = f"Diagnostics: {'ON' if self.diagnostics.settings.discord_notifications_enabled else 'OFF'}"
+
+    async def _send_embeds(self, interaction: discord.Interaction, embeds: list[discord.Embed]) -> None:
+        if not embeds:
+            await interaction.response.send_message("No data available.", ephemeral=True)
+            return
+        await interaction.response.send_message(embed=embeds[0], ephemeral=True)
+        for embed in embeds[1:]:
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Summary", style=discord.ButtonStyle.primary, custom_id="diag:summary")
+    async def summary_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.send_message(embed=self.diagnostics.render_summary_embed(self.diagnostics._bot_ref), ephemeral=True)
+
+    @discord.ui.button(label="Startup Errors", style=discord.ButtonStyle.danger, custom_id="diag:startup_errors")
+    async def startup_errors_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._send_embeds(interaction, self.diagnostics.render_entries_embeds(phase=PHASE_STARTUP, status=STATUS_FAIL, title="Startup Errors"))
+
+    @discord.ui.button(label="Runtime Errors", style=discord.ButtonStyle.danger, custom_id="diag:runtime_errors")
+    async def runtime_errors_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._send_embeds(interaction, self.diagnostics.render_entries_embeds(phase=PHASE_RUNTIME, status=STATUS_FAIL, title="Runtime Errors"))
+
+    @discord.ui.button(label="Warnings", style=discord.ButtonStyle.secondary, custom_id="diag:warnings")
+    async def warnings_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._send_embeds(interaction, self.diagnostics.render_entries_embeds(status=STATUS_WARN, title="Warnings"))
+
+    @discord.ui.button(label="Tracebacks", style=discord.ButtonStyle.secondary, custom_id="diag:tracebacks")
+    async def tracebacks_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._send_embeds(interaction, self.diagnostics.render_traceback_embeds())
+
+    @discord.ui.button(label="Subsystems", style=discord.ButtonStyle.secondary, custom_id="diag:subsystems")
+    async def subsystems_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._send_embeds(interaction, self.diagnostics.render_subsystems_embeds())
+
+    @discord.ui.button(label="Recent Errors", style=discord.ButtonStyle.secondary, custom_id="diag:recent")
+    async def recent_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        recent = self.diagnostics.entries[-25:]
+        lines = [self.diagnostics._entry_line(e) for e in reversed(recent)]
+        await self._send_embeds(interaction, self.diagnostics._chunk("Recent Errors", lines, discord.Color.orange()))
+
+    @discord.ui.button(label="Diagnostics: ON", style=discord.ButtonStyle.success, custom_id="diag:toggle")
+    async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await self.diagnostics.is_authorized_actor(interaction.user, interaction.guild):
+            await interaction.response.send_message("You are not allowed to change diagnostics settings.", ephemeral=True)
+            return
+        enabled = self.diagnostics.settings.toggle()
+        self._refresh_toggle_label()
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send(
+            "Diagnostics notifications enabled." if enabled else "Diagnostics notifications disabled.",
+            ephemeral=True,
+        )
 
 
 def format_exception_brief(exc: BaseException) -> str:
