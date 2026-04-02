@@ -1147,6 +1147,13 @@ async def _get_active_manager_rows_for_ownership(session, *, ownership_id: int) 
     return list(rows)
 
 
+def _format_percent_bp(bp: int) -> str:
+    value = int(bp) / 100
+    if float(value).is_integer():
+        return f"{int(value)}%"
+    return f"{value:.1f}%"
+
+
 async def _worker_bonus_snapshot(session, *, ownership: BusinessOwnershipRow) -> tuple[int, str]:
     rows = await _get_active_worker_rows_for_ownership(session, ownership_id=int(ownership.id))
     if not rows:
@@ -1155,7 +1162,7 @@ async def _worker_bonus_snapshot(session, *, ownership: BusinessOwnershipRow) ->
     parts = []
     for row in rows[:3]:
         boosted_row_bp = _buff_staff_bonus_bp(int(row.percent_profit_bonus_bp or 0))
-        parts.append(f"{worker_role_label(str(row.worker_type), str(ownership.business_key))} +{boosted_row_bp/100:.0f}%")
+        parts.append(f"{worker_role_label(str(row.worker_type), str(ownership.business_key))} +{_format_percent_bp(boosted_row_bp)}")
     suffix = f" | +{len(rows)-3} more" if len(rows) > 3 else ""
     return total_bp, ", ".join(parts) + suffix
 
@@ -1169,7 +1176,7 @@ async def _manager_summary_snapshot(session, *, ownership: BusinessOwnershipRow)
     downtime_bp = manager_downtime_reduction_bp(rows)
     labels = []
     for row in rows[:2]:
-        labels.append(f"{manager_role_label(str(ownership.business_key), int(row.slot_index))} Δ-{manager_downtime_reduction_bp([row])/100:.0f}%")
+        labels.append(f"{manager_role_label(str(ownership.business_key), int(row.slot_index))} Δ-{_format_percent_bp(manager_downtime_reduction_bp([row]))}")
     return ", ".join(labels), positive_bp, negative_bp, downtime_bp
 
 
