@@ -5,6 +5,7 @@ import datetime as dt
 import logging
 import os
 import sys
+import traceback
 from pathlib import Path
 from typing import Iterable
 
@@ -13,6 +14,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from services.error_logging import ErrorDumpWriter, build_context_from_interaction
+from services.startup_diagnostics import StartupDiagnostics
 
 log = logging.getLogger("bot")
 
@@ -92,6 +94,7 @@ class PulseBot(commands.Bot):
         sync_commands: bool = True,
         dev_guild_id: int | None = None,
         owner_ids: set[int] | None = None,
+        startup_diagnostics: StartupDiagnostics | None = None,
     ):
         intents = discord.Intents.default()
         intents.guilds = True
@@ -111,19 +114,33 @@ class PulseBot(commands.Bot):
         self.sync_commands = sync_commands
         self.dev_guild_id = dev_guild_id
         self.owner_ids = owner_ids or set()
+        self.startup_diagnostics = startup_diagnostics
 
         self.cogs_dir = (cogs_dir or Path("cogs")).resolve()
         self.cogs_package = cogs_package
 
         self._bg_tasks: set[asyncio.Task] = set()
         self._ready_once = asyncio.Event()
+        self._startup_report_sent = False
         self.error_dump_writer = ErrorDumpWriter()
         self.error_monitor_cog = None
+        self._persistent_views_registered = 0
 
     async def setup_hook(self) -> None:
-        self.tree.interaction_check(self._interaction_restart_guard)
-        await self.load_all_extensions()
-        await self._ensure_db_schema()
+        diag = self.startup_diagnostics
+        if diag is not None:
+            await diag.run_stage(
+                "setup_hook",
+                lambda: self.tree.interaction_check(self._interaction_restart_guard),
+                summary_on_pass="setup_hook started",
+            )
+            await diag.run_stage("cog_discovery", lambda: _iter_extension_modules(self.cogs_dir, self.cogs_package), summary_on_pass="Cog discovery completed")
+            await diag.run_stage("extension_loading", self.load_all_extensions, summary_on_pass="Extensions load completed")
+            await diag.run_stage("database_engine_or_session_init", self._ensure_db_schema, summary_on_pass="DB schema check completed")
+        else:
+            self.tree.interaction_check(self._interaction_restart_guard)
+            await self.load_all_extensions()
+            await self._ensure_db_schema()
 
         cmds = list(self.tree.get_commands())
         log.info("App commands discovered: %d", len(cmds))
@@ -131,9 +148,24 @@ class PulseBot(commands.Bot):
             log.info(" - /%s", cmd.name)
 
         if self.sync_commands:
-            await self._sync_app_commands()
+            if diag is not None:
+                await diag.run_stage("command_tree_sync", self._sync_app_commands, summary_on_pass="Command tree sync completed")
+            else:
+                await self._sync_app_commands()
+        elif diag is not None:
+            await diag.run_stage("command_tree_sync", lambda: None, summary_on_pass="Command sync disabled", summary_on_skip="Command sync disabled by config")
 
-        self.start_background_tasks()
+        if diag is not None:
+            await diag.run_stage("background_task_startup", lambda: self.start_background_tasks(), summary_on_pass="Background tasks started")
+            await diag.run_stage(
+                "persistent_view_registration",
+                lambda: None,
+                summary_on_pass=f"Persistent views registered: {self._persistent_views_registered}",
+            )
+            await diag.run_stage("cache_warmup", lambda: None, summary_on_skip="No cache warmup routine configured")
+            await diag.run_stage("custom_boot_routines", lambda: None, summary_on_skip="No custom boot routines configured")
+        else:
+            self.start_background_tasks()
 
     async def _ensure_db_schema(self) -> None:
         try:
@@ -170,6 +202,12 @@ class PulseBot(commands.Bot):
         assert self.user is not None
         log.info("Ready as %s (id=%s)", self.user, self.user.id)
         log.info("Guilds: %d", len(self.guilds))
+        if self.startup_diagnostics is not None:
+            await self.startup_diagnostics.run_stage("on_ready", lambda: None, summary_on_pass="on_ready fired")
+            if not self._startup_report_sent:
+                self._startup_report_sent = True
+                send_task = asyncio.create_task(self.startup_diagnostics.send_startup_report(self), name="startup.report.delivery")
+                self.startup_diagnostics.add_startup_task(send_task)
 
     async def close(self) -> None:
         backup_cog = self.get_cog("EconomyBackupsCog")
@@ -256,6 +294,8 @@ class PulseBot(commands.Bot):
     def _spawn_task(self, coro, *, name: str) -> None:
         task = asyncio.create_task(coro, name=name)
         self._bg_tasks.add(task)
+        if self.startup_diagnostics is not None:
+            self.startup_diagnostics.add_startup_task(task)
 
         def _done(_t: asyncio.Task) -> None:
             self._bg_tasks.discard(_t)
@@ -264,6 +304,14 @@ class PulseBot(commands.Bot):
             except asyncio.CancelledError:
                 pass
             except Exception as exc:
+                if self.startup_diagnostics is not None:
+                    self.startup_diagnostics.record_failure(
+                        stage_name=f"background_task:{_t.get_name()}",
+                        summary="Background task crashed",
+                        exception=exc,
+                        traceback_text="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+                        fatal=False,
+                    )
                 monitor = getattr(self, "error_monitor_cog", None)
                 if monitor is not None:
                     monitor.log_exception(exc, source="background_task", task_name=_t.get_name())
@@ -299,8 +347,14 @@ class PulseBot(commands.Bot):
             await self.close()
             os.execv(sys.executable, [sys.executable, *sys.argv])
 
+    def add_view(self, view: discord.ui.View, *, message_id: int | None = None) -> None:
+        super().add_view(view, message_id=message_id)
+        if self.startup_diagnostics is not None:
+            self._persistent_views_registered += 1
+            self.startup_diagnostics.logger.info("Persistent view registered: %s", type(view).__name__)
 
-async def build_bot_from_env() -> PulseBot:
+
+async def build_bot_from_env(startup_diagnostics: StartupDiagnostics | None = None) -> PulseBot:
     prefix = (os.getenv("BOT_PREFIX") or "!").strip()
 
     intents_message_content = _truthy(os.getenv("INTENTS_MESSAGE_CONTENT"), default=True)
@@ -315,11 +369,18 @@ async def build_bot_from_env() -> PulseBot:
         dev_guild_id = int(dev_guild_raw)
 
     owner_ids: set[int] = set()
+    raw_owner_id = (os.getenv("BOT_OWNER_ID") or "").strip()
+    if raw_owner_id.isdigit():
+        owner_ids.add(int(raw_owner_id))
+        if startup_diagnostics is not None:
+            startup_diagnostics.owner_id_hint = int(raw_owner_id)
     raw_owner_ids = (os.getenv("BOT_OWNER_IDS") or "").strip()
     if raw_owner_ids:
         for part in raw_owner_ids.replace(",", " ").split():
             if part.isdigit():
                 owner_ids.add(int(part))
+                if startup_diagnostics is not None and startup_diagnostics.owner_id_hint is None:
+                    startup_diagnostics.owner_id_hint = int(part)
 
     return PulseBot(
         prefix=prefix,
@@ -329,4 +390,5 @@ async def build_bot_from_env() -> PulseBot:
         sync_commands=sync_commands,
         dev_guild_id=dev_guild_id,
         owner_ids=owner_ids,
+        startup_diagnostics=startup_diagnostics,
     )
