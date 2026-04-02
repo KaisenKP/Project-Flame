@@ -67,6 +67,8 @@ from services.db import sessions
 from services.achievements import check_and_grant_achievements, queue_achievement_announcements
 from services.users import ensure_user_rows
 from services.vip import is_vip_member
+from services.vip_hiring_service import VipHiringService
+from services.vip_hiring_recovery import reconcile_incomplete_jobs
 import os
 from .runtime import BusinessRuntimeEngine, CompletedRunNotice
 
@@ -3701,130 +3703,23 @@ class ConfirmWorkerAutoHireView(discord.ui.View):
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await interaction.response.defer(ephemeral=True)
-        progress = discord.Embed(
-            title="VIP Auto-Hiring Started",
-            description="Rolling until worker slots are filled...",
-            color=discord.Color.gold(),
-        )
-        progress.add_field(name="Progress", value=f"Filled: **0/?**\nRolls: **0/{_fmt_int(self.rerolls)}**\nSpent: **0 Silver**", inline=False)
-        progress.add_field(name="Best Hit", value="None yet", inline=False)
-        await interaction.edit_original_response(embed=progress, view=None)
-        await self.parent_view.cog.upsert_auto_hire_session(
+        service = self.parent_view.cog.vip_hiring_service
+        job, err = await service.start_job(
             guild_id=self.parent_view.guild_id,
             user_id=self.parent_view.owner_id,
+            started_by_user_id=int(interaction.user.id),
             business_key=self.parent_view.business_key,
-            staff_kind="worker",
-            rerolls=self.rerolls,
-            allowed_rarities=self.allowed_rarities,
+            mode="worker",
+            requested_count=self.rerolls,
+            allowed_rarities=set(self.allowed_rarities),
         )
-        stats = AutoHireProgress()
-        best_score = -1
-        last_progress_update = time.monotonic()
-        while True:
-            async with self.parent_view.cog.sessionmaker() as session:
-                async with session.begin():
-                    state = await session.scalar(
-                        select(BusinessAutoHireSessionRow).where(
-                            BusinessAutoHireSessionRow.guild_id == int(self.parent_view.guild_id),
-                            BusinessAutoHireSessionRow.user_id == int(self.parent_view.owner_id),
-                            BusinessAutoHireSessionRow.business_key == str(self.parent_view.business_key),
-                            BusinessAutoHireSessionRow.staff_kind == "worker",
-                        )
-                    )
-                    if state is None or not bool(state.active) or int(state.remaining_rerolls or 0) <= 0:
-                        if state is not None and int(state.remaining_rerolls or 0) <= 0:
-                            state.active = False
-                        break
-                    slots_before = await get_worker_assignment_slots(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key)
-                    open_slots = sum(1 for slot in slots_before if not bool(getattr(slot, "is_active", False)))
-                    if stats.initial_open_slots <= 0:
-                        stats.initial_open_slots = open_slots
-                    if open_slots <= 0:
-                        stats.slots_full = True
-                        stats.last_error = "All worker slots are full."
-                        state.active = False
-                        state.last_error = stats.last_error
-                        break
-                    roll_result = await roll_worker_candidate(
-                        session,
-                        guild_id=self.parent_view.guild_id,
-                        user_id=self.parent_view.owner_id,
-                        business_key=self.parent_view.business_key,
-                        reroll_cost=WORKER_CANDIDATE_REROLL_COST,
-                    )
-                    if not roll_result.ok or roll_result.worker_candidate is None:
-                        stats.last_error = str(roll_result.message or "Auto-hire stopped.")
-                        state.active = False
-                        state.last_error = stats.last_error
-                        break
-                    state.remaining_rerolls = max(int(state.remaining_rerolls or 0) - 1, 0)
-                    stats.rerolls_used += 1
-                    stats.spent_silver = stats.rerolls_used * WORKER_CANDIDATE_REROLL_COST
-                    c = roll_result.worker_candidate
-                    tags = _worker_compare_tags(c)
-                    hit_line = f"{_safe_str(getattr(c, 'worker_name', None), 'Worker')} {_worker_rarity_badge(getattr(c, 'rarity', None))}"
-                    candidate_score = _worker_candidate_score(c)
-                    if candidate_score > best_score:
-                        best_score = candidate_score
-                        stats.best_hit = hit_line
-                    if str(getattr(c, "rarity", "common")).strip().lower() in self.allowed_rarities:
-                        hire_result = await hire_worker_manual(
-                            session,
-                            guild_id=self.parent_view.guild_id,
-                            user_id=self.parent_view.owner_id,
-                            business_key=self.parent_view.business_key,
-                            worker_name=str(getattr(c, "worker_name", "Worker")),
-                            worker_type=str(getattr(c, "worker_type", "efficient")),
-                            rarity=str(getattr(c, "rarity", "common")),
-                            flat_profit_bonus=int(getattr(c, "flat_profit_bonus", 0) or 0),
-                            percent_profit_bonus_bp=int(getattr(c, "percent_profit_bonus_bp", 0) or 0),
-                            charge_silver=False,
-                        )
-                        if not hire_result.ok:
-                            stats.last_error = str(hire_result.message or "Auto-hire stopped.")
-                            stats.slots_full = "slots are full" in stats.last_error.lower()
-                            state.active = False
-                            state.last_error = stats.last_error
-                            break
-                        stats.hires += 1
-                        stats.latest_hit = hit_line + (" • " + " • ".join(tags[:2]) if tags else "")
-                    else:
-                        stats.latest_hit = hit_line
-                    if int(state.remaining_rerolls or 0) <= 0:
-                        state.active = False
-
-            should_push_update = (
-                stats.rerolls_used <= 1
-                or stats.hires > 0
-                or stats.rerolls_used % AUTO_HIRE_PROGRESS_ROLL_CADENCE == 0
-                or (time.monotonic() - last_progress_update) >= AUTO_HIRE_PROGRESS_UPDATE_INTERVAL_SECONDS
-            )
-            if should_push_update:
-                progress = discord.Embed(
-                    title="VIP Auto-Hiring In Progress",
-                    description="Rolling and assigning workers slot-by-slot...",
-                    color=discord.Color.gold(),
-                )
-                progress.add_field(name="Progress", value=f"Filled: **{_fmt_int(stats.hires)}/{_fmt_int(stats.initial_open_slots or max(stats.hires, 1))}**\nRolls: **{_fmt_int(stats.rerolls_used)}/{_fmt_int(self.rerolls)}**\nSpent: **{_fmt_int(stats.spent_silver)} Silver**", inline=False)
-                progress.add_field(name="Best Hit", value=stats.best_hit, inline=False)
-                progress.add_field(name="Latest Hit", value=stats.latest_hit, inline=False)
-                await interaction.edit_original_response(embed=progress, view=None)
-                last_progress_update = time.monotonic()
-            await asyncio.sleep(AUTO_HIRE_ROLL_DELAY_SECONDS)
-
-        self.parent_view.current_candidate = None
-        suffix = " Worker slots are full." if stats.slots_full else (f" {stats.last_error}" if stats.last_error else "")
-        await self.parent_view._show_recruitment_board(interaction, action_message=f"✅ Auto-Hire complete: hired **{_fmt_int(stats.hires)}** workers in **{_fmt_int(stats.rerolls_used)}** rerolls.{suffix}")
-        done = discord.Embed(
-            title="VIP Auto-Hiring Complete",
-            description="Your worker rush is finished.",
-            color=SUCCESS_COLOR,
-        )
-        done.add_field(name="Results", value=f"Filled **{_fmt_int(stats.hires)}/{_fmt_int(stats.initial_open_slots or stats.hires)}** slots\nRolls Used: **{_fmt_int(stats.rerolls_used)}**\nSpent: **{_fmt_int(stats.spent_silver)} Silver**", inline=False)
-        done.add_field(name="Best Pull", value=stats.best_hit, inline=False)
-        if stats.latest_hit != "None yet":
-            done.add_field(name="Final Hit", value=stats.latest_hit, inline=False)
-        await interaction.edit_original_response(embed=done, view=None)
+        if job is None:
+            await interaction.edit_original_response(content=f"❌ {err}", embed=None, view=None)
+            return
+        await service.attach_progress_message(job_id=int(job.id), channel_id=int(interaction.channel_id))
+        await interaction.edit_original_response(content=f"✅ Started worker job `{job.job_id}`. Progress is posted in-channel.", embed=None, view=None)
+        await service.run_job(job_id=int(job.id))
+        await self.parent_view._show_recruitment_board(interaction, action_message=f"✅ Worker hiring job `{job.job_id}` finished.")
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -3849,130 +3744,23 @@ class ConfirmManagerAutoHireView(discord.ui.View):
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
         await interaction.response.defer(ephemeral=True)
-        progress = discord.Embed(
-            title="VIP Auto-Hiring Started",
-            description="Rolling until manager slots are filled...",
-            color=discord.Color.gold(),
-        )
-        progress.add_field(name="Progress", value=f"Filled: **0/?**\nRolls: **0/{_fmt_int(self.rerolls)}**\nSpent: **0 Silver**", inline=False)
-        progress.add_field(name="Best Hit", value="None yet", inline=False)
-        await interaction.edit_original_response(embed=progress, view=None)
-        await self.parent_view.cog.upsert_auto_hire_session(
+        service = self.parent_view.cog.vip_hiring_service
+        job, err = await service.start_job(
             guild_id=self.parent_view.guild_id,
             user_id=self.parent_view.owner_id,
+            started_by_user_id=int(interaction.user.id),
             business_key=self.parent_view.business_key,
-            staff_kind="manager",
-            rerolls=self.rerolls,
-            allowed_rarities=self.allowed_rarities,
+            mode="manager",
+            requested_count=self.rerolls,
+            allowed_rarities=set(self.allowed_rarities),
         )
-        stats = AutoHireProgress()
-        best_score = -1
-        last_progress_update = time.monotonic()
-        while True:
-            async with self.parent_view.cog.sessionmaker() as session:
-                async with session.begin():
-                    state = await session.scalar(
-                        select(BusinessAutoHireSessionRow).where(
-                            BusinessAutoHireSessionRow.guild_id == int(self.parent_view.guild_id),
-                            BusinessAutoHireSessionRow.user_id == int(self.parent_view.owner_id),
-                            BusinessAutoHireSessionRow.business_key == str(self.parent_view.business_key),
-                            BusinessAutoHireSessionRow.staff_kind == "manager",
-                        )
-                    )
-                    if state is None or not bool(state.active) or int(state.remaining_rerolls or 0) <= 0:
-                        if state is not None and int(state.remaining_rerolls or 0) <= 0:
-                            state.active = False
-                        break
-                    slots_before = await get_manager_assignment_slots(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key)
-                    open_slots = sum(1 for slot in slots_before if not bool(getattr(slot, "is_active", False)))
-                    if stats.initial_open_slots <= 0:
-                        stats.initial_open_slots = open_slots
-                    if open_slots <= 0:
-                        stats.slots_full = True
-                        stats.last_error = "All manager slots are full."
-                        state.active = False
-                        state.last_error = stats.last_error
-                        break
-                    roll_result = await roll_manager_candidate(
-                        session,
-                        guild_id=self.parent_view.guild_id,
-                        user_id=self.parent_view.owner_id,
-                        business_key=self.parent_view.business_key,
-                        reroll_cost=MANAGER_CANDIDATE_REROLL_COST,
-                    )
-                    if not roll_result.ok or roll_result.manager_candidate is None:
-                        stats.last_error = str(roll_result.message or "Auto-hire stopped.")
-                        state.active = False
-                        state.last_error = stats.last_error
-                        break
-                    state.remaining_rerolls = max(int(state.remaining_rerolls or 0) - 1, 0)
-                    stats.rerolls_used += 1
-                    stats.spent_silver = stats.rerolls_used * MANAGER_CANDIDATE_REROLL_COST
-                    c = roll_result.manager_candidate
-                    tags = _manager_compare_tags(c)
-                    hit_line = f"{_safe_str(getattr(c, 'manager_name', None), 'Manager')} {_manager_rarity_badge(getattr(c, 'rarity', None))}"
-                    candidate_score = _manager_candidate_score(c)
-                    if candidate_score > best_score:
-                        best_score = candidate_score
-                        stats.best_hit = hit_line
-                    if str(getattr(c, "rarity", "common")).strip().lower() in self.allowed_rarities:
-                        hire_result = await hire_manager_manual(
-                            session,
-                            guild_id=self.parent_view.guild_id,
-                            user_id=self.parent_view.owner_id,
-                            business_key=self.parent_view.business_key,
-                            manager_name=str(getattr(c, "manager_name", "Manager")),
-                            rarity=str(getattr(c, "rarity", "common")),
-                            runtime_bonus_hours=int(getattr(c, "runtime_bonus_hours", 0) or 0),
-                            profit_bonus_bp=int(getattr(c, "profit_bonus_bp", 0) or 0),
-                            auto_restart_charges=int(getattr(c, "auto_restart_charges", 0) or 0),
-                            charge_silver=False,
-                        )
-                        if not hire_result.ok:
-                            stats.last_error = str(hire_result.message or "Auto-hire stopped.")
-                            stats.slots_full = "slots are full" in stats.last_error.lower()
-                            state.active = False
-                            state.last_error = stats.last_error
-                            break
-                        stats.hires += 1
-                        stats.latest_hit = hit_line + (" • " + " • ".join(tags[:2]) if tags else "")
-                    else:
-                        stats.latest_hit = hit_line
-                    if int(state.remaining_rerolls or 0) <= 0:
-                        state.active = False
-
-            should_push_update = (
-                stats.rerolls_used <= 1
-                or stats.hires > 0
-                or stats.rerolls_used % AUTO_HIRE_PROGRESS_ROLL_CADENCE == 0
-                or (time.monotonic() - last_progress_update) >= AUTO_HIRE_PROGRESS_UPDATE_INTERVAL_SECONDS
-            )
-            if should_push_update:
-                progress = discord.Embed(
-                    title="VIP Auto-Hiring In Progress",
-                    description="Rolling and assigning managers slot-by-slot...",
-                    color=discord.Color.gold(),
-                )
-                progress.add_field(name="Progress", value=f"Filled: **{_fmt_int(stats.hires)}/{_fmt_int(stats.initial_open_slots or max(stats.hires, 1))}**\nRolls: **{_fmt_int(stats.rerolls_used)}/{_fmt_int(self.rerolls)}**\nSpent: **{_fmt_int(stats.spent_silver)} Silver**", inline=False)
-                progress.add_field(name="Best Hit", value=stats.best_hit, inline=False)
-                progress.add_field(name="Latest Hit", value=stats.latest_hit, inline=False)
-                await interaction.edit_original_response(embed=progress, view=None)
-                last_progress_update = time.monotonic()
-            await asyncio.sleep(AUTO_HIRE_ROLL_DELAY_SECONDS)
-
-        self.parent_view.current_candidate = None
-        suffix = " Manager slots are full." if stats.slots_full else (f" {stats.last_error}" if stats.last_error else "")
-        await self.parent_view._show_recruitment_board(interaction, action_message=f"✅ Auto-Hire complete: hired **{_fmt_int(stats.hires)}** managers in **{_fmt_int(stats.rerolls_used)}** rerolls.{suffix}")
-        done = discord.Embed(
-            title="VIP Auto-Hiring Complete",
-            description="Your manager session is complete.",
-            color=SUCCESS_COLOR,
-        )
-        done.add_field(name="Results", value=f"Filled **{_fmt_int(stats.hires)}/{_fmt_int(stats.initial_open_slots or stats.hires)}** slots\nRolls Used: **{_fmt_int(stats.rerolls_used)}**\nSpent: **{_fmt_int(stats.spent_silver)} Silver**", inline=False)
-        done.add_field(name="Best Pull", value=stats.best_hit, inline=False)
-        if stats.latest_hit != "None yet":
-            done.add_field(name="Final Hit", value=stats.latest_hit, inline=False)
-        await interaction.edit_original_response(embed=done, view=None)
+        if job is None:
+            await interaction.edit_original_response(content=f"❌ {err}", embed=None, view=None)
+            return
+        await service.attach_progress_message(job_id=int(job.id), channel_id=int(interaction.channel_id))
+        await interaction.edit_original_response(content=f"✅ Started manager job `{job.job_id}`. Progress is posted in-channel.", embed=None, view=None)
+        await service.run_job(job_id=int(job.id))
+        await self.parent_view._show_recruitment_board(interaction, action_message=f"✅ Manager hiring job `{job.job_id}` finished.")
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -4446,6 +4234,7 @@ class BusinessCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.sessionmaker = sessions()
+        self.vip_hiring_service = VipHiringService(sessionmaker=self.sessionmaker, bot=bot)
         self.runtime_engine = BusinessRuntimeEngine(on_run_completed=self._notify_business_run_completed)
         self._active_auto_hire_tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -4902,6 +4691,7 @@ class BusinessCog(commands.Cog):
     async def cog_load(self) -> None:
         await self._ensure_business_prestige_merge()
         await self._run_one_time_upgrade_refund()
+        await reconcile_incomplete_jobs(service=self.vip_hiring_service)
         await self._resume_active_auto_hire_sessions()
         log.info(
             "Business runtime start requested | cog=%s running=%s",

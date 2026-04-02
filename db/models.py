@@ -1256,3 +1256,61 @@ class BusinessAutoHireSessionRow(Base):
         onupdate=NOW,
         nullable=False,
     )
+
+
+class VipHiringJobRow(Base):
+    __tablename__ = "vip_hiring_jobs"
+    __table_args__ = (
+        UniqueConstraint("job_id", name="uq_vip_hiring_jobs_job_id"),
+        Index("ix_vip_hiring_jobs_target", "guild_id", "user_id", "business_key", "mode"),
+        Index("ix_vip_hiring_jobs_status", "status", "updated_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    started_by_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    business_key: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued", index=True)
+    requested_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    processed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    success_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    skipped_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duplicate_blocked_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    filters_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    batch_settings_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    progress_message_channel_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    progress_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(TS, server_default=NOW, nullable=False)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(TS, nullable=True)
+    interrupted_at: Mapped[Optional[datetime]] = mapped_column(TS, nullable=True)
+    error_summary: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    last_heartbeat_at: Mapped[Optional[datetime]] = mapped_column(TS, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=NOW, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(TS, server_default=NOW, onupdate=NOW, nullable=False)
+
+
+class VipHiringJobStepRow(Base):
+    __tablename__ = "vip_hiring_job_steps"
+    __table_args__ = (
+        UniqueConstraint("job_id", "step_number", name="uq_vip_hiring_job_steps_step"),
+        Index("ix_vip_hiring_job_steps_job", "job_id", "step_number"),
+        Index("ix_vip_hiring_job_steps_status", "result_status", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("vip_hiring_jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    step_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    entity_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    entity_key: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    entity_name: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    target_slot: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    action_type: Mapped[str] = mapped_column(String(32), nullable=False, default="hire")
+    result_status: Mapped[str] = mapped_column(String(32), nullable=False, default="started", index=True)
+    skip_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    committed_at: Mapped[Optional[datetime]] = mapped_column(TS, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=NOW, nullable=False)
