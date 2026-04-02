@@ -131,6 +131,7 @@ class PulseBot(commands.Bot):
         self._bg_tasks: set[asyncio.Task] = set()
         self._ready_once = asyncio.Event()
         self._startup_report_sent = False
+        self._post_ready_boot_completed = False
         self._persistent_views_registered = 0
         self.startup_manager = StartupManager()
 
@@ -173,11 +174,9 @@ class PulseBot(commands.Bot):
                 summary_on_pass=f"Persistent views registered: {self._persistent_views_registered}",
             )
             await diag.run_stage("cache_warmup", self._run_cache_warmup, fatal=True, summary_on_pass="Cache warmup completed")
-            await diag.run_stage("custom_boot_routines", self._run_custom_boot_routines, fatal=True, summary_on_pass="Custom boot routines completed")
         else:
             self.start_background_tasks()
             await self._run_cache_warmup()
-            await self._run_custom_boot_routines()
 
     async def _run_cache_warmup(self) -> str:
         report = await self.startup_manager.run_category("cache_warmup", bot=self, diagnostics=self.startup_diagnostics)
@@ -238,6 +237,19 @@ class PulseBot(commands.Bot):
     async def on_ready(self) -> None:
         if not self._ready_once.is_set():
             self._ready_once.set()
+
+        if not self._post_ready_boot_completed:
+            self._post_ready_boot_completed = True
+            diag = self.startup_diagnostics
+            if diag is not None:
+                await diag.run_stage(
+                    "custom_boot_routines",
+                    self._run_custom_boot_routines,
+                    fatal=True,
+                    summary_on_pass="Custom boot routines completed",
+                )
+            else:
+                await self._run_custom_boot_routines()
 
         assert self.user is not None
         log.info("Ready as %s (id=%s)", self.user, self.user.id)

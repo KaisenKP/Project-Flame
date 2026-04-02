@@ -3,16 +3,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from services.config import GUILD_ID, VIP_ROLE_ID
+
 log = logging.getLogger(__name__)
 
 BOOSTER_ROLE_ID = 1460879338546266249
-VIP_ROLE_ID = 1463403428494577838
 
 
 def _has_role(member: discord.Member, role_id: int) -> bool:
@@ -29,14 +29,18 @@ class VipSyncCog(commands.Cog):
         self.vip_sync_loop.cancel()
 
     async def _sync_member(self, member: discord.Member, *, reason: str) -> bool:
+        if int(GUILD_ID) > 0 and int(member.guild.id) != int(GUILD_ID):
+            return False
+        if int(VIP_ROLE_ID) <= 0:
+            return False
         booster = member.guild.get_role(BOOSTER_ROLE_ID)
-        vip = member.guild.get_role(VIP_ROLE_ID)
+        vip = member.guild.get_role(int(VIP_ROLE_ID))
         if booster is None or vip is None:
             log.warning("VipSync: role(s) not found in guild %s", member.guild.id)
             return False
 
         should_have_vip = _has_role(member, BOOSTER_ROLE_ID)
-        has_vip = _has_role(member, VIP_ROLE_ID)
+        has_vip = _has_role(member, int(VIP_ROLE_ID))
 
         if should_have_vip and not has_vip:
             try:
@@ -61,11 +65,15 @@ class VipSyncCog(commands.Cog):
         return False
 
     async def _sync_guild(self, guild: discord.Guild, *, reason: str) -> tuple[int, int, int]:
+        if int(GUILD_ID) > 0 and int(guild.id) != int(GUILD_ID):
+            return (0, 0, 0)
+        if int(VIP_ROLE_ID) <= 0:
+            return (0, 0, 0)
         if guild.me is None:
             return (0, 0, 0)
 
         booster = guild.get_role(BOOSTER_ROLE_ID)
-        vip = guild.get_role(VIP_ROLE_ID)
+        vip = guild.get_role(int(VIP_ROLE_ID))
         if booster is None or vip is None:
             return (0, 0, 0)
 
@@ -94,8 +102,8 @@ class VipSyncCog(commands.Cog):
 
         before_boost = _has_role(before, BOOSTER_ROLE_ID)
         after_boost = _has_role(after, BOOSTER_ROLE_ID)
-        before_vip = _has_role(before, VIP_ROLE_ID)
-        after_vip = _has_role(after, VIP_ROLE_ID)
+        before_vip = _has_role(before, int(VIP_ROLE_ID))
+        after_vip = _has_role(after, int(VIP_ROLE_ID))
 
         relevant_change = (before_boost != after_boost) or (before_vip != after_vip)
         if not relevant_change:

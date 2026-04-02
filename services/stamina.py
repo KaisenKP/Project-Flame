@@ -1,7 +1,6 @@
 # services/stamina.py
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -9,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.models import StaminaRow
+from services.config import VIP_ROLE_ID as CONFIG_VIP_ROLE_ID
 from services.users import ensure_user_rows
 
 
@@ -17,18 +17,6 @@ UTC = timezone.utc
 
 def utcnow() -> datetime:
     return datetime.now(tz=UTC)
-
-
-def _safe_int(v: str | None, default: int) -> int:
-    if not v:
-        return default
-    v = v.strip()
-    if not v:
-        return default
-    try:
-        return int(v)
-    except Exception:
-        return default
 
 
 def _first_attr(obj_or_cls, names: list[str]) -> str | None:
@@ -116,7 +104,7 @@ class StaminaService:
         vip_role_id: int | None = None,
     ):
         if vip_role_id is None:
-            vip_role_id = _safe_int(os.getenv("VIP_ROLE_ID"), 0) or None
+            vip_role_id = int(CONFIG_VIP_ROLE_ID) or None
 
         self.max_stamina_default = int(max_stamina_default)
         self.regen_regular_per_hour = int(regen_regular_per_hour)
