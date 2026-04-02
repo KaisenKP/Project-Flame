@@ -11,10 +11,10 @@ import discord
 from sqlalchemy import func, select
 
 from db.models import BusinessRunRow, SundayAnnouncementStateRow, UserRow, WalletRow
-from services.config import VIP_ROLE_ID
+from services.config import GUILD_ID, VIP_ROLE_ID
 from services.db import sessions
 from services.items_catalog import ITEMS
-from services.startup_diagnostics import STATUS_FAIL, STATUS_PASS, STATUS_WARN, StartupDiagnostics
+from services.startup_diagnostics import STATUS_FAIL, STATUS_PASS, STATUS_SKIP, STATUS_WARN, StartupDiagnostics
 
 log = logging.getLogger("startup_manager")
 
@@ -330,26 +330,81 @@ def _configured_discord_targets() -> list[DiscordTargetSpec]:
 
 async def _resolve_configured_role(bot: Any, cache: BotStartupCache, *, role_id: int) -> tuple[bool, str]:
     role_cache = cache.lookup_maps.setdefault("discord_role_resolution", {})
-    cache_key = str(role_id)
+    cache_key = f"{int(GUILD_ID)}:{int(role_id)}"
     if cache_key in role_cache:
         return bool(role_cache[cache_key]), "resolved from startup cache"
 
-    for guild in bot.guilds:
-        if guild.get_role(role_id) is not None:
-            role_cache[cache_key] = True
-            return True, f"resolved from guild cache ({guild.id})"
+    configured_guild_id = int(GUILD_ID)
+    role_id = int(role_id)
+    log.info(
+        "Discord target validation context: configured_guild_id=%s configured_vip_role_id=%s bot_guild_count=%s",
+        configured_guild_id,
+        role_id,
+        len(getattr(bot, "guilds", [])),
+    )
 
-    for guild in bot.guilds:
-        try:
-            roles = await guild.fetch_roles()
-        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
-            continue
-        if any(int(role.id) == role_id for role in roles):
-            role_cache[cache_key] = True
-            return True, f"resolved from API fetch_roles ({guild.id})"
+    if configured_guild_id <= 0:
+        role_cache[cache_key] = False
+        return False, "GUILD_ID is not configured; cannot resolve role against intended guild"
+
+    guild = bot.get_guild(configured_guild_id)
+    if guild is None:
+        role_cache[cache_key] = False
+        log.info(
+            "Discord role target unresolved: configured_guild_id=%s resolved_guild=None",
+            configured_guild_id,
+        )
+        return False, f"configured guild {configured_guild_id} unavailable in cache"
+
+    log.info(
+        "Discord role validation guild resolution: repr=%r guild_id=%s guild_name=%s",
+        guild,
+        getattr(guild, "id", None),
+        getattr(guild, "name", None),
+    )
+
+    cached_role = guild.get_role(role_id)
+    log.info(
+        "Discord role validation cache lookup: guild_id=%s role_id=%s get_role_found=%s",
+        guild.id,
+        role_id,
+        cached_role is not None,
+    )
+    if cached_role is not None:
+        role_cache[cache_key] = True
+        return True, f"resolved from guild cache ({guild.id})"
+
+    try:
+        roles = await guild.fetch_roles()
+        log.info(
+            "Discord role validation fetch_roles success: guild_id=%s role_count=%s",
+            guild.id,
+            len(roles),
+        )
+    except Exception as exc:
+        role_cache[cache_key] = False
+        log.info(
+            "Discord role validation fetch_roles exception: guild_id=%s role_id=%s exception=%s: %s",
+            guild.id,
+            role_id,
+            type(exc).__name__,
+            exc,
+        )
+        return False, f"fetch_roles failed: {type(exc).__name__}: {exc}"
+
+    fetched_match = any(int(role.id) == role_id for role in roles)
+    log.info(
+        "Discord role validation fetched-role scan: guild_id=%s role_id=%s found_in_fetch=%s",
+        guild.id,
+        role_id,
+        fetched_match,
+    )
+    if fetched_match:
+        role_cache[cache_key] = True
+        return True, f"resolved from API fetch_roles ({guild.id})"
 
     role_cache[cache_key] = False
-    return False, "not found in guild cache or fetch_roles"
+    return False, "not found in configured guild cache or fetch_roles"
 
 
 async def _resolve_configured_channel(bot: Any, cache: BotStartupCache, *, channel_id: int) -> tuple[bool, str]:
@@ -399,13 +454,13 @@ async def _boot_validate_discord_targets(bot: Any, cache: BotStartupCache) -> st
 
     if optional_missing:
         missing = ", ".join(f"{c.spec.key}={c.spec.target_id} ({c.detail})" for c in optional_missing)
-        msg = f"Optional Discord targets missing: {missing}"
-        log.warning(msg)
+        msg = f"Optional Discord targets unavailable at startup: {missing}"
+        log.info(msg)
         diagnostics = getattr(bot, "startup_diagnostics", None)
         if diagnostics is not None:
             diagnostics.record_entry(
                 phase="startup",
-                status=STATUS_WARN,
+                status=STATUS_SKIP,
                 fatal=False,
                 category="startup",
                 subsystem="startup_manager",
@@ -420,10 +475,7 @@ async def _boot_validate_discord_targets(bot: Any, cache: BotStartupCache) -> st
     required_checked = len([c for c in checks if c.spec.required])
     optional_checked = len([c for c in checks if not c.spec.required])
     if optional_missing:
-        return (
-            f"WARN: Optional Discord targets missing: {len(optional_missing)} "
-            f"(required_checked={required_checked}, optional_checked={optional_checked})"
-        )
+        return f"SKIP: Optional Discord targets unavailable: {len(optional_missing)} (required_checked={required_checked}, optional_checked={optional_checked})"
     return (
         f"PASS: All configured required Discord targets resolved "
         f"(required_checked={required_checked}, optional_checked={optional_checked})"
