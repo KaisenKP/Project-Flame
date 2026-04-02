@@ -8,11 +8,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import discord
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import ActivityDailyRow, BusinessOwnershipRow, UserAssetRow, WalletRow, XpRow
+from db.models import ActivityDailyRow, BusinessOwnershipRow, UserAssetRow, UserRow, WalletRow, XpRow
 from services.achievement_card import AchievementCardPayload, AchievementCardRenderer
 from services.achievement_catalog import ACHIEVEMENT_CATALOG, AchievementDefinition, sorted_achievements
 
@@ -198,104 +198,105 @@ async def increment_counter(
     if row is None:
         row = UserAchievementCounterRow(guild_id=guild_id, user_id=user_id, counter_key=counter_key, counter_value=0)
         session.add(row)
-        await session.flush()
     row.counter_value = int(row.counter_value) + amt
-    await session.flush()
     return int(row.counter_value)
+
+
+async def increment_counters_bulk(
+    session: AsyncSession,
+    *,
+    guild_id: int,
+    user_id: int,
+    increments: dict[str, int],
+) -> dict[str, int]:
+    """Bulk increment achievement counters with a single select/flush cycle."""
+    from db.models import UserAchievementCounterRow
+
+    cleaned = {str(k): max(int(v), 0) for k, v in increments.items() if str(k) and int(v) > 0}
+    if not cleaned:
+        return {}
+
+    rows = list(
+        await session.scalars(
+            select(UserAchievementCounterRow).where(
+                UserAchievementCounterRow.guild_id == guild_id,
+                UserAchievementCounterRow.user_id == user_id,
+                UserAchievementCounterRow.counter_key.in_(tuple(cleaned.keys())),
+            )
+        )
+    )
+    by_key = {str(r.counter_key): r for r in rows}
+
+    out: dict[str, int] = {}
+    for key, amount in cleaned.items():
+        row = by_key.get(key)
+        if row is None:
+            row = UserAchievementCounterRow(guild_id=guild_id, user_id=user_id, counter_key=key, counter_value=0)
+            session.add(row)
+            by_key[key] = row
+        row.counter_value = int(row.counter_value) + amount
+        out[key] = int(row.counter_value)
+    return out
 
 
 async def _build_context(session: AsyncSession, *, guild_id: int, user_id: int) -> AchievementContext:
     from db.models import UserAchievementCounterRow
 
-    jobs_counter = await session.scalar(
-        select(UserAchievementCounterRow.counter_value).where(
-            UserAchievementCounterRow.guild_id == guild_id,
-            UserAchievementCounterRow.user_id == user_id,
-            UserAchievementCounterRow.counter_key == "jobs_completed",
+    counter_rows = list(
+        await session.scalars(
+            select(UserAchievementCounterRow).where(
+                UserAchievementCounterRow.guild_id == guild_id,
+                UserAchievementCounterRow.user_id == user_id,
+                UserAchievementCounterRow.counter_key.in_(
+                    (
+                        "jobs_completed",
+                        "chatroom_messages",
+                        "selfies_posted",
+                        "images_posted",
+                        "reactions_added",
+                        "jevarius_interactions",
+                    )
+                ),
+            )
         )
     )
-    jobs_completed = int(jobs_counter or 0)
+    counters = {str(row.counter_key): int(row.counter_value or 0) for row in counter_rows}
 
-    chatroom_counter = await session.scalar(
-        select(UserAchievementCounterRow.counter_value).where(
-            UserAchievementCounterRow.guild_id == guild_id,
-            UserAchievementCounterRow.user_id == user_id,
-            UserAchievementCounterRow.counter_key == "chatroom_messages",
-        )
-    )
-    chatroom_messages = int(chatroom_counter or 0)
-
-    selfie_counter = await session.scalar(
-        select(UserAchievementCounterRow.counter_value).where(
-            UserAchievementCounterRow.guild_id == guild_id,
-            UserAchievementCounterRow.user_id == user_id,
-            UserAchievementCounterRow.counter_key == "selfies_posted",
-        )
-    )
-    selfies_posted = int(selfie_counter or 0)
-
-    images_counter = await session.scalar(
-        select(UserAchievementCounterRow.counter_value).where(
-            UserAchievementCounterRow.guild_id == guild_id,
-            UserAchievementCounterRow.user_id == user_id,
-            UserAchievementCounterRow.counter_key == "images_posted",
-        )
-    )
-    images_posted = int(images_counter or 0)
-
-    reactions_counter = await session.scalar(
-        select(UserAchievementCounterRow.counter_value).where(
-            UserAchievementCounterRow.guild_id == guild_id,
-            UserAchievementCounterRow.user_id == user_id,
-            UserAchievementCounterRow.counter_key == "reactions_added",
-        )
-    )
-    reactions_added = int(reactions_counter or 0)
-
-    jevarius_counter = await session.scalar(
-        select(UserAchievementCounterRow.counter_value).where(
-            UserAchievementCounterRow.guild_id == guild_id,
-            UserAchievementCounterRow.user_id == user_id,
-            UserAchievementCounterRow.counter_key == "jevarius_interactions",
-        )
-    )
-    jevarius_interactions = int(jevarius_counter or 0)
-
-    messages_sent = int(
-        await session.scalar(
-            select(func.coalesce(func.sum(ActivityDailyRow.message_count), 0)).where(
+    messages_sent, vc_seconds_total = (
+        await session.execute(
+            select(
+                func.coalesce(func.sum(ActivityDailyRow.message_count), 0),
+                func.coalesce(func.sum(ActivityDailyRow.vc_seconds), 0),
+            ).where(
                 ActivityDailyRow.guild_id == guild_id,
                 ActivityDailyRow.user_id == user_id,
             )
         )
-        or 0
-    )
+    ).one()
+    vc_minutes = int(vc_seconds_total or 0) // 60
 
-    vc_seconds_total = int(
-        await session.scalar(
-            select(func.coalesce(func.sum(ActivityDailyRow.vc_seconds), 0)).where(
-                ActivityDailyRow.guild_id == guild_id,
-                ActivityDailyRow.user_id == user_id,
-            )
+    wallet, xp = (
+        await session.execute(
+            select(WalletRow, XpRow)
+            .select_from(UserRow)
+            .outerjoin(WalletRow, tuple_(WalletRow.guild_id, WalletRow.user_id) == tuple_(UserRow.guild_id, UserRow.user_id))
+            .outerjoin(XpRow, tuple_(XpRow.guild_id, XpRow.user_id) == tuple_(UserRow.guild_id, UserRow.user_id))
+            .where(UserRow.guild_id == guild_id, UserRow.user_id == user_id)
+            .limit(1)
         )
-        or 0
-    )
-    vc_minutes = vc_seconds_total // 60
+    ).one_or_none() or (None, None)
 
-    businesses_owned = int(
-        await session.scalar(
-            select(func.count(BusinessOwnershipRow.id)).where(
+    businesses_owned, businesses_value = (
+        await session.execute(
+            select(
+                func.count(BusinessOwnershipRow.id),
+                func.coalesce(func.sum(BusinessOwnershipRow.total_spent), 0),
+            ).where(
                 BusinessOwnershipRow.guild_id == guild_id,
                 BusinessOwnershipRow.user_id == user_id,
             )
         )
-        or 0
-    )
-
-    wallet = await session.scalar(
-        select(WalletRow).where(WalletRow.guild_id == guild_id, WalletRow.user_id == user_id)
-    )
-    xp = await session.scalar(select(XpRow).where(XpRow.guild_id == guild_id, XpRow.user_id == user_id))
+    ).one()
 
     assets_value = int(
         await session.scalar(
@@ -307,33 +308,25 @@ async def _build_context(session: AsyncSession, *, guild_id: int, user_id: int) 
         )
         or 0
     )
-    businesses_value = int(
-        await session.scalar(
-            select(func.coalesce(func.sum(BusinessOwnershipRow.total_spent), 0)).where(
-                BusinessOwnershipRow.guild_id == guild_id,
-                BusinessOwnershipRow.user_id == user_id,
-            )
-        )
-        or 0
-    )
+
     wallet_silver = int(wallet.silver) if wallet is not None else 0
     level = int(xp.level_cached) if xp is not None else 1
-    net_worth = wallet_silver + assets_value + businesses_value
+    net_worth = wallet_silver + assets_value + int(businesses_value or 0)
 
     return AchievementContext(
         guild_id=guild_id,
         user_id=user_id,
-        jobs_completed=jobs_completed,
-        businesses_owned=businesses_owned,
+        jobs_completed=int(counters.get("jobs_completed", 0)),
+        businesses_owned=int(businesses_owned or 0),
         wallet_silver=wallet_silver,
         level=level,
         net_worth=net_worth,
-        messages_sent=messages_sent,
-        chatroom_messages=chatroom_messages,
-        selfies_posted=selfies_posted,
-        images_posted=images_posted,
-        reactions_added=reactions_added,
-        jevarius_interactions=jevarius_interactions,
+        messages_sent=int(messages_sent or 0),
+        chatroom_messages=int(counters.get("chatroom_messages", 0)),
+        selfies_posted=int(counters.get("selfies_posted", 0)),
+        images_posted=int(counters.get("images_posted", 0)),
+        reactions_added=int(counters.get("reactions_added", 0)),
+        jevarius_interactions=int(counters.get("jevarius_interactions", 0)),
         vc_minutes=vc_minutes,
     )
 
@@ -360,10 +353,27 @@ async def check_and_grant_achievements(
     guild_id: int,
     user_id: int,
 ) -> list[AchievementUnlock]:
+    from db.models import UserAchievementRow
+
     ctx = await _build_context(session, guild_id=guild_id, user_id=user_id)
     candidates = check_achievement_conditions(ctx)
+    if not candidates:
+        return []
+
+    existing = set(
+        await session.scalars(
+            select(UserAchievementRow.achievement_key).where(
+                UserAchievementRow.guild_id == guild_id,
+                UserAchievementRow.user_id == user_id,
+                UserAchievementRow.achievement_key.in_(tuple(candidates)),
+            )
+        )
+    )
+
     granted: list[AchievementUnlock] = []
     for key in candidates:
+        if key in existing:
+            continue
         unlock = await grant_achievement(session, guild_id=guild_id, user_id=user_id, achievement_key=key)
         if unlock is not None:
             granted.append(unlock)
