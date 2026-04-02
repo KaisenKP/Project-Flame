@@ -14,6 +14,7 @@ from discord.ext import commands
 
 from services.error_logging import build_context_from_command, build_context_from_interaction
 from services.startup_diagnostics import StartupDiagnostics
+from services.startup_manager import StartupManager
 
 log = logging.getLogger("bot")
 
@@ -131,6 +132,7 @@ class PulseBot(commands.Bot):
         self._ready_once = asyncio.Event()
         self._startup_report_sent = False
         self._persistent_views_registered = 0
+        self.startup_manager = StartupManager()
 
     async def setup_hook(self) -> None:
         diag = self.startup_diagnostics
@@ -161,6 +163,8 @@ class PulseBot(commands.Bot):
         elif diag is not None:
             await diag.run_stage("command_tree_sync", lambda: None, summary_on_pass="Command sync disabled", summary_on_skip="Command sync disabled by config")
 
+        self.startup_manager.configure_defaults()
+
         if diag is not None:
             await diag.run_stage("background_task_startup", lambda: self.start_background_tasks(), summary_on_pass="Background tasks started")
             await diag.run_stage(
@@ -168,10 +172,24 @@ class PulseBot(commands.Bot):
                 lambda: None,
                 summary_on_pass=f"Persistent views registered: {self._persistent_views_registered}",
             )
-            await diag.run_stage("cache_warmup", lambda: None, summary_on_skip="No cache warmup routine configured")
-            await diag.run_stage("custom_boot_routines", lambda: None, summary_on_skip="No custom boot routines configured")
+            await diag.run_stage("cache_warmup", self._run_cache_warmup, fatal=True, summary_on_pass="Cache warmup completed")
+            await diag.run_stage("custom_boot_routines", self._run_custom_boot_routines, fatal=True, summary_on_pass="Custom boot routines completed")
         else:
             self.start_background_tasks()
+            await self._run_cache_warmup()
+            await self._run_custom_boot_routines()
+
+    async def _run_cache_warmup(self) -> str:
+        report = await self.startup_manager.run_category("cache_warmup", bot=self, diagnostics=self.startup_diagnostics)
+        if report.failed_required:
+            raise RuntimeError(report.summary)
+        return report.summary
+
+    async def _run_custom_boot_routines(self) -> str:
+        report = await self.startup_manager.run_category("custom_boot", bot=self, diagnostics=self.startup_diagnostics)
+        if report.failed_required:
+            raise RuntimeError(report.summary)
+        return report.summary
 
     async def _ensure_db_schema(self) -> None:
         try:
