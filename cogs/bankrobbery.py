@@ -161,13 +161,13 @@ class BankRobberyCog(commands.Cog):
         await self._show_hub(interaction)
 
     async def cog_load(self) -> None:
-        existing = self.bot.tree.get_command(self.heist_cmd.name, type=self.heist_cmd.type)
+        existing = self.bot.tree.get_command(self.heist_cmd.name)
         if existing is not None:
-            self.bot.tree.remove_command(self.heist_cmd.name, type=self.heist_cmd.type)
+            self.bot.tree.remove_command(self.heist_cmd.name)
         self.bot.tree.add_command(self.heist_cmd)
 
     async def cog_unload(self) -> None:
-        self.bot.tree.remove_command(self.heist_cmd.name, type=self.heist_cmd.type)
+        self.bot.tree.remove_command(self.heist_cmd.name)
 
     async def handle_refresh_hub(self, interaction: discord.Interaction, *, owner_id: int):
         await interaction.response.defer(ephemeral=True)
