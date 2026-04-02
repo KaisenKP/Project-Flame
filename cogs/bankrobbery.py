@@ -30,6 +30,7 @@ from services.bankrobbery.ui import (
     build_lobby_embed,
     build_prep_embed,
     build_results_embed,
+    validate_view_component_rows,
 )
 from services.db import sessions
 from services.users import ensure_user_rows
@@ -115,6 +116,7 @@ class BankRobberyCog(commands.Cog):
 
     async def _send_panel(self, interaction: discord.Interaction, *, embed: discord.Embed, ephemeral: bool = True):
         view = HeistHubView(self, interaction.user.id)
+        validate_view_component_rows(view, context="heist hub panel")
         if interaction.response.is_done():
             await interaction.followup.send(embed=embed, view=view, ephemeral=ephemeral)
         else:

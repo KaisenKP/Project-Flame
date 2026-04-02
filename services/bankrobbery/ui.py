@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import logging
+
 import discord
 
 from .catalog import PREP_DEFS, TEMPLATES, BankApproach, FinaleOutcome, get_template
+
+logger = logging.getLogger(__name__)
 
 
 def fmt_int(n: int) -> str:
@@ -172,6 +176,27 @@ def build_results_embed(*, template, outcome_payload, state: dict) -> discord.Em
     return embed
 
 
+def validate_view_component_rows(view: discord.ui.View, *, context: str = "heist view") -> None:
+    for child in view.children:
+        row = getattr(child, "row", None)
+        if row is None:
+            continue
+        if 0 <= int(row) <= 4:
+            continue
+        descriptor = (
+            getattr(child, "label", None)
+            or getattr(child, "placeholder", None)
+            or getattr(child, "custom_id", None)
+            or child.__class__.__name__
+        )
+        message = (
+            f"Invalid component row in {context}: {descriptor!r} "
+            f"({child.__class__.__name__}) has row={row}; valid rows are 0..4."
+        )
+        logger.error(message)
+        raise ValueError(message)
+
+
 class HeistTargetSelect(discord.ui.Select):
     def __init__(self, cog, owner_id: int):
         self.cog = cog
@@ -185,7 +210,7 @@ class HeistTargetSelect(discord.ui.Select):
             )
             for template in TEMPLATES.values()
         ]
-        super().__init__(placeholder="Choose a target to create a crew", min_values=1, max_values=1, options=options, row=0)
+        super().__init__(placeholder="Choose a target to create a crew", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         await self.cog.handle_create_target(interaction, owner_id=self.owner_id, robbery_id=self.values[0])
@@ -199,7 +224,7 @@ class HeistApproachSelect(discord.ui.Select):
             discord.SelectOption(label=approach.value.title(), value=approach.value, emoji="🛠️")
             for approach in BankApproach
         ]
-        super().__init__(placeholder="Choose your approach", min_values=1, max_values=1, options=options, row=1)
+        super().__init__(placeholder="Choose your approach", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         await self.cog.handle_set_approach(interaction, owner_id=self.owner_id, approach=self.values[0])
@@ -213,7 +238,7 @@ class HeistPrepSelect(discord.ui.Select):
             discord.SelectOption(label=definition.name[:100], value=key, description=definition.bonus_text[:100], emoji="🧰")
             for key, definition in PREP_DEFS.items()
         ]
-        super().__init__(placeholder="Mark a prep objective complete", min_values=1, max_values=1, options=options, row=2)
+        super().__init__(placeholder="Mark a prep objective complete", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         await self.cog.handle_complete_prep(interaction, owner_id=self.owner_id, prep_key=self.values[0])
@@ -223,7 +248,7 @@ class HeistJoinLeaderSelect(discord.ui.UserSelect):
     def __init__(self, cog, owner_id: int):
         self.cog = cog
         self.owner_id = owner_id
-        super().__init__(placeholder="Choose a leader to join", min_values=1, max_values=1, row=3)
+        super().__init__(placeholder="Choose a leader to join", min_values=1, max_values=1)
 
     async def callback(self, interaction: discord.Interaction):
         selected = self.values[0]
@@ -239,6 +264,7 @@ class HeistHubView(discord.ui.View):
         self.add_item(HeistApproachSelect(cog, owner_id))
         self.add_item(HeistPrepSelect(cog, owner_id))
         self.add_item(HeistJoinLeaderSelect(cog, owner_id))
+        self.add_item(HeistControlSelect(cog, owner_id))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -246,42 +272,49 @@ class HeistHubView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Refresh Hub", style=discord.ButtonStyle.secondary, emoji="🔄", row=4)
-    async def refresh_button(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.cog.handle_refresh_hub(interaction, owner_id=self.owner_id)
 
-    @discord.ui.button(label="Lobby Status", style=discord.ButtonStyle.secondary, emoji="📋", row=4)
-    async def status_button(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.cog.handle_lobby_status(interaction, owner_id=self.owner_id)
+class HeistControlSelect(discord.ui.Select):
+    def __init__(self, cog, owner_id: int):
+        self.cog = cog
+        self.owner_id = owner_id
+        options = [
+            discord.SelectOption(label="Refresh Hub", value="refresh", emoji="🔄", description="Reload your profile and cooldowns"),
+            discord.SelectOption(label="Lobby Status", value="status", emoji="📋", description="Show your current lobby snapshot"),
+            discord.SelectOption(label="Auto Setup", value="auto_setup", emoji="⚙️", description="Auto assign roles and payout cuts"),
+            discord.SelectOption(label="Ready Toggle", value="ready_toggle", emoji="✅", description="Toggle your ready status"),
+            discord.SelectOption(label="Leave Crew", value="leave_crew", emoji="🚪", description="Exit your current crew"),
+            discord.SelectOption(label="Launch Finale", value="launch", emoji="🚀", description="Start the finale phase"),
+            discord.SelectOption(label="Push Loot", value="push", emoji="💰", description="Run a loot round action"),
+            discord.SelectOption(label="Leave Now", value="leave_now", emoji="📦", description="Leave now with secured loot"),
+            discord.SelectOption(label="Escape", value="escape", emoji="🏃", description="Attempt the final getaway"),
+            discord.SelectOption(label="Override", value="override", emoji="🧠", description="Use a tactical override"),
+        ]
+        super().__init__(
+            placeholder="Choose a crew or finale action",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
 
-    @discord.ui.button(label="Auto Setup", style=discord.ButtonStyle.primary, emoji="⚙️", row=4)
-    async def auto_setup_button(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.cog.handle_auto_setup(interaction, owner_id=self.owner_id)
-
-    @discord.ui.button(label="Ready Toggle", style=discord.ButtonStyle.success, emoji="✅", row=4)
-    async def ready_button(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.cog.handle_toggle_ready(interaction, owner_id=self.owner_id)
-
-    @discord.ui.button(label="Leave Crew", style=discord.ButtonStyle.danger, emoji="🚪", row=4)
-    async def leave_button(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.cog.handle_leave_lobby(interaction, owner_id=self.owner_id)
-
-    @discord.ui.button(label="Launch Finale", style=discord.ButtonStyle.success, emoji="🚀", row=5)
-    async def launch_button(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.cog.handle_launch_finale(interaction, owner_id=self.owner_id)
-
-    @discord.ui.button(label="Push Loot", style=discord.ButtonStyle.primary, emoji="💰", row=5)
-    async def push_button(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.cog.handle_finale_action(interaction, owner_id=self.owner_id, action="push")
-
-    @discord.ui.button(label="Leave Now", style=discord.ButtonStyle.secondary, emoji="📦", row=5)
-    async def leave_now_button(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.cog.handle_finale_action(interaction, owner_id=self.owner_id, action="leave")
-
-    @discord.ui.button(label="Escape", style=discord.ButtonStyle.danger, emoji="🏃", row=5)
-    async def escape_button(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.cog.handle_finale_action(interaction, owner_id=self.owner_id, action="escape")
-
-    @discord.ui.button(label="Override", style=discord.ButtonStyle.primary, emoji="🧠", row=5)
-    async def override_button(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.cog.handle_finale_action(interaction, owner_id=self.owner_id, action="override")
+    async def callback(self, interaction: discord.Interaction):
+        action = self.values[0]
+        if action == "refresh":
+            await self.cog.handle_refresh_hub(interaction, owner_id=self.owner_id)
+        elif action == "status":
+            await self.cog.handle_lobby_status(interaction, owner_id=self.owner_id)
+        elif action == "auto_setup":
+            await self.cog.handle_auto_setup(interaction, owner_id=self.owner_id)
+        elif action == "ready_toggle":
+            await self.cog.handle_toggle_ready(interaction, owner_id=self.owner_id)
+        elif action == "leave_crew":
+            await self.cog.handle_leave_lobby(interaction, owner_id=self.owner_id)
+        elif action == "launch":
+            await self.cog.handle_launch_finale(interaction, owner_id=self.owner_id)
+        elif action == "push":
+            await self.cog.handle_finale_action(interaction, owner_id=self.owner_id, action="push")
+        elif action == "leave_now":
+            await self.cog.handle_finale_action(interaction, owner_id=self.owner_id, action="leave")
+        elif action == "escape":
+            await self.cog.handle_finale_action(interaction, owner_id=self.owner_id, action="escape")
+        elif action == "override":
+            await self.cog.handle_finale_action(interaction, owner_id=self.owner_id, action="override")
