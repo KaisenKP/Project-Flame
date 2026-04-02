@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import sys
+import traceback
 from pathlib import Path
 
 import discord
@@ -21,6 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from bot import build_bot_from_env  # noqa: E402
+from services.startup_diagnostics import StartupDiagnostics, StartupStageResult, format_exception_brief  # noqa: E402
 
 
 # ------------------------------------------------------------
@@ -68,25 +71,7 @@ def print_boot_banner() -> None:
     )
 
 
-setup_logging()
-print_boot_banner()
-
 log = logging.getLogger("boot")
-
-
-# ------------------------------------------------------------
-# Token (keep using env for secret, this should NOT be hardcoded)
-# ------------------------------------------------------------
-
-import os  # keep token env, do not hardcode secrets
-
-BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
-if not BOT_TOKEN:
-    raise SystemExit(
-        "BOT_TOKEN is missing.\n"
-        "Set it in your panel environment variables.\n"
-        "Example: BOT_TOKEN=xxxxxxxxxxxxxxxx"
-    )
 
 
 # ------------------------------------------------------------
@@ -132,28 +117,69 @@ def install_signal_handlers(loop: asyncio.AbstractEventLoop, bot: discord.Client
 # ------------------------------------------------------------
 
 async def main() -> None:
-    log.info("Booting Project Pulse")
+    diagnostics = StartupDiagnostics()
+    diagnostics.stages.append(
+        StartupStageResult(
+            stage_name="process_start",
+            status="PASS",
+            summary="Process boot sequence started",
+            started_at=diagnostics.boot_started_at,
+            finished_at=diagnostics.boot_started_at,
+            duration_ms=0,
+        )
+    )
 
-    await _maybe_create_tables()
+    await diagnostics.run_stage("logging_init", setup_logging, summary_on_pass="Rich logging initialized")
+    await diagnostics.run_stage("boot_banner", print_boot_banner, summary_on_pass="Boot banner rendered")
 
-    bot = await build_bot_from_env()
-
-    loop = asyncio.get_running_loop()
-    install_signal_handlers(loop, bot)
-
+    bot: discord.Client | None = None
     try:
-        await bot.start(BOT_TOKEN)
-    except discord.LoginFailure:
-        log.error("Invalid BOT_TOKEN (Discord rejected it).")
-    except Exception:
+        log.info("Booting Project Pulse")
+        token = (os.getenv("BOT_TOKEN") or "").strip()
+        if not token:
+            raise RuntimeError("BOT_TOKEN is missing")
+        await diagnostics.run_stage("environment_or_config_load", lambda: None, summary_on_pass="Environment and config loaded")
+
+        await diagnostics.run_stage("database_engine_or_session_init", _maybe_create_tables, summary_on_pass="Optional table bootstrap completed")
+        bot = await diagnostics.run_stage(
+            "bot_build",
+            lambda: build_bot_from_env(startup_diagnostics=diagnostics),
+            fatal=True,
+            summary_on_pass="Bot instance constructed",
+        )
+        assert bot is not None
+
+        loop = asyncio.get_running_loop()
+        diagnostics.install_global_exception_hooks(loop)
+        install_signal_handlers(loop, bot)
+
+        await diagnostics.run_stage("bot_login_and_start", lambda: bot.start(token), fatal=True, summary_on_pass="bot.start completed")
+    except discord.LoginFailure as exc:
+        diagnostics.record_failure(
+            stage_name="bot_login_and_start",
+            summary="Discord rejected BOT_TOKEN",
+            exception=exc,
+            traceback_text="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            fatal=True,
+        )
+        diagnostics.logger.error("Invalid BOT_TOKEN (Discord rejected it).")
+    except Exception as exc:
+        diagnostics.record_failure(
+            stage_name="main_runtime",
+            summary=format_exception_brief(exc),
+            exception=exc,
+            traceback_text="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            fatal=True,
+        )
         log.exception("Bot crashed")
-        raise
     finally:
-        try:
-            if not bot.is_closed():
-                await bot.close()
-        except Exception:
-            log.exception("Failed during final bot.close()")
+        diagnostics.write_local_report_file(bot)
+        if bot is not None:
+            try:
+                if not bot.is_closed():
+                    await bot.close()
+            except Exception:
+                log.exception("Failed during final bot.close()")
 
 
 if __name__ == "__main__":
