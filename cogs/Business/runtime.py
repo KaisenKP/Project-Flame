@@ -66,6 +66,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional, Sequence
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from db.models import BusinessOwnershipRow, BusinessRunRow, WalletRow
 from services.db import sessions
@@ -87,6 +88,8 @@ log = logging.getLogger(__name__)
 
 DEFAULT_TICK_INTERVAL_SECONDS = 60
 SECONDS_PER_HOUR = 3600
+DEFAULT_DB_RETRY_ATTEMPTS = 3
+DEFAULT_DB_RETRY_BASE_DELAY_SECONDS = 0.35
 
 
 # =========================================================
@@ -186,6 +189,23 @@ def _run_has_ended(run: BusinessRunRow, *, now: Optional[datetime] = None) -> bo
     if now is None:
         now = _utc_now()
     return _as_utc(now) >= _as_utc(run.ends_at)
+
+
+def _is_retryable_operational_error(exc: Exception) -> bool:
+    if not isinstance(exc, OperationalError):
+        return False
+    raw = str(exc).lower()
+    if "lock wait timeout exceeded" in raw:
+        return True
+    if "deadlock found when trying to get lock" in raw:
+        return True
+    orig = getattr(exc, "orig", None)
+    code = None
+    if orig is not None:
+        args = getattr(orig, "args", ())
+        if args:
+            code = args[0]
+    return code in {1205, 1213}
 
 
 # =========================================================
@@ -571,10 +591,14 @@ class BusinessRuntimeEngine:
         self,
         *,
         tick_interval_seconds: int = DEFAULT_TICK_INTERVAL_SECONDS,
+        db_retry_attempts: int = DEFAULT_DB_RETRY_ATTEMPTS,
+        db_retry_base_delay_seconds: float = DEFAULT_DB_RETRY_BASE_DELAY_SECONDS,
         on_run_completed: Optional[Callable[[CompletedRunNotice], Awaitable[None]]] = None,
     ):
         self.sessionmaker = sessions()
         self.tick_interval_seconds = max(int(tick_interval_seconds), 5)
+        self.db_retry_attempts = max(int(db_retry_attempts), 1)
+        self.db_retry_base_delay_seconds = max(float(db_retry_base_delay_seconds), 0.05)
         self.on_run_completed = on_run_completed
         self._task: Optional[asyncio.Task] = None
         self._stopping = False
@@ -590,14 +614,31 @@ class BusinessRuntimeEngine:
         guild_id: Optional[int] = None,
         now: Optional[datetime] = None,
     ) -> RuntimeTickResult:
-        async with self.sessionmaker() as session:
-            async with session.begin():
-                result = await tick_active_runs_in_session(
-                    session,
-                    guild_id=guild_id,
-                    now=now,
+        attempts = self.db_retry_attempts
+        for attempt in range(1, attempts + 1):
+            try:
+                async with self.sessionmaker() as session:
+                    async with session.begin():
+                        result = await tick_active_runs_in_session(
+                            session,
+                            guild_id=guild_id,
+                            now=now,
+                        )
+                    completed_notices = list(result.completed_notices)
+                break
+            except Exception as exc:
+                if not _is_retryable_operational_error(exc) or attempt >= attempts:
+                    raise
+                backoff = self.db_retry_base_delay_seconds * attempt
+                log.warning(
+                    "Retryable DB error during business runtime tick; retrying. attempt=%s/%s delay=%.2fs guild_id=%s error=%s",
+                    attempt,
+                    attempts,
+                    backoff,
+                    guild_id,
+                    exc,
                 )
-            completed_notices = list(result.completed_notices)
+                await asyncio.sleep(backoff)
         for notice in completed_notices:
             if self.on_run_completed is None:
                 continue
