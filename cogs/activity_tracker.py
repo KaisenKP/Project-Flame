@@ -22,6 +22,7 @@ from services.achievements import (
     SELFIE_CHANNEL_ID,
     check_and_grant_achievements,
     increment_counter,
+    increment_counters_bulk,
     queue_achievement_announcements,
 )
 
@@ -168,48 +169,25 @@ class ActivityTrackerCog(commands.Cog):
                     day=day,
                 )
                 daily.message_count += 1
-                await increment_counter(
-                    session,
-                    guild_id=guild_id,
-                    user_id=user_id,
-                    counter_key="messages_sent",
-                    amount=1,
-                )
+                counter_increments: dict[str, int] = {"messages_sent": 1}
                 if message.channel.id == CHATROOM_CHANNEL_ID:
-                    await increment_counter(
-                        session,
-                        guild_id=guild_id,
-                        user_id=user_id,
-                        counter_key="chatroom_messages",
-                        amount=1,
-                    )
+                    counter_increments["chatroom_messages"] = 1
                 if message.attachments:
-                    await increment_counter(
-                        session,
-                        guild_id=guild_id,
-                        user_id=user_id,
-                        counter_key="images_posted",
-                        amount=1,
-                    )
+                    counter_increments["images_posted"] = 1
                 if message.channel.id == SELFIE_CHANNEL_ID and message.attachments:
-                    await increment_counter(
-                        session,
-                        guild_id=guild_id,
-                        user_id=user_id,
-                        counter_key="selfies_posted",
-                        amount=1,
-                    )
+                    counter_increments["selfies_posted"] = 1
 
                 mentioned_jevarius = any(m.id == JEVARIUS_BOT_ID for m in message.mentions)
                 replied_to_jevarius = await self._is_reply_to_jevarius(message)
                 if mentioned_jevarius or replied_to_jevarius:
-                    await increment_counter(
-                        session,
-                        guild_id=guild_id,
-                        user_id=user_id,
-                        counter_key="jevarius_interactions",
-                        amount=1,
-                    )
+                    counter_increments["jevarius_interactions"] = 1
+
+                await increment_counters_bulk(
+                    session,
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    increments=counter_increments,
+                )
 
                 await award_xp(
                     session,

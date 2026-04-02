@@ -5,7 +5,7 @@ import logging
 import random
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -111,19 +111,18 @@ class VipHiringService:
                     for _ in range(iterations):
                         candidate = random.choice(pool.candidates)
                         step_no = int(job.processed_count or 0) + 1
+                        step = VipHiringJobStepRow(
+                            job_id=int(job.id),
+                            step_number=step_no,
+                            entity_kind=str(job.mode),
+                            entity_key=str(candidate.get("key", "")),
+                            entity_name=str(candidate.get("name", ""))[:64],
+                            action_type="hire",
+                            result_status="started",
+                            metadata_json={"rarity": candidate.get("rarity")},
+                        )
                         try:
-                            session.add(
-                                VipHiringJobStepRow(
-                                    job_id=int(job.id),
-                                    step_number=step_no,
-                                    entity_kind=str(job.mode),
-                                    entity_key=str(candidate.get("key", "")),
-                                    entity_name=str(candidate.get("name", ""))[:64],
-                                    action_type="hire",
-                                    result_status="started",
-                                    metadata_json={"rarity": candidate.get("rarity")},
-                                )
-                            )
+                            session.add(step)
                             await session.flush()
                         except IntegrityError:
                             job.duplicate_blocked_count = int(job.duplicate_blocked_count or 0) + 1
@@ -158,20 +157,16 @@ class VipHiringService:
                         job.processed_count = int(job.processed_count or 0) + 1
                         if res.ok:
                             job.success_count = int(job.success_count or 0) + 1
-                            step = await session.scalar(select(VipHiringJobStepRow).where(VipHiringJobStepRow.job_id == int(job.id), VipHiringJobStepRow.step_number == step_no))
-                            if step is not None:
-                                step.result_status = "committed"
+                            step.result_status = "committed"
                         else:
                             job.failed_count = int(job.failed_count or 0) + 1
-                            step = await session.scalar(select(VipHiringJobStepRow).where(VipHiringJobStepRow.job_id == int(job.id), VipHiringJobStepRow.step_number == step_no))
-                            if step is not None:
-                                step.result_status = "failed"
-                                step.skip_reason = str(res.message)[:255]
-                                if "full" in str(res.message).lower():
-                                    job.error_summary = "slot restrictions prevented further progress"
-                                    job.status = "partially_completed" if int(job.success_count or 0) > 0 else "failed"
-                                    job.finished_at = datetime.now(timezone.utc)
-                                    break
+                            step.result_status = "failed"
+                            step.skip_reason = str(res.message)[:255]
+                            if "full" in str(res.message).lower():
+                                job.error_summary = "slot restrictions prevented further progress"
+                                job.status = "partially_completed" if int(job.success_count or 0) > 0 else "failed"
+                                job.finished_at = datetime.now(timezone.utc)
+                                break
                     if int(job.processed_count or 0) >= int(job.requested_count or 0) and job.status == "running":
                         job.status = "completed"
                         job.finished_at = datetime.now(timezone.utc)
