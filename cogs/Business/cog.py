@@ -5083,7 +5083,18 @@ class BusinessCog(commands.Cog):
                 elif session.panel == "core":
                     embed.add_field(name="Core Stats", value=f"Stored Level: `{ownership.level}`\nPrestige: `{ownership.prestige}`\nTotal Earned: `{ownership.total_earned}`\nTotal Spent: `{ownership.total_spent}`\nActive Run: `{run.id if run else 'none'}`", inline=False)
                 elif session.panel == "special":
-                    embed.add_field(name="Grant Special Staff", value=f"Type: **{session.special_staff_type.title()}**\nRarity: **{session.special_staff_rarity.title()}**\nTemplate: **{session.special_staff_template or 'Not selected'}**", inline=False)
+                    target_kind = "worker" if session.special_staff_type == "employee" else "manager"
+                    amount_label = "Max available" if session.special_roll_amount_key == "max" else _fmt_int(_clamp_int(_parse_int(session.special_roll_amount_key, 10), 1, AUTO_HIRE_MAX_REROLLS))
+                    embed.add_field(
+                        name="Grant Special Staff",
+                        value=(
+                            f"Type: **{session.special_staff_type.title()}**\n"
+                            f"Rarity Filter: **{_display_rarity_filter(session.special_rarity_filter_key)}**\n"
+                            f"Kind Filter: **{_kind_label(target_kind, session.special_kind_key)}**\n"
+                            f"Max Rolls: **{amount_label}**"
+                        ),
+                        inline=False,
+                    )
             view = BusinessAdminDashboardView(cog=self, guild_id=guild_id, session=session, ownerships=ownerships)
             self._configure_business_admin_view(view, ownership is not None)
             return {"embed": embed, "view": view}
@@ -5131,7 +5142,8 @@ class BusinessCog(commands.Cog):
             await self._business_admin_adjust_prestige(interaction, admin_session, 1)
             return
         if panel == "special":
-            await self._business_admin_grant_special(interaction, admin_session)
+            setup_view = AdminGrantStaffSetupView(parent_view=view)
+            await interaction.response.edit_message(embed=await setup_view._summary_embed(), view=setup_view)
             return
         if panel == "core":
             await interaction.response.send_modal(AdminValueModal(title="Edit Core Stats", fields=[("level","Stored level", "0", True), ("prestige","Prestige", "0", True), ("earned","Total earned", "0", True), ("spent","Total spent", "0", True)], on_submit_cb=lambda i,v: self._business_admin_save_core_modal(i, admin_session, v)))
@@ -5149,6 +5161,7 @@ class BusinessCog(commands.Cog):
         if panel == "special":
             admin_session.special_staff_type = "employee" if admin_session.special_staff_type == "manager" else "manager"
             admin_session.special_staff_template = None
+            admin_session.special_kind_key = "any"
             await view.refresh(interaction, notice=f"Grant type changed to {admin_session.special_staff_type}.")
             return
         await interaction.response.send_message("Secondary action is not available on this panel yet.", ephemeral=True)
@@ -5186,22 +5199,113 @@ class BusinessCog(commands.Cog):
         await interaction.response.edit_message(embed=payload["embed"], view=payload["view"])
 
     async def _business_admin_grant_special(self, interaction: discord.Interaction, admin_session: BusinessAdminSession) -> None:
-        template_name = admin_session.special_staff_template
-        if not template_name:
-            template_name = ("Mythical Overseer" if admin_session.special_staff_type == "manager" else "Mythical Operator")
-            admin_session.special_staff_template = template_name
+        target_kind = "worker" if admin_session.special_staff_type == "employee" else "manager"
+        rarity_filters = _build_rarity_filter_options(target_kind=target_kind)
+        allowed_rarities = {_normalize_rarity_key(r) for r in rarity_filters.get(admin_session.special_rarity_filter_key, rarity_filters["any"])}
+        if target_kind == "manager" and not _manager_kind_pool_possible(admin_session.special_kind_key, allowed_rarities):
+            await interaction.response.send_message("This kind + rarity combination has an empty result pool.", ephemeral=True)
+            return
+
+        max_rolls = AUTO_HIRE_MAX_REROLLS if admin_session.special_roll_amount_key == "max" else _clamp_int(_parse_int(admin_session.special_roll_amount_key, 10), 1, AUTO_HIRE_MAX_REROLLS)
+        matched_candidate: WorkerCandidateSnapshot | ManagerCandidateSnapshot | None = None
+        best_candidate: WorkerCandidateSnapshot | ManagerCandidateSnapshot | None = None
+        rolls_used = 0
+
         async with self.sessionmaker() as session:
             async with session.begin():
-                if admin_session.special_staff_type == "manager":
-                    stats = dict(_MANAGER_TEMPLATES[template_name])
-                    result = await hire_manager_manual(session, guild_id=int(interaction.guild_id), user_id=int(admin_session.target_user_id), business_key=str(admin_session.target_business_key), manager_name=template_name, rarity=admin_session.special_staff_rarity, runtime_bonus_hours=int(stats["runtime_bonus_hours"]), profit_bonus_bp=int(stats["profit_bonus_bp"]), auto_restart_charges=int(stats["auto_restart_charges"]), charge_silver=False)
+                for _ in range(max_rolls):
+                    if target_kind == "manager":
+                        roll_result = await roll_manager_candidate(
+                            session,
+                            guild_id=int(interaction.guild_id),
+                            user_id=int(admin_session.target_user_id),
+                            business_key=str(admin_session.target_business_key),
+                            reroll_cost=0,
+                        )
+                        candidate = roll_result.manager_candidate
+                    else:
+                        roll_result = await roll_worker_candidate(
+                            session,
+                            guild_id=int(interaction.guild_id),
+                            user_id=int(admin_session.target_user_id),
+                            business_key=str(admin_session.target_business_key),
+                            reroll_cost=0,
+                        )
+                        candidate = roll_result.worker_candidate
+                    if (not roll_result.ok) or candidate is None:
+                        result = roll_result
+                        break
+                    rolls_used += 1
+                    if best_candidate is None:
+                        best_candidate = candidate
+                    else:
+                        score_now = _manager_candidate_score(candidate) if target_kind == "manager" else _worker_candidate_score(candidate)  # type: ignore[arg-type]
+                        score_best = _manager_candidate_score(best_candidate) if target_kind == "manager" else _worker_candidate_score(best_candidate)  # type: ignore[arg-type]
+                        if score_now > score_best:
+                            best_candidate = candidate
+                    rarity_ok = _normalize_rarity_key(getattr(candidate, "rarity", "")) in allowed_rarities
+                    kind_ok = _manager_matches_kind(candidate, admin_session.special_kind_key) if target_kind == "manager" else _worker_matches_kind(candidate, admin_session.special_kind_key)  # type: ignore[arg-type]
+                    if rarity_ok and kind_ok:
+                        matched_candidate = candidate
+                        break
                 else:
-                    stats = dict(_WORKER_TEMPLATES[template_name])
-                    result = await hire_worker_manual(session, guild_id=int(interaction.guild_id), user_id=int(admin_session.target_user_id), business_key=str(admin_session.target_business_key), worker_name=template_name, worker_type=str(stats["worker_type"]), rarity=admin_session.special_staff_rarity, flat_profit_bonus=int(stats["flat_profit_bonus"]), percent_profit_bonus_bp=int(stats["percent_profit_bonus_bp"]), charge_silver=False)
-                await self._log_business_admin_action(session, guild_id=interaction.guild_id, actor_user_id=interaction.user.id, target_user_id=admin_session.target_user_id, action="insert", table_name=f"business_{admin_session.special_staff_type}_assignments", pk_json={"business_key": admin_session.target_business_key}, before=None, after={"template": template_name, "rarity": admin_session.special_staff_rarity, "ok": result.ok, "message": result.message}, reason=f"Granted special {admin_session.special_staff_type}")
+                    result = BusinessActionResult(ok=False, message="No candidate matched the selected filters in the allowed roll budget.")
+
+                if matched_candidate is not None:
+                    if target_kind == "manager":
+                        result = await hire_manager_manual(
+                            session,
+                            guild_id=int(interaction.guild_id),
+                            user_id=int(admin_session.target_user_id),
+                            business_key=str(admin_session.target_business_key),
+                            manager_name=str(getattr(matched_candidate, "manager_name", "Manager")),
+                            rarity=str(getattr(matched_candidate, "rarity", "common")),
+                            runtime_bonus_hours=int(getattr(matched_candidate, "runtime_bonus_hours", 0) or 0),
+                            profit_bonus_bp=int(getattr(matched_candidate, "profit_bonus_bp", 0) or 0),
+                            auto_restart_charges=int(getattr(matched_candidate, "auto_restart_charges", 0) or 0),
+                            charge_silver=False,
+                        )
+                    else:
+                        result = await hire_worker_manual(
+                            session,
+                            guild_id=int(interaction.guild_id),
+                            user_id=int(admin_session.target_user_id),
+                            business_key=str(admin_session.target_business_key),
+                            worker_name=str(getattr(matched_candidate, "worker_name", "Worker")),
+                            worker_type=str(getattr(matched_candidate, "worker_type", "efficient")),
+                            rarity=str(getattr(matched_candidate, "rarity", "common")),
+                            flat_profit_bonus=int(getattr(matched_candidate, "flat_profit_bonus", 0) or 0),
+                            percent_profit_bonus_bp=int(getattr(matched_candidate, "percent_profit_bonus_bp", 0) or 0),
+                            charge_silver=False,
+                        )
+                best_name = _safe_str(
+                    getattr(best_candidate, "worker_name", getattr(best_candidate, "manager_name", None)) if best_candidate is not None else None,
+                    "None",
+                )
+                best_rarity = _safe_str(getattr(best_candidate, "rarity", None), "n/a") if best_candidate is not None else "n/a"
+                await self._log_business_admin_action(
+                    session,
+                    guild_id=interaction.guild_id,
+                    actor_user_id=interaction.user.id,
+                    target_user_id=admin_session.target_user_id,
+                    action="insert",
+                    table_name=f"business_{admin_session.special_staff_type}_assignments",
+                    pk_json={"business_key": admin_session.target_business_key},
+                    before=None,
+                    after={
+                        "ok": result.ok,
+                        "message": result.message,
+                        "rolls_used": rolls_used,
+                        "rarity_filter": admin_session.special_rarity_filter_key,
+                        "kind_filter": admin_session.special_kind_key,
+                        "best_candidate": best_name,
+                        "best_rarity": best_rarity,
+                    },
+                    reason=f"Granted special {admin_session.special_staff_type} via filtered roll",
+                )
         payload = await self._build_business_admin_payload(guild_id=int(interaction.guild_id), session=admin_session)
         embed = payload["embed"]
-        embed.description = f"{result.message}\n\n{embed.description or ''}".strip()
+        embed.description = f"{result.message}\nRolls used: **{_fmt_int(rolls_used)}**\n\n{embed.description or ''}".strip()
         if interaction.response.is_done():
             await interaction.edit_original_response(embed=embed, view=payload["view"])
         else:
@@ -5347,6 +5451,9 @@ class BusinessAdminSession:
         self.special_staff_type = "manager"
         self.special_staff_rarity = "mythical"
         self.special_staff_template: Optional[str] = None
+        self.special_rarity_filter_key = "any"
+        self.special_kind_key = "any"
+        self.special_roll_amount_key = "10"
 
 
 class BusinessAdminBaseView(discord.ui.View):
@@ -5415,6 +5522,96 @@ class AdminValueModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         values = {key: str(inp.value).strip() for key, inp in self.inputs.items()}
         await self._on_submit_cb(interaction, values)
+
+
+class AdminGrantStaffSetupView(BusinessAdminBaseView):
+    def __init__(self, *, parent_view: "BusinessAdminDashboardView"):
+        super().__init__(cog=parent_view.cog, guild_id=parent_view.guild_id, session=parent_view.session, timeout=240)
+        self.parent_view = parent_view
+        self._build_controls()
+
+    def _build_controls(self) -> None:
+        target_kind = "worker" if self.session.special_staff_type == "employee" else "manager"
+        rarity_select = discord.ui.Select(
+            placeholder="Rarity filter",
+            min_values=1,
+            max_values=1,
+            row=0,
+            options=[
+                discord.SelectOption(label="Any rarity", value="any", default=self.session.special_rarity_filter_key == "any"),
+                discord.SelectOption(label="Rare only", value="rare_only", default=self.session.special_rarity_filter_key == "rare_only"),
+                discord.SelectOption(label="Epic only", value="epic_only", default=self.session.special_rarity_filter_key == "epic_only"),
+                discord.SelectOption(label="Mythical only", value="mythical_only", default=self.session.special_rarity_filter_key == "mythical_only"),
+                discord.SelectOption(label="Rare+", value="rare_plus", default=self.session.special_rarity_filter_key == "rare_plus"),
+                discord.SelectOption(label="Epic+", value="epic_plus", default=self.session.special_rarity_filter_key == "epic_plus"),
+            ],
+        )
+        rarity_select.callback = self._on_rarity_change
+        self.add_item(rarity_select)
+
+        if target_kind == "worker":
+            kind_options = [
+                discord.SelectOption(label="Any worker type", value="any", default=self.session.special_kind_key == "any"),
+                discord.SelectOption(label="Fast", value="fast", default=self.session.special_kind_key == "fast"),
+                discord.SelectOption(label="Efficient", value="efficient", default=self.session.special_kind_key == "efficient"),
+                discord.SelectOption(label="Kind", value="kind", default=self.session.special_kind_key == "kind"),
+            ]
+            kind_placeholder = "Worker kind"
+        else:
+            kind_options = [
+                discord.SelectOption(label="Any manager profile", value="any", default=self.session.special_kind_key == "any"),
+                discord.SelectOption(label="Runtime focused", value="runtime", default=self.session.special_kind_key == "runtime"),
+                discord.SelectOption(label="Profit focused", value="profit", default=self.session.special_kind_key == "profit"),
+                discord.SelectOption(label="Automation focused", value="automation", default=self.session.special_kind_key == "automation"),
+                discord.SelectOption(label="Balanced", value="balanced", default=self.session.special_kind_key == "balanced"),
+            ]
+            kind_placeholder = "Manager kind"
+        kind_select = discord.ui.Select(placeholder=kind_placeholder, min_values=1, max_values=1, row=1, options=kind_options)
+        kind_select.callback = self._on_kind_change
+        self.add_item(kind_select)
+
+        amount_options = [discord.SelectOption(label=str(v), value=str(v), default=self.session.special_roll_amount_key == str(v)) for v in VIP_REROLL_AMOUNT_OPTIONS]
+        amount_options.append(discord.SelectOption(label="Max available", value="max", default=self.session.special_roll_amount_key == "max"))
+        amount_select = discord.ui.Select(placeholder="Reroll amount", min_values=1, max_values=1, row=2, options=amount_options)
+        amount_select.callback = self._on_amount_change
+        self.add_item(amount_select)
+
+    async def _summary_embed(self) -> discord.Embed:
+        target_kind = "worker" if self.session.special_staff_type == "employee" else "manager"
+        rarity_pool = _build_rarity_filter_options(target_kind=target_kind).get(self.session.special_rarity_filter_key, set())
+        amount_label = "Max available" if self.session.special_roll_amount_key == "max" else _fmt_int(_clamp_int(_parse_int(self.session.special_roll_amount_key, 10), 1, AUTO_HIRE_MAX_REROLLS))
+        embed = discord.Embed(
+            title="Admin Staff Grant Setup",
+            description="Same filtering controls as VIP reroll setup. Confirm to grant one matching staff member to the selected user.",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(name="Grant type", value=self.session.special_staff_type.title(), inline=True)
+        embed.add_field(name="Rarity filter", value=_display_rarity_filter(self.session.special_rarity_filter_key), inline=True)
+        embed.add_field(name="Kind filter", value=_kind_label(target_kind, self.session.special_kind_key), inline=True)
+        embed.add_field(name="Roll budget", value=f"**{amount_label}**", inline=True)
+        embed.add_field(name="Filtered pool", value=f"`{', '.join(sorted(rarity_pool))}`", inline=True)
+        embed.set_footer(text="No Silver is charged while staff uses this panel.")
+        return embed
+
+    async def _on_rarity_change(self, interaction: discord.Interaction) -> None:
+        self.session.special_rarity_filter_key = interaction.data.get("values", ["any"])[0]  # type: ignore[union-attr]
+        await interaction.response.edit_message(embed=await self._summary_embed(), view=self)
+
+    async def _on_kind_change(self, interaction: discord.Interaction) -> None:
+        self.session.special_kind_key = interaction.data.get("values", ["any"])[0]  # type: ignore[union-attr]
+        await interaction.response.edit_message(embed=await self._summary_embed(), view=self)
+
+    async def _on_amount_change(self, interaction: discord.Interaction) -> None:
+        self.session.special_roll_amount_key = interaction.data.get("values", ["10"])[0]  # type: ignore[union-attr]
+        await interaction.response.edit_message(embed=await self._summary_embed(), view=self)
+
+    @discord.ui.button(label="Confirm Grant", style=discord.ButtonStyle.success, emoji="✅", row=3)
+    async def confirm_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog._business_admin_grant_special(interaction, self.session)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=3)
+    async def cancel_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.parent_view.refresh(interaction, notice="Grant setup cancelled.")
 
 
 class BusinessAdminDashboardView(BusinessAdminBaseView):
