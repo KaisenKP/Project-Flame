@@ -55,7 +55,7 @@ import json
 import logging
 from pathlib import Path
 import time
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import discord
 from discord import app_commands
@@ -5323,6 +5323,198 @@ class BusinessCog(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
         payload = await self._build_business_admin_payload(guild_id=int(interaction.guild.id), session=admin_session)
         await interaction.followup.send(embed=payload["embed"], view=payload["view"], ephemeral=True)
+
+    async def _fetch_business_grant_choices(self, session, *, guild_id: int, user_id: int) -> list[tuple[str, str]]:
+        ownerships = await session.scalars(
+            select(BusinessOwnershipRow)
+            .where(BusinessOwnershipRow.guild_id == int(guild_id), BusinessOwnershipRow.user_id == int(user_id))
+            .order_by(BusinessOwnershipRow.updated_at.desc(), BusinessOwnershipRow.id.desc())
+        )
+        rows = list(ownerships.all())
+        return [(str(row.business_key), str(row.business_key).replace("_", " ").title()) for row in rows]
+
+    async def _count_matching_staff(self, session, *, guild_id: int, user_id: int, business_key: str, grant_type: str, unit_name: str, rarity: str) -> int:
+        if grant_type == "worker":
+            rows = await session.scalars(
+                select(BusinessWorkerAssignmentRow).where(
+                    BusinessWorkerAssignmentRow.guild_id == int(guild_id),
+                    BusinessWorkerAssignmentRow.user_id == int(user_id),
+                    BusinessWorkerAssignmentRow.business_key == str(business_key),
+                    BusinessWorkerAssignmentRow.is_active == True,  # noqa: E712
+                    BusinessWorkerAssignmentRow.worker_name == str(unit_name),
+                    BusinessWorkerAssignmentRow.rarity == str(rarity),
+                )
+            )
+            return len(list(rows.all()))
+        rows = await session.scalars(
+            select(BusinessManagerAssignmentRow).where(
+                BusinessManagerAssignmentRow.guild_id == int(guild_id),
+                BusinessManagerAssignmentRow.user_id == int(user_id),
+                BusinessManagerAssignmentRow.business_key == str(business_key),
+                BusinessManagerAssignmentRow.is_active == True,  # noqa: E712
+                BusinessManagerAssignmentRow.manager_name == str(unit_name),
+                BusinessManagerAssignmentRow.rarity == str(rarity),
+            )
+        )
+        return len(list(rows.all()))
+
+    async def _execute_business_admin_grant(self, *, guild_id: int, actor_user_id: int, state: "BusinessAdminGrantState") -> tuple[bool, str, dict]:
+        grant_type = state.grant_type
+        if state.target_user_id is None:
+            return False, "Pick a target user first.", {}
+        if not state.business_key:
+            return False, "Pick a business first.", {}
+        if not state.unit_name:
+            return False, "Pick a worker/manager first.", {}
+        quantity = max(1, int(state.quantity))
+        rarity = _normalize_rarity(state.rarity)
+        unit_name = str(state.unit_name)
+        details: dict = {}
+        try:
+            async with self.sessionmaker() as session:
+                async with session.begin():
+                    await ensure_user_rows(session, guild_id=int(guild_id), user_id=int(state.target_user_id))
+                    ownership = await session.scalar(
+                        select(BusinessOwnershipRow).where(
+                            BusinessOwnershipRow.guild_id == int(guild_id),
+                            BusinessOwnershipRow.user_id == int(state.target_user_id),
+                            BusinessOwnershipRow.business_key == str(state.business_key),
+                        )
+                    )
+                    if ownership is None:
+                        await self._log_business_admin_action(
+                            session,
+                            guild_id=guild_id,
+                            actor_user_id=actor_user_id,
+                            target_user_id=int(state.target_user_id),
+                            action="grant_failed",
+                            table_name=f"business_{grant_type}_assignments",
+                            pk_json={"business_key": state.business_key},
+                            before=None,
+                            after={"ok": False, "reason": "missing_business", "requested_quantity": quantity},
+                            reason="Interactive admin business grant",
+                        )
+                        return False, "Selected business no longer exists for that user.", {}
+                    before_count = await self._count_matching_staff(
+                        session,
+                        guild_id=guild_id,
+                        user_id=int(state.target_user_id),
+                        business_key=str(state.business_key),
+                        grant_type=grant_type,
+                        unit_name=unit_name,
+                        rarity=rarity,
+                    )
+                    if grant_type == "worker":
+                        slots = await get_worker_assignment_slots(
+                            session,
+                            guild_id=int(guild_id),
+                            user_id=int(state.target_user_id),
+                            business_key=str(state.business_key),
+                        )
+                    else:
+                        slots = await get_manager_assignment_slots(
+                            session,
+                            guild_id=int(guild_id),
+                            user_id=int(state.target_user_id),
+                            business_key=str(state.business_key),
+                        )
+                    empty_slots = sum(1 for slot in slots if not bool(getattr(slot, "is_active", False)))
+                    to_grant = min(quantity, empty_slots)
+                    if to_grant <= 0:
+                        return False, "No empty staff slots are available on this business.", {"empty_slots": 0}
+                    for _ in range(to_grant):
+                        if grant_type == "worker":
+                            tpl = _WORKER_TEMPLATES[unit_name]
+                            result = await hire_worker_manual(
+                                session,
+                                guild_id=int(guild_id),
+                                user_id=int(state.target_user_id),
+                                business_key=str(state.business_key),
+                                worker_name=unit_name,
+                                worker_type=str(tpl.get("worker_type", "efficient")),
+                                rarity=rarity,
+                                flat_profit_bonus=int(tpl.get("flat_profit_bonus", 0) or 0),
+                                percent_profit_bonus_bp=int(tpl.get("percent_profit_bonus_bp", 0) or 0),
+                                charge_silver=False,
+                            )
+                        else:
+                            tpl = _MANAGER_TEMPLATES[unit_name]
+                            result = await hire_manager_manual(
+                                session,
+                                guild_id=int(guild_id),
+                                user_id=int(state.target_user_id),
+                                business_key=str(state.business_key),
+                                manager_name=unit_name,
+                                rarity=rarity,
+                                runtime_bonus_hours=int(tpl.get("runtime_bonus_hours", 0) or 0),
+                                profit_bonus_bp=int(tpl.get("profit_bonus_bp", 0) or 0),
+                                auto_restart_charges=int(tpl.get("auto_restart_charges", 0) or 0),
+                                charge_silver=False,
+                            )
+                        if not result.ok:
+                            raise RuntimeError(str(result.message))
+                    after_count = await self._count_matching_staff(
+                        session,
+                        guild_id=guild_id,
+                        user_id=int(state.target_user_id),
+                        business_key=str(state.business_key),
+                        grant_type=grant_type,
+                        unit_name=unit_name,
+                        rarity=rarity,
+                    )
+                    details = {
+                        "ok": True,
+                        "requested_quantity": quantity,
+                        "granted_quantity": to_grant,
+                        "empty_slots_before": empty_slots,
+                        "owned_before": before_count,
+                        "owned_after": after_count,
+                        "unit_name": unit_name,
+                        "rarity": rarity,
+                        "grant_type": grant_type,
+                    }
+                    await self._log_business_admin_action(
+                        session,
+                        guild_id=guild_id,
+                        actor_user_id=actor_user_id,
+                        target_user_id=int(state.target_user_id),
+                        action="grant",
+                        table_name=f"business_{grant_type}_assignments",
+                        pk_json={"business_key": state.business_key},
+                        before={"owned_count": before_count},
+                        after=details,
+                        reason="Interactive admin business grant",
+                    )
+        except Exception as exc:
+            log.exception(
+                "admin_businessgrant failed | guild_id=%s actor=%s target=%s type=%s business=%s",
+                guild_id,
+                actor_user_id,
+                state.target_user_id,
+                grant_type,
+                state.business_key,
+            )
+            return False, f"Grant failed: {exc}", {}
+        granted = int(details.get("granted_quantity", 0) or 0)
+        requested = int(details.get("requested_quantity", quantity) or quantity)
+        suffix = f" (requested {requested}, granted {granted} due to open slots)." if granted != requested else "."
+        return True, f"Granted **{granted}x {unit_name}** ({rarity.title()}) to <@{int(state.target_user_id)}>{suffix}", details
+
+    @app_commands.command(name="admin_businessgrant", description="Admin: interactive worker/manager grant panel.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def admin_business_grant_cmd(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("This only works in a server.", ephemeral=True)
+            return
+        if not await self._business_admin_authorized(interaction):
+            await interaction.response.send_message(_ACCESS_DENIED, ephemeral=True)
+            return
+        state = BusinessAdminGrantState(admin_user_id=int(interaction.user.id))
+        view = BusinessAdminGrantView(cog=self, guild_id=int(interaction.guild.id), state=state)
+        await view._refresh_businesses()
+        view._build_components()
+        embed = await view.build_embed()
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
     @app_commands.command(name="business_admin_hire_worker", description="[Admin] Give a worker to a player. Business key is optional.")
     @app_commands.describe(
         target_user="Player receiving the worker (defaults to you).",
@@ -5504,6 +5696,293 @@ class BusinessAdminSession:
         self.special_rarity_filter_key = "any"
         self.special_kind_key = "any"
         self.special_roll_amount_key = "10"
+
+
+@dataclass
+class BusinessAdminGrantState:
+    admin_user_id: int
+    target_user_id: Optional[int] = None
+    grant_type: str = "worker"
+    business_key: Optional[str] = None
+    rarity: str = "common"
+    unit_name: Optional[str] = None
+    quantity: int = 1
+    business_page: int = 0
+    processing: bool = False
+    last_success_message: Optional[str] = None
+    last_result_details: Optional[dict] = None
+
+
+class BusinessAdminGrantView(discord.ui.View):
+    def __init__(self, *, cog: "BusinessCog", guild_id: int, state: BusinessAdminGrantState):
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.state = state
+        self._businesses: list[tuple[str, str]] = []
+        self._build_components()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        allowed = await self.cog._business_admin_authorized(interaction)
+        if (not allowed) or int(interaction.user.id) != int(self.state.admin_user_id):
+            msg = _ACCESS_DENIED if not allowed else "This admin grant panel belongs to another admin."
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+            return False
+        return True
+
+    def _unit_catalog(self) -> Dict[str, dict]:
+        return _WORKER_TEMPLATES if self.state.grant_type == "worker" else _MANAGER_TEMPLATES
+
+    def _rarity_options(self) -> list[str]:
+        if self.state.grant_type == "worker":
+            return ["common", "uncommon", "rare", "epic", "mythical"]
+        return ["common", "rare", "epic", "legendary", "mythical"]
+
+    async def _refresh_businesses(self) -> None:
+        if self.state.target_user_id is None:
+            self._businesses = []
+            self.state.business_key = None
+            return
+        async with self.cog.sessionmaker() as session:
+            self._businesses = await self.cog._fetch_business_grant_choices(
+                session,
+                guild_id=self.guild_id,
+                user_id=int(self.state.target_user_id),
+            )
+        if self.state.business_key not in {key for key, _ in self._businesses}:
+            self.state.business_key = self._businesses[0][0] if self._businesses else None
+
+    async def build_embed(self, *, error: Optional[str] = None) -> discord.Embed:
+        await self._refresh_businesses()
+        embed = discord.Embed(
+            title="🛠️ Business Grant Control Panel",
+            description="Fast admin grant flow for workers/managers. Pick values, review, then confirm.",
+            color=discord.Color.blurple(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        target = f"<@{self.state.target_user_id}> (`{self.state.target_user_id}`)" if self.state.target_user_id else "`Not selected`"
+        selected_business = f"`{self.state.business_key}`" if self.state.business_key else "`Not selected`"
+        selected_unit = self.state.unit_name or "Not selected"
+        embed.add_field(
+            name="Selection",
+            value=(
+                f"**Target**: {target}\n"
+                f"**Type**: `{self.state.grant_type.title()}`\n"
+                f"**Business**: {selected_business}\n"
+                f"**Rarity**: `{_normalize_rarity(self.state.rarity).title()}`\n"
+                f"**Unit**: `{selected_unit}`\n"
+                f"**Quantity**: `{max(1, int(self.state.quantity))}`"
+            ),
+            inline=False,
+        )
+        if self.state.target_user_id and self.state.business_key and self.state.unit_name:
+            async with self.cog.sessionmaker() as session:
+                owned = await self.cog._count_matching_staff(
+                    session,
+                    guild_id=self.guild_id,
+                    user_id=int(self.state.target_user_id),
+                    business_key=str(self.state.business_key),
+                    grant_type=self.state.grant_type,
+                    unit_name=str(self.state.unit_name),
+                    rarity=_normalize_rarity(self.state.rarity),
+                )
+            embed.add_field(name="Current Ownership", value=f"Currently owns **{owned}** matching units.", inline=False)
+        if self.state.last_success_message:
+            details = self.state.last_result_details or {}
+            embed.add_field(
+                name="Latest Result",
+                value=(
+                    f"{self.state.last_success_message}\n"
+                    f"Owned before: `{details.get('owned_before', 0)}` • after: `{details.get('owned_after', 0)}`"
+                ),
+                inline=False,
+            )
+        if error:
+            embed.add_field(name="⚠️ Validation", value=error, inline=False)
+        embed.set_footer(text="Step flow: User → Type → Business → Rarity → Unit → Quantity → Confirm")
+        return embed
+
+    def _build_components(self) -> None:
+        self.clear_items()
+        user_select = discord.ui.UserSelect(placeholder="1) Choose target user", min_values=1, max_values=1, row=0)
+
+        async def user_select_cb(interaction: discord.Interaction) -> None:
+            user = user_select.values[0]
+            self.state.target_user_id = int(user.id)
+            self.state.business_page = 0
+            self.state.last_success_message = None
+            self.state.last_result_details = None
+            await self._refresh_and_render(interaction)
+
+        user_select.callback = user_select_cb
+        self.add_item(user_select)
+
+        type_select = discord.ui.Select(
+            placeholder="2) Choose grant type",
+            min_values=1,
+            max_values=1,
+            row=1,
+            options=[
+                discord.SelectOption(label="Worker", value="worker", default=self.state.grant_type == "worker"),
+                discord.SelectOption(label="Manager", value="manager", default=self.state.grant_type == "manager"),
+            ],
+        )
+
+        async def type_select_cb(interaction: discord.Interaction) -> None:
+            self.state.grant_type = type_select.values[0]
+            self.state.unit_name = None
+            self.state.rarity = "common"
+            await self._refresh_and_render(interaction)
+
+        type_select.callback = type_select_cb
+        self.add_item(type_select)
+
+        page_size = 25
+        start = max(0, int(self.state.business_page)) * page_size
+        business_slice = self._businesses[start : start + page_size]
+        business_options = [
+            discord.SelectOption(label=label[:100], value=key, default=(key == self.state.business_key))
+            for key, label in business_slice
+        ]
+        if start > 0:
+            business_options.insert(0, discord.SelectOption(label="⬅ Previous page", value="__page_prev__"))
+        if (start + page_size) < len(self._businesses):
+            business_options.append(discord.SelectOption(label="Next page ➡", value="__page_next__"))
+        if not business_options:
+            business_options = [discord.SelectOption(label="No businesses found for selected user", value="__none__")]
+        business_select = discord.ui.Select(placeholder="3) Choose business", min_values=1, max_values=1, row=2, options=business_options)
+        business_select.disabled = not bool(business_slice)
+
+        async def business_select_cb(interaction: discord.Interaction) -> None:
+            value = business_select.values[0]
+            if value == "__page_next__":
+                self.state.business_page += 1
+            elif value == "__page_prev__":
+                self.state.business_page = max(0, self.state.business_page - 1)
+            elif value != "__none__":
+                self.state.business_key = value
+            await self._refresh_and_render(interaction)
+
+        business_select.callback = business_select_cb
+        self.add_item(business_select)
+
+        unit_options = [
+            discord.SelectOption(label=name[:100], value=name, default=(name == self.state.unit_name))
+            for name in sorted(self._unit_catalog().keys())[:25]
+        ]
+        unit_select = discord.ui.Select(
+            placeholder=f"4) Choose {'worker' if self.state.grant_type == 'worker' else 'manager'}",
+            min_values=1,
+            max_values=1,
+            row=3,
+            options=unit_options,
+        )
+
+        async def unit_select_cb(interaction: discord.Interaction) -> None:
+            self.state.unit_name = unit_select.values[0]
+            await self._refresh_and_render(interaction)
+
+        unit_select.callback = unit_select_cb
+        self.add_item(unit_select)
+
+        btn_type = discord.ui.Button(label=f"Type: {self.state.grant_type.title()}", style=discord.ButtonStyle.secondary, row=4)
+
+        async def btn_type_cb(interaction: discord.Interaction) -> None:
+            self.state.grant_type = "manager" if self.state.grant_type == "worker" else "worker"
+            self.state.unit_name = None
+            await self._refresh_and_render(interaction)
+
+        btn_type.callback = btn_type_cb
+        self.add_item(btn_type)
+
+        btn_rarity = discord.ui.Button(label=f"Rarity: {_normalize_rarity(self.state.rarity).title()}", style=discord.ButtonStyle.secondary, row=4)
+
+        async def btn_rarity_cb(interaction: discord.Interaction) -> None:
+            options = self._rarity_options()
+            current = _normalize_rarity(self.state.rarity)
+            idx = options.index(current) if current in options else 0
+            self.state.rarity = options[(idx + 1) % len(options)]
+            await self._refresh_and_render(interaction)
+
+        btn_rarity.callback = btn_rarity_cb
+        self.add_item(btn_rarity)
+
+        btn_qty = discord.ui.Button(label=f"Qty +1 ({max(1, int(self.state.quantity))})", style=discord.ButtonStyle.secondary, row=4)
+
+        async def btn_qty_cb(interaction: discord.Interaction) -> None:
+            self.state.quantity = max(1, min(50, int(self.state.quantity) + 1))
+            await self._refresh_and_render(interaction)
+
+        btn_qty.callback = btn_qty_cb
+        self.add_item(btn_qty)
+
+        btn_confirm = discord.ui.Button(label="Confirm", style=discord.ButtonStyle.success, emoji="✅", row=4)
+
+        async def btn_confirm_cb(interaction: discord.Interaction) -> None:
+            if self.state.processing:
+                await interaction.response.send_message("Grant is already processing. Please wait.", ephemeral=True)
+                return
+            error = self._validate()
+            if error:
+                await self._refresh_and_render(interaction, error=error)
+                return
+            self.state.processing = True
+            for item in self.children:
+                item.disabled = True
+            if interaction.response.is_done():
+                await interaction.edit_original_response(view=self)
+            else:
+                await interaction.response.edit_message(view=self)
+            ok, message, details = await self.cog._execute_business_admin_grant(
+                guild_id=self.guild_id,
+                actor_user_id=int(interaction.user.id),
+                state=self.state,
+            )
+            self.state.processing = False
+            self.state.last_success_message = message if ok else None
+            self.state.last_result_details = details if ok else None
+            await self._refresh_and_render(interaction, error=None if ok else message)
+
+        btn_confirm.callback = btn_confirm_cb
+        self.add_item(btn_confirm)
+
+        btn_cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.danger, row=4)
+
+        async def btn_cancel_cb(interaction: discord.Interaction) -> None:
+            for item in self.children:
+                item.disabled = True
+            if interaction.response.is_done():
+                await interaction.edit_original_response(view=self)
+            else:
+                await interaction.response.edit_message(view=self)
+
+        btn_cancel.callback = btn_cancel_cb
+        self.add_item(btn_cancel)
+
+    async def _refresh_and_render(self, interaction: discord.Interaction, *, error: Optional[str] = None) -> None:
+        await self._refresh_businesses()
+        self._build_components()
+        embed = await self.build_embed(error=error)
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=embed, view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    def _validate(self) -> Optional[str]:
+        if self.state.target_user_id is None:
+            return "Select a target user."
+        if not self.state.business_key:
+            return "Select a business."
+        if self.state.grant_type not in {"worker", "manager"}:
+            return "Invalid grant type selected."
+        if self.state.unit_name not in self._unit_catalog():
+            return "Select a valid unit from the dropdown."
+        if max(1, int(self.state.quantity)) <= 0:
+            return "Quantity must be at least 1."
+        return None
 
 
 class BusinessAdminBaseView(discord.ui.View):
