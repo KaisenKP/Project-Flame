@@ -5323,30 +5323,53 @@ class BusinessCog(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
         payload = await self._build_business_admin_payload(guild_id=int(interaction.guild.id), session=admin_session)
         await interaction.followup.send(embed=payload["embed"], view=payload["view"], ephemeral=True)
-    @app_commands.command(name="business_admin_hire_worker", description="[Admin/Debug] Manually hire a worker with explicit stats.")
+    @app_commands.command(name="business_admin_hire_worker", description="[Admin] Give a worker to a player. Business key is optional.")
+    @app_commands.describe(
+        target_user="Player receiving the worker (defaults to you).",
+        business_key="Business key to receive the worker (optional: auto-picks player's most recent business).",
+    )
     @app_commands.checks.has_permissions(administrator=True)
     async def business_admin_hire_worker_cmd(
         self,
         interaction: discord.Interaction,
-        business_key: str,
         worker_name: str,
         worker_type: str,
         rarity: str,
         flat_profit_bonus: int,
         percent_profit_bonus_bp: int,
+        target_user: Optional[discord.Member] = None,
+        business_key: Optional[str] = None,
     ) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("This only works in a server.", ephemeral=True)
             return
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True, thinking=True)
+        owner_id = int(target_user.id) if target_user is not None else int(interaction.user.id)
         async with self.sessionmaker() as session:
             async with session.begin():
+                resolved_business_key = _safe_str(business_key, "").strip().lower()
+                if not resolved_business_key:
+                    latest_ownership = await session.scalar(
+                        select(BusinessOwnershipRow)
+                        .where(
+                            BusinessOwnershipRow.guild_id == int(interaction.guild.id),
+                            BusinessOwnershipRow.user_id == owner_id,
+                        )
+                        .order_by(BusinessOwnershipRow.updated_at.desc(), BusinessOwnershipRow.id.desc())
+                    )
+                    if latest_ownership is None:
+                        await interaction.followup.send(
+                            "That player has no businesses yet. Provide a business key or have them buy one first.",
+                            ephemeral=True,
+                        )
+                        return
+                    resolved_business_key = str(latest_ownership.business_key)
                 result = await hire_worker_manual(
                     session,
                     guild_id=int(interaction.guild.id),
-                    user_id=int(interaction.user.id),
-                    business_key=business_key,
+                    user_id=owner_id,
+                    business_key=resolved_business_key,
                     worker_name=worker_name,
                     worker_type=worker_type,
                     rarity=rarity,
@@ -5356,46 +5379,71 @@ class BusinessCog(commands.Cog):
                 detail = await get_business_manage_snapshot(
                     session,
                     guild_id=int(interaction.guild.id),
-                    user_id=int(interaction.user.id),
-                    business_key=business_key,
+                    user_id=owner_id,
+                    business_key=resolved_business_key,
                 )
         if detail is None:
-            await interaction.followup.send("That business could not be found.", ephemeral=True)
+            await interaction.followup.send("That business could not be found for this player.", ephemeral=True)
             return
         if result.ok and result.hired_worker is not None:
-            embed = _build_worker_hire_result_embed(user=interaction.user, detail=detail, hired=result.hired_worker)
-            embed.add_field(name="Mode", value="Admin/Debug Manual Hire", inline=False)
+            owner_member = target_user or interaction.user
+            embed = _build_worker_hire_result_embed(user=owner_member, detail=detail, hired=result.hired_worker)
+            embed.add_field(name="Mode", value="Admin Manual Grant", inline=False)
+            embed.add_field(name="Target", value=f"{owner_member.mention} • `{resolved_business_key}`", inline=False)
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
         await interaction.followup.send(
-            embed=_build_result_embed(title="Admin Worker Hire", message=result.message, ok=False),
+            embed=_build_result_embed(title="Admin Worker Grant", message=result.message, ok=False),
             ephemeral=True,
         )
 
-    @app_commands.command(name="business_admin_hire_manager", description="[Admin/Debug] Manually hire a manager with explicit stats.")
+    @app_commands.command(name="business_admin_hire_manager", description="[Admin] Give a manager to a player. Business key is optional.")
+    @app_commands.describe(
+        target_user="Player receiving the manager (defaults to you).",
+        business_key="Business key to receive the manager (optional: auto-picks player's most recent business).",
+    )
     @app_commands.checks.has_permissions(administrator=True)
     async def business_admin_hire_manager_cmd(
         self,
         interaction: discord.Interaction,
-        business_key: str,
         manager_name: str,
         rarity: str,
         runtime_bonus_hours: int,
         profit_bonus_bp: int,
         auto_restart_charges: int,
+        target_user: Optional[discord.Member] = None,
+        business_key: Optional[str] = None,
     ) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("This only works in a server.", ephemeral=True)
             return
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True, thinking=True)
+        owner_id = int(target_user.id) if target_user is not None else int(interaction.user.id)
         async with self.sessionmaker() as session:
             async with session.begin():
+                resolved_business_key = _safe_str(business_key, "").strip().lower()
+                if not resolved_business_key:
+                    latest_ownership = await session.scalar(
+                        select(BusinessOwnershipRow)
+                        .where(
+                            BusinessOwnershipRow.guild_id == int(interaction.guild.id),
+                            BusinessOwnershipRow.user_id == owner_id,
+                        )
+                        .order_by(BusinessOwnershipRow.updated_at.desc(), BusinessOwnershipRow.id.desc())
+                    )
+                    if latest_ownership is None:
+                        await interaction.followup.send(
+                            "That player has no businesses yet. Provide a business key or have them buy one first.",
+                            ephemeral=True,
+                        )
+                        return
+                    resolved_business_key = str(latest_ownership.business_key)
                 result = await hire_manager_manual(
                     session,
                     guild_id=int(interaction.guild.id),
-                    user_id=int(interaction.user.id),
-                    business_key=business_key,
+                    user_id=owner_id,
+                    business_key=resolved_business_key,
                     manager_name=manager_name,
                     rarity=rarity,
                     runtime_bonus_hours=runtime_bonus_hours,
@@ -5405,19 +5453,21 @@ class BusinessCog(commands.Cog):
                 detail = await get_business_manage_snapshot(
                     session,
                     guild_id=int(interaction.guild.id),
-                    user_id=int(interaction.user.id),
-                    business_key=business_key,
+                    user_id=owner_id,
+                    business_key=resolved_business_key,
                 )
         if detail is None:
-            await interaction.followup.send("That business could not be found.", ephemeral=True)
+            await interaction.followup.send("That business could not be found for this player.", ephemeral=True)
             return
         if result.ok and result.hired_manager is not None:
-            embed = _build_manager_hire_result_embed(user=interaction.user, detail=detail, hired=result.hired_manager)
-            embed.add_field(name="Mode", value="Admin/Debug Manual Hire", inline=False)
+            owner_member = target_user or interaction.user
+            embed = _build_manager_hire_result_embed(user=owner_member, detail=detail, hired=result.hired_manager)
+            embed.add_field(name="Mode", value="Admin Manual Grant", inline=False)
+            embed.add_field(name="Target", value=f"{owner_member.mention} • `{resolved_business_key}`", inline=False)
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
         await interaction.followup.send(
-            embed=_build_result_embed(title="Admin Manager Hire", message=result.message, ok=False),
+            embed=_build_result_embed(title="Admin Manager Grant", message=result.message, ok=False),
             ephemeral=True,
         )
 from dataclasses import asdict
