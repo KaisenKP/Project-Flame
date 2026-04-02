@@ -35,6 +35,11 @@ DEFAULT_PANEL_IMAGE_URL = (
     "69acbce85ee689a96f4dd42f/2ad3540fd_tickets.png"
 )
 DEFAULT_BLUE = 0x2F6BFF
+PUBLIC_TICKET_CLAIM_MESSAGE = "✅ This ticket is now being handled by {user_mention}."
+PRIVATE_TICKET_OVERRIDE_DENIED_MESSAGE = (
+    "This ticket is already assigned to {claimer_mention}. "
+    "Only Head Mod can override the current handler."
+)
 
 
 def _utc_now() -> datetime:
@@ -1919,18 +1924,36 @@ a {{
                     await interaction.response.send_message("Only staff can claim tickets.", ephemeral=True)
                 return
 
+            previous_claimer_id: int | None = None
             if ticket.claimed_by_id and ticket.claimed_by_id != interaction.user.id:
+                if not self._is_head_mod(interaction.user, cfg):
+                    if not interaction.response.is_done():
+                        await interaction.response.send_message(
+                            PRIVATE_TICKET_OVERRIDE_DENIED_MESSAGE.format(
+                                claimer_mention=f"<@{ticket.claimed_by_id}>"
+                            ),
+                            ephemeral=True,
+                        )
+                    return
+                previous_claimer_id = int(ticket.claimed_by_id)
+
+            if ticket.claimed_by_id == interaction.user.id:
                 if not interaction.response.is_done():
                     await interaction.response.send_message(
-                        f"This ticket is already being worked on by <@{ticket.claimed_by_id}>.",
+                        "You already claimed this ticket.",
                         ephemeral=True,
                     )
                 return
 
-            if ticket.claimed_by_id == interaction.user.id:
-                if not interaction.response.is_done():
-                    await interaction.response.send_message("You already claimed this ticket.", ephemeral=True)
-                return
+            if previous_claimer_id:
+                try:
+                    await interaction.channel.set_permissions(
+                        discord.Object(id=previous_claimer_id),
+                        overwrite=None,
+                        reason=f"Ticket claim overridden by {interaction.user.id}",
+                    )
+                except discord.HTTPException:
+                    pass
 
             await self.set_ticket_claim(ticket.id, interaction.user.id)
             await self._apply_claim_lock(interaction.guild, interaction.channel, cfg, ttype, interaction.user.id)
@@ -1941,7 +1964,7 @@ a {{
 
             if not interaction.response.is_done():
                 await interaction.response.send_message(
-                    f"✅ {interaction.user.mention} claimed this ticket.\nOther staff should not respond unless they're Head Mod.",
+                    PUBLIC_TICKET_CLAIM_MESSAGE.format(user_mention=interaction.user.mention),
                     ephemeral=False,
                 )
 
