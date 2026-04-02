@@ -868,6 +868,30 @@ class CrownsWalletRow(Base):
 # Bank Robbery
 # =============================================================================
 
+
+
+class HeistUserStateRow(Base):
+    __tablename__ = "heist_user_states"
+    __table_args__ = (
+        UniqueConstraint("guild_id", "user_id", name="uq_heist_user_states_guild_user"),
+        Index("ix_heist_user_states_onboarded", "guild_id", "onboarding_completed"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+    onboarding_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    tutorial_seen_at: Mapped[Optional[datetime]] = mapped_column(TS, nullable=True)
+    last_known_lobby_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=NOW, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        TS,
+        server_default=NOW,
+        onupdate=NOW,
+        nullable=False,
+    )
 class BankRobberyProfileRow(Base):
     __tablename__ = "bank_robbery_profiles"
     __table_args__ = (
