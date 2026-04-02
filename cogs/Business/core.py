@@ -48,6 +48,7 @@ How this file is intended to be used:
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+import logging
 import random
 from typing import Dict, List, Optional, Sequence
 
@@ -94,6 +95,8 @@ from db.models import (
     BusinessWorkerAssignmentRow,
     WalletRow,
 )
+
+log = logging.getLogger(__name__)
 
 # =========================================================
 # DATACLASSES CONSUMED BY cog.py
@@ -691,6 +694,56 @@ def _upgrade_cost(defn: BusinessDef, level: int) -> int:
     return max(int(round(delta_income * 12)), 1)
 
 
+@dataclass(frozen=True, slots=True)
+class StaffCatalogEntry:
+    key: str
+    staff_kind: str
+    display_name: str
+    rarity: str
+    business_key: Optional[str]
+    worker_type: Optional[str] = None
+    flat_profit_bonus: int = 0
+    percent_profit_bonus_bp: int = 0
+    runtime_bonus_hours: int = 0
+    profit_bonus_bp: int = 0
+    auto_restart_charges: int = 0
+
+
+_WORKER_PREFIX_POOL: dict[str, tuple[str, ...]] = {
+    "common": ("Rookie", "Steady", "Local", "Budget"),
+    "uncommon": ("Skilled", "Trusted", "Prime", "Swift"),
+    "rare": ("Skilled", "Trusted", "Prime", "Swift"),
+    "epic": ("Elite", "Veteran", "Master", "Ace"),
+    "mythic": ("Celestial", "Eternal", "Godspeed", "Arcane"),
+}
+_WORKER_ROLE_POOL: dict[str, tuple[str, ...]] = {
+    "fast": ("Runner", "Courier", "Sprinter", "Dash"),
+    "efficient": ("Planner", "Optimizer", "Operator", "Engineer"),
+    "kind": ("Host", "Caretaker", "Concierge", "Greeter"),
+}
+_MANAGER_PREFIX_POOL: dict[str, tuple[str, ...]] = {
+    "common": ("Lead", "Floor", "Shift"),
+    "rare": ("Senior", "Strategic", "Prime"),
+    "epic": ("Executive", "Tactical", "Director"),
+    "legendary": ("Legend", "Oracle", "Chief"),
+    "mythical": ("Sovereign", "Ascendant", "Epoch"),
+}
+_WORKER_RARITY_FLAT_RANGE: dict[str, tuple[int, int]] = {
+    "common": (50, 120),
+    "uncommon": (120, 220),
+    "rare": (120, 260),
+    "epic": (260, 420),
+    "mythic": (750, 1200),
+}
+_WORKER_RARITY_BP_RANGE: dict[str, tuple[int, int]] = {
+    "common": (10, 60),
+    "uncommon": (45, 100),
+    "rare": (60, 140),
+    "epic": (140, 260),
+    "mythic": (420, 650),
+}
+
+
 def _manager_runtime_bonus_hours_from_rarity(rarity: str) -> int:
     key = str(rarity).strip().lower()
     if key == "common":
@@ -737,6 +790,94 @@ def _normalize_worker_type(worker_type: str) -> str:
     return key if key in allowed else "efficient"
 
 
+def _worker_display_rarity(rarity: str) -> str:
+    return "mythical" if str(rarity).strip().lower() == "mythic" else str(rarity).strip().lower()
+
+
+def _worker_midpoint_stats(*, worker_type: str, rarity: str) -> tuple[int, int]:
+    rarity_key = _normalize_worker_rarity(rarity)
+    flat_low, flat_high = _WORKER_RARITY_FLAT_RANGE[rarity_key]
+    bp_low, bp_high = _WORKER_RARITY_BP_RANGE[rarity_key]
+    flat_bonus = int(round((flat_low + flat_high) / 2))
+    bp_bonus = int(round((bp_low + bp_high) / 2))
+    type_key = _normalize_worker_type(worker_type)
+    if type_key == "fast":
+        bp_bonus = int(round(bp_bonus * 1.2))
+    elif type_key == "efficient":
+        flat_bonus = int(round(flat_bonus * 1.15))
+    elif type_key == "kind":
+        flat_bonus = int(round(flat_bonus * 1.05))
+        bp_bonus = int(round(bp_bonus * 1.05))
+    return _clamp_int(flat_bonus, 0, 1_000_000), _clamp_int(bp_bonus, 0, 250_000)
+
+
+def get_staff_grant_catalog(*, staff_kind: str, business_key: Optional[str] = None, rarity_filter: Optional[set[str]] = None) -> list[StaffCatalogEntry]:
+    kind = str(staff_kind or "").strip().lower()
+    entries: list[StaffCatalogEntry] = []
+    seen: set[str] = set()
+    normalized_rarity_filter = {str(r).strip().lower() for r in (rarity_filter or set()) if str(r).strip()}
+    if kind == "worker":
+        for rarity, prefixes in _WORKER_PREFIX_POOL.items():
+            display_rarity = _worker_display_rarity(rarity)
+            if normalized_rarity_filter and display_rarity not in normalized_rarity_filter:
+                continue
+            for worker_type, roles in _WORKER_ROLE_POOL.items():
+                flat_bonus, bp_bonus = _worker_midpoint_stats(worker_type=worker_type, rarity=rarity)
+                for prefix in prefixes:
+                    for role in roles:
+                        display_name = f"{prefix} {role}"
+                        key = f"worker:{display_rarity}:{worker_type}:{prefix.lower()}_{role.lower()}"
+                        if key in seen:
+                            log.warning("business staff catalog duplicate worker key: %s", key)
+                            continue
+                        seen.add(key)
+                        entries.append(
+                            StaffCatalogEntry(
+                                key=key,
+                                staff_kind="worker",
+                                display_name=display_name,
+                                rarity=display_rarity,
+                                business_key=business_key,
+                                worker_type=worker_type,
+                                flat_profit_bonus=flat_bonus,
+                                percent_profit_bonus_bp=bp_bonus,
+                            )
+                        )
+    elif kind == "manager":
+        for rarity, prefixes in _MANAGER_PREFIX_POOL.items():
+            rarity_key = _normalize_rarity(rarity)
+            if normalized_rarity_filter and rarity_key not in normalized_rarity_filter:
+                continue
+            for prefix in prefixes:
+                display_name = f"{prefix} Manager"
+                key = f"manager:{rarity_key}:{prefix.lower()}"
+                if key in seen:
+                    log.warning("business staff catalog duplicate manager key: %s", key)
+                    continue
+                seen.add(key)
+                entries.append(
+                    StaffCatalogEntry(
+                        key=key,
+                        staff_kind="manager",
+                        display_name=display_name,
+                        rarity=rarity_key,
+                        business_key=business_key,
+                        runtime_bonus_hours=_manager_runtime_bonus_hours_from_rarity(rarity_key),
+                        profit_bonus_bp=_manager_profit_bonus_bp_from_rarity(rarity_key),
+                        auto_restart_charges=1 if rarity_key in {"epic", "legendary", "mythical"} else 0,
+                    )
+                )
+    else:
+        log.warning("get_staff_grant_catalog called with invalid staff_kind=%s", staff_kind)
+        return []
+
+    for entry in entries:
+        if not entry.display_name:
+            log.warning("business staff catalog entry missing display name: %s", entry.key)
+    entries.sort(key=lambda e: (e.rarity, e.display_name))
+    return entries
+
+
 def _roll_weighted_rarity() -> str:
     roll = random.random()
     if roll < 0.60:
@@ -751,22 +892,10 @@ def _roll_weighted_rarity() -> str:
 
 
 def _generate_worker_name(*, worker_type: str, rarity: str) -> str:
-    prefix_pool = {
-        "common": ["Rookie", "Steady", "Local", "Budget"],
-        "uncommon": ["Skilled", "Trusted", "Prime", "Swift"],
-        "rare": ["Skilled", "Trusted", "Prime", "Swift"],
-        "epic": ["Elite", "Veteran", "Master", "Ace"],
-        "mythic": ["Celestial", "Eternal", "Godspeed", "Arcane"],
-    }
-    role_pool = {
-        "fast": ["Runner", "Courier", "Sprinter", "Dash"],
-        "efficient": ["Planner", "Optimizer", "Operator", "Engineer"],
-        "kind": ["Host", "Caretaker", "Concierge", "Greeter"],
-    }
     rarity_key = _normalize_worker_rarity(rarity)
     type_key = _normalize_worker_type(worker_type)
-    prefix = random.choice(prefix_pool[rarity_key])
-    role = random.choice(role_pool[type_key])
+    prefix = random.choice(_WORKER_PREFIX_POOL[rarity_key])
+    role = random.choice(_WORKER_ROLE_POOL[type_key])
     badge = random.randint(10, 99)
     return f"{prefix} {role} {badge}"
 
@@ -784,22 +913,8 @@ def _generate_worker_roll() -> dict[str, int | str]:
         rarity = "epic"
     else:
         rarity = "mythic"
-    rarity_flat = {
-        "common": (50, 120),
-        "uncommon": (120, 220),
-        "rare": (120, 260),
-        "epic": (260, 420),
-        "mythic": (750, 1200),
-    }
-    rarity_bp = {
-        "common": (10, 60),
-        "uncommon": (45, 100),
-        "rare": (60, 140),
-        "epic": (140, 260),
-        "mythic": (420, 650),
-    }
-    flat_low, flat_high = rarity_flat[rarity]
-    bp_low, bp_high = rarity_bp[rarity]
+    flat_low, flat_high = _WORKER_RARITY_FLAT_RANGE[rarity]
+    bp_low, bp_high = _WORKER_RARITY_BP_RANGE[rarity]
     flat_bonus = random.randint(flat_low, flat_high)
     bp_bonus = random.randint(bp_low, bp_high)
     if worker_type == "fast":
@@ -819,15 +934,8 @@ def _generate_worker_roll() -> dict[str, int | str]:
 
 
 def _generate_manager_name(*, rarity: str) -> str:
-    prefix_pool = {
-        "common": ["Lead", "Floor", "Shift"],
-        "rare": ["Senior", "Strategic", "Prime"],
-        "epic": ["Executive", "Tactical", "Director"],
-        "legendary": ["Legend", "Oracle", "Chief"],
-        "mythical": ["Sovereign", "Ascendant", "Epoch"],
-    }
     rarity_key = _normalize_rarity(rarity)
-    prefix = random.choice(prefix_pool[rarity_key])
+    prefix = random.choice(_MANAGER_PREFIX_POOL[rarity_key])
     return f"{prefix} Manager {random.randint(10, 99)}"
 
 

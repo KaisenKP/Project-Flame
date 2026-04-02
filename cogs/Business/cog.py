@@ -83,8 +83,6 @@ VIP_REROLL_TIMEOUT_SECONDS = None
 
 _BUSINESS_ADMIN_ROLE_IDS = {int(part) for part in ((os.getenv("BUSINESS_ADMIN_ROLE_IDS") or os.getenv("BUSINESS_ADMIN_ROLE_ID") or "").replace(",", " ").split()) if part.strip().isdigit()}
 RARITY_ORDER = ("common", "uncommon", "rare", "epic", "legendary", "mythical")
-_MANAGER_TEMPLATES = {"Operations Lead": {"runtime_bonus_hours": 4, "profit_bonus_bp": 300, "auto_restart_charges": 1}, "Revenue Director": {"runtime_bonus_hours": 2, "profit_bonus_bp": 650, "auto_restart_charges": 0}, "Automation Chief": {"runtime_bonus_hours": 6, "profit_bonus_bp": 250, "auto_restart_charges": 2}, "Mythical Overseer": {"runtime_bonus_hours": 12, "profit_bonus_bp": 1200, "auto_restart_charges": 5}}
-_WORKER_TEMPLATES = {"Analyst": {"worker_type": "efficient", "flat_profit_bonus": 250, "percent_profit_bonus_bp": 125}, "Closer": {"worker_type": "fast", "flat_profit_bonus": 400, "percent_profit_bonus_bp": 90}, "Specialist": {"worker_type": "kind", "flat_profit_bonus": 150, "percent_profit_bonus_bp": 220}, "Mythical Operator": {"worker_type": "efficient", "flat_profit_bonus": 1500, "percent_profit_bonus_bp": 900}}
 _PANEL_PAGE_SIZE = 5
 _ASSIGNMENTS_PAGE_SIZE = 10
 _ACCESS_DENIED = "Access Denied - You do not have permission to use this dashboard."
@@ -109,6 +107,7 @@ try:
         ManagerCandidateSnapshot,
         ManagerAssignmentSlotSnapshot,
         WorkerAssignmentSlotSnapshot,
+        StaffCatalogEntry,
         buy_business,
         fetch_business_defs,
         get_business_hub_snapshot,
@@ -130,6 +129,7 @@ try:
         upgrade_business,
         prestige_business,
         get_business_def_by_key,
+        get_staff_grant_catalog,
     )
 except Exception:
     @dataclass(slots=True)
@@ -274,6 +274,24 @@ except Exception:
         profit_bonus_bp: int
         auto_restart_charges: int
         reroll_cost: int
+
+    @dataclass(slots=True)
+    class StaffCatalogEntry:
+        key: str
+        staff_kind: str
+        display_name: str
+        rarity: str
+        business_key: Optional[str]
+        worker_type: Optional[str] = None
+        flat_profit_bonus: int = 0
+        percent_profit_bonus_bp: int = 0
+        runtime_bonus_hours: int = 0
+        profit_bonus_bp: int = 0
+        auto_restart_charges: int = 0
+
+    def get_staff_grant_catalog(*, staff_kind: str, business_key: Optional[str] = None, rarity_filter: Optional[set[str]] = None) -> list[StaffCatalogEntry]:
+        _ = (staff_kind, business_key, rarity_filter)
+        return []
 
 
     async def fetch_business_defs(session) -> Sequence[BusinessDef]:
@@ -5334,6 +5352,7 @@ class BusinessCog(commands.Cog):
         return [(str(row.business_key), str(row.business_key).replace("_", " ").title()) for row in rows]
 
     async def _count_matching_staff(self, session, *, guild_id: int, user_id: int, business_key: str, grant_type: str, unit_name: str, rarity: str) -> int:
+        rarity_key = _normalize_rarity_key(rarity)
         if grant_type == "worker":
             rows = await session.scalars(
                 select(BusinessWorkerAssignmentRow).where(
@@ -5342,10 +5361,9 @@ class BusinessCog(commands.Cog):
                     BusinessWorkerAssignmentRow.business_key == str(business_key),
                     BusinessWorkerAssignmentRow.is_active == True,  # noqa: E712
                     BusinessWorkerAssignmentRow.worker_name == str(unit_name),
-                    BusinessWorkerAssignmentRow.rarity == str(rarity),
                 )
             )
-            return len(list(rows.all()))
+            return sum(1 for row in rows.all() if _normalize_rarity_key(getattr(row, "rarity", "")) == rarity_key)
         rows = await session.scalars(
             select(BusinessManagerAssignmentRow).where(
                 BusinessManagerAssignmentRow.guild_id == int(guild_id),
@@ -5353,10 +5371,45 @@ class BusinessCog(commands.Cog):
                 BusinessManagerAssignmentRow.business_key == str(business_key),
                 BusinessManagerAssignmentRow.is_active == True,  # noqa: E712
                 BusinessManagerAssignmentRow.manager_name == str(unit_name),
-                BusinessManagerAssignmentRow.rarity == str(rarity),
             )
         )
-        return len(list(rows.all()))
+        return sum(1 for row in rows.all() if _normalize_rarity_key(getattr(row, "rarity", "")) == rarity_key)
+
+    def _resolve_staff_catalog(self, *, grant_type: str, business_key: Optional[str], rarity: Optional[str]) -> list[StaffCatalogEntry]:
+        rarity_filter = {str(rarity).strip().lower()} if rarity else None
+        entries = get_staff_grant_catalog(
+            staff_kind=str(grant_type),
+            business_key=business_key,
+            rarity_filter=rarity_filter,
+        )
+        if not entries:
+            log.warning(
+                "admin_businessgrant catalog returned no entries | kind=%s business=%s rarity=%s",
+                grant_type,
+                business_key,
+                rarity,
+            )
+        return entries
+
+    def _find_staff_catalog_entry(self, *, state: "BusinessAdminGrantState") -> Optional[StaffCatalogEntry]:
+        if not state.unit_key:
+            return None
+        entries = self._resolve_staff_catalog(
+            grant_type=state.grant_type,
+            business_key=state.business_key,
+            rarity=state.rarity,
+        )
+        for entry in entries:
+            if entry.key == state.unit_key:
+                return entry
+        log.warning(
+            "admin_businessgrant selected entry missing from live catalog | key=%s type=%s business=%s rarity=%s",
+            state.unit_key,
+            state.grant_type,
+            state.business_key,
+            state.rarity,
+        )
+        return None
 
     async def _execute_business_admin_grant(self, *, guild_id: int, actor_user_id: int, state: "BusinessAdminGrantState") -> tuple[bool, str, dict]:
         grant_type = state.grant_type
@@ -5364,11 +5417,12 @@ class BusinessCog(commands.Cog):
             return False, "Pick a target user first.", {}
         if not state.business_key:
             return False, "Pick a business first.", {}
-        if not state.unit_name:
+        selected_entry = self._find_staff_catalog_entry(state=state)
+        if selected_entry is None:
             return False, "Pick a worker/manager first.", {}
         quantity = max(1, int(state.quantity))
-        rarity = _normalize_rarity(state.rarity)
-        unit_name = str(state.unit_name)
+        rarity = _normalize_rarity(selected_entry.rarity)
+        unit_name = str(selected_entry.display_name)
         details: dict = {}
         try:
             async with self.sessionmaker() as session:
@@ -5424,21 +5478,19 @@ class BusinessCog(commands.Cog):
                         return False, "No empty staff slots are available on this business.", {"empty_slots": 0}
                     for _ in range(to_grant):
                         if grant_type == "worker":
-                            tpl = _WORKER_TEMPLATES[unit_name]
                             result = await hire_worker_manual(
                                 session,
                                 guild_id=int(guild_id),
                                 user_id=int(state.target_user_id),
                                 business_key=str(state.business_key),
                                 worker_name=unit_name,
-                                worker_type=str(tpl.get("worker_type", "efficient")),
+                                worker_type=str(selected_entry.worker_type or "efficient"),
                                 rarity=rarity,
-                                flat_profit_bonus=int(tpl.get("flat_profit_bonus", 0) or 0),
-                                percent_profit_bonus_bp=int(tpl.get("percent_profit_bonus_bp", 0) or 0),
+                                flat_profit_bonus=int(selected_entry.flat_profit_bonus or 0),
+                                percent_profit_bonus_bp=int(selected_entry.percent_profit_bonus_bp or 0),
                                 charge_silver=False,
                             )
                         else:
-                            tpl = _MANAGER_TEMPLATES[unit_name]
                             result = await hire_manager_manual(
                                 session,
                                 guild_id=int(guild_id),
@@ -5446,9 +5498,9 @@ class BusinessCog(commands.Cog):
                                 business_key=str(state.business_key),
                                 manager_name=unit_name,
                                 rarity=rarity,
-                                runtime_bonus_hours=int(tpl.get("runtime_bonus_hours", 0) or 0),
-                                profit_bonus_bp=int(tpl.get("profit_bonus_bp", 0) or 0),
-                                auto_restart_charges=int(tpl.get("auto_restart_charges", 0) or 0),
+                                runtime_bonus_hours=int(selected_entry.runtime_bonus_hours or 0),
+                                profit_bonus_bp=int(selected_entry.profit_bonus_bp or 0),
+                                auto_restart_charges=int(selected_entry.auto_restart_charges or 0),
                                 charge_silver=False,
                             )
                         if not result.ok:
@@ -5470,6 +5522,7 @@ class BusinessCog(commands.Cog):
                         "owned_before": before_count,
                         "owned_after": after_count,
                         "unit_name": unit_name,
+                        "unit_key": selected_entry.key,
                         "rarity": rarity,
                         "grant_type": grant_type,
                     }
@@ -5494,10 +5547,35 @@ class BusinessCog(commands.Cog):
                 grant_type,
                 state.business_key,
             )
+            log.warning(
+                "admin_businessgrant audit | status=failure guild_id=%s admin=%s target=%s entry=%s type=%s business=%s qty=%s ts=%s",
+                guild_id,
+                actor_user_id,
+                state.target_user_id,
+                state.unit_key,
+                grant_type,
+                state.business_key,
+                quantity,
+                datetime.now(timezone.utc).isoformat(),
+            )
             return False, f"Grant failed: {exc}", {}
         granted = int(details.get("granted_quantity", 0) or 0)
         requested = int(details.get("requested_quantity", quantity) or quantity)
         suffix = f" (requested {requested}, granted {granted} due to open slots)." if granted != requested else "."
+        log.info(
+            "admin_businessgrant audit | status=success guild_id=%s admin=%s target=%s entry=%s name=%s type=%s business=%s rarity=%s qty=%s granted=%s ts=%s",
+            guild_id,
+            actor_user_id,
+            state.target_user_id,
+            details.get("unit_key"),
+            unit_name,
+            grant_type,
+            state.business_key,
+            rarity,
+            requested,
+            granted,
+            datetime.now(timezone.utc).isoformat(),
+        )
         return True, f"Granted **{granted}x {unit_name}** ({rarity.title()}) to <@{int(state.target_user_id)}>{suffix}", details
 
     @app_commands.command(name="admin_businessgrant", description="Admin: interactive worker/manager grant panel.")
@@ -5704,10 +5782,12 @@ class BusinessAdminGrantState:
     target_user_id: Optional[int] = None
     grant_type: str = "worker"
     business_key: Optional[str] = None
-    rarity: str = "common"
-    unit_name: Optional[str] = None
+    rarity: str = "any"
+    unit_key: Optional[str] = None
     quantity: int = 1
     business_page: int = 0
+    unit_page: int = 0
+    business_filter_key: str = "__selected__"
     processing: bool = False
     last_success_message: Optional[str] = None
     last_result_details: Optional[dict] = None
@@ -5733,13 +5813,27 @@ class BusinessAdminGrantView(discord.ui.View):
             return False
         return True
 
-    def _unit_catalog(self) -> Dict[str, dict]:
-        return _WORKER_TEMPLATES if self.state.grant_type == "worker" else _MANAGER_TEMPLATES
+    def _unit_catalog(self) -> list[StaffCatalogEntry]:
+        business_key = self.state.business_key if self.state.business_filter_key == "__selected__" else None
+        rarity = None if self.state.rarity == "any" else self.state.rarity
+        return self.cog._resolve_staff_catalog(
+            grant_type=self.state.grant_type,
+            business_key=business_key,
+            rarity=rarity,
+        )
+
+    def _selected_unit(self) -> Optional[StaffCatalogEntry]:
+        if not self.state.unit_key:
+            return None
+        for entry in self._unit_catalog():
+            if entry.key == self.state.unit_key:
+                return entry
+        return None
 
     def _rarity_options(self) -> list[str]:
         if self.state.grant_type == "worker":
-            return ["common", "uncommon", "rare", "epic", "mythical"]
-        return ["common", "rare", "epic", "legendary", "mythical"]
+            return ["any", "common", "uncommon", "rare", "epic", "mythical"]
+        return ["any", "common", "rare", "epic", "legendary", "mythical"]
 
     async def _refresh_businesses(self) -> None:
         if self.state.target_user_id is None:
@@ -5765,20 +5859,27 @@ class BusinessAdminGrantView(discord.ui.View):
         )
         target = f"<@{self.state.target_user_id}> (`{self.state.target_user_id}`)" if self.state.target_user_id else "`Not selected`"
         selected_business = f"`{self.state.business_key}`" if self.state.business_key else "`Not selected`"
-        selected_unit = self.state.unit_name or "Not selected"
+        selected_entry = self._selected_unit()
+        selected_unit = selected_entry.display_name if selected_entry else "Not selected"
+        unit_catalog = self._unit_catalog()
+        unit_page_size = 25
+        unit_pages = max(1, (len(unit_catalog) + unit_page_size - 1) // unit_page_size)
+        self.state.unit_page = max(0, min(self.state.unit_page, unit_pages - 1))
         embed.add_field(
             name="Selection",
             value=(
                 f"**Target**: {target}\n"
                 f"**Type**: `{self.state.grant_type.title()}`\n"
                 f"**Business**: {selected_business}\n"
-                f"**Rarity**: `{_normalize_rarity(self.state.rarity).title()}`\n"
+                f"**Catalog Filter**: `{'Selected business' if self.state.business_filter_key == '__selected__' else 'All businesses'}`\n"
+                f"**Rarity**: `{'Any' if self.state.rarity == 'any' else _normalize_rarity(self.state.rarity).title()}`\n"
                 f"**Unit**: `{selected_unit}`\n"
+                f"**Page**: `{self.state.unit_page + 1}/{unit_pages}`\n"
                 f"**Quantity**: `{max(1, int(self.state.quantity))}`"
             ),
             inline=False,
         )
-        if self.state.target_user_id and self.state.business_key and self.state.unit_name:
+        if self.state.target_user_id and self.state.business_key and selected_entry:
             async with self.cog.sessionmaker() as session:
                 owned = await self.cog._count_matching_staff(
                     session,
@@ -5786,10 +5887,24 @@ class BusinessAdminGrantView(discord.ui.View):
                     user_id=int(self.state.target_user_id),
                     business_key=str(self.state.business_key),
                     grant_type=self.state.grant_type,
-                    unit_name=str(self.state.unit_name),
-                    rarity=_normalize_rarity(self.state.rarity),
+                    unit_name=str(selected_entry.display_name),
+                    rarity=_normalize_rarity(selected_entry.rarity),
                 )
             embed.add_field(name="Current Ownership", value=f"Currently owns **{owned}** matching units.", inline=False)
+        if unit_catalog:
+            page_start = self.state.unit_page * unit_page_size
+            page_entries = unit_catalog[page_start : page_start + unit_page_size]
+            preview_lines: list[str] = []
+            for entry in page_entries[:6]:
+                if entry.staff_kind == "worker":
+                    preview_lines.append(
+                        f"• **{entry.display_name}** ({entry.rarity.title()} • {entry.worker_type}) • +{entry.flat_profit_bonus:,} • {_bp_to_percent(entry.percent_profit_bonus_bp)}"
+                    )
+                else:
+                    preview_lines.append(
+                        f"• **{entry.display_name}** ({entry.rarity.title()}) • +{entry.runtime_bonus_hours}h • {_bp_to_percent(entry.profit_bonus_bp)} • AR {entry.auto_restart_charges}"
+                    )
+            embed.add_field(name="Catalog Preview", value="\n".join(preview_lines), inline=False)
         if self.state.last_success_message:
             details = self.state.last_result_details or {}
             embed.add_field(
@@ -5833,8 +5948,9 @@ class BusinessAdminGrantView(discord.ui.View):
 
         async def type_select_cb(interaction: discord.Interaction) -> None:
             self.state.grant_type = type_select.values[0]
-            self.state.unit_name = None
-            self.state.rarity = "common"
+            self.state.unit_key = None
+            self.state.rarity = "any"
+            self.state.unit_page = 0
             await self._refresh_and_render(interaction)
 
         type_select.callback = type_select_cb
@@ -5869,34 +5985,46 @@ class BusinessAdminGrantView(discord.ui.View):
         business_select.callback = business_select_cb
         self.add_item(business_select)
 
-        unit_options = [
-            discord.SelectOption(label=name[:100], value=name, default=(name == self.state.unit_name))
-            for name in sorted(self._unit_catalog().keys())[:25]
-        ]
+        unit_catalog = self._unit_catalog()
+        unit_page_size = 25
+        total_pages = max(1, (len(unit_catalog) + unit_page_size - 1) // unit_page_size)
+        self.state.unit_page = max(0, min(self.state.unit_page, total_pages - 1))
+        unit_start = self.state.unit_page * unit_page_size
+        unit_slice = unit_catalog[unit_start : unit_start + unit_page_size]
+        unit_options: list[discord.SelectOption] = []
+        for entry in unit_slice:
+            desc = (
+                f"{entry.rarity.title()} • {entry.worker_type} • +{entry.flat_profit_bonus} • {_bp_to_percent(entry.percent_profit_bonus_bp)}"
+                if entry.staff_kind == "worker"
+                else f"{entry.rarity.title()} • +{entry.runtime_bonus_hours}h • {_bp_to_percent(entry.profit_bonus_bp)}"
+            )
+            unit_options.append(
+                discord.SelectOption(
+                    label=entry.display_name[:100],
+                    value=entry.key,
+                    description=desc[:100],
+                    default=(entry.key == self.state.unit_key),
+                )
+            )
+        if not unit_options:
+            unit_options = [discord.SelectOption(label="No matching catalog entries", value="__none__")]
         unit_select = discord.ui.Select(
-            placeholder=f"4) Choose {'worker' if self.state.grant_type == 'worker' else 'manager'}",
+            placeholder=f"4) Choose {'worker' if self.state.grant_type == 'worker' else 'manager'} (Page {self.state.unit_page + 1}/{total_pages})",
             min_values=1,
             max_values=1,
             row=3,
             options=unit_options,
         )
+        unit_select.disabled = not bool(unit_slice)
 
         async def unit_select_cb(interaction: discord.Interaction) -> None:
-            self.state.unit_name = unit_select.values[0]
+            value = unit_select.values[0]
+            if value != "__none__":
+                self.state.unit_key = value
             await self._refresh_and_render(interaction)
 
         unit_select.callback = unit_select_cb
         self.add_item(unit_select)
-
-        btn_type = discord.ui.Button(label=f"Type: {self.state.grant_type.title()}", style=discord.ButtonStyle.secondary, row=4)
-
-        async def btn_type_cb(interaction: discord.Interaction) -> None:
-            self.state.grant_type = "manager" if self.state.grant_type == "worker" else "worker"
-            self.state.unit_name = None
-            await self._refresh_and_render(interaction)
-
-        btn_type.callback = btn_type_cb
-        self.add_item(btn_type)
 
         btn_rarity = discord.ui.Button(label=f"Rarity: {_normalize_rarity(self.state.rarity).title()}", style=discord.ButtonStyle.secondary, row=4)
 
@@ -5910,14 +6038,23 @@ class BusinessAdminGrantView(discord.ui.View):
         btn_rarity.callback = btn_rarity_cb
         self.add_item(btn_rarity)
 
-        btn_qty = discord.ui.Button(label=f"Qty +1 ({max(1, int(self.state.quantity))})", style=discord.ButtonStyle.secondary, row=4)
+        btn_prev_units = discord.ui.Button(label="⬅ Prev", style=discord.ButtonStyle.secondary, row=4, disabled=self.state.unit_page <= 0)
 
-        async def btn_qty_cb(interaction: discord.Interaction) -> None:
-            self.state.quantity = max(1, min(50, int(self.state.quantity) + 1))
+        async def btn_prev_units_cb(interaction: discord.Interaction) -> None:
+            self.state.unit_page = max(0, self.state.unit_page - 1)
             await self._refresh_and_render(interaction)
 
-        btn_qty.callback = btn_qty_cb
-        self.add_item(btn_qty)
+        btn_prev_units.callback = btn_prev_units_cb
+        self.add_item(btn_prev_units)
+
+        btn_next_units = discord.ui.Button(label="Next ➡", style=discord.ButtonStyle.secondary, row=4, disabled=self.state.unit_page >= (total_pages - 1))
+
+        async def btn_next_units_cb(interaction: discord.Interaction) -> None:
+            self.state.unit_page = min(total_pages - 1, self.state.unit_page + 1)
+            await self._refresh_and_render(interaction)
+
+        btn_next_units.callback = btn_next_units_cb
+        self.add_item(btn_next_units)
 
         btn_confirm = discord.ui.Button(label="Confirm", style=discord.ButtonStyle.success, emoji="✅", row=4)
 
@@ -5978,7 +6115,8 @@ class BusinessAdminGrantView(discord.ui.View):
             return "Select a business."
         if self.state.grant_type not in {"worker", "manager"}:
             return "Invalid grant type selected."
-        if self.state.unit_name not in self._unit_catalog():
+        entry = self._selected_unit()
+        if entry is None:
             return "Select a valid unit from the dropdown."
         if max(1, int(self.state.quantity)) <= 0:
             return "Quantity must be at least 1."
