@@ -1273,7 +1273,7 @@ class VipHiringJobRow(Base):
     started_by_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     business_key: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued", index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     requested_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     processed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     success_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
