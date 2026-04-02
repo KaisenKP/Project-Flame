@@ -5,7 +5,6 @@ import logging
 import os
 import signal
 import sys
-import traceback
 from pathlib import Path
 
 import discord
@@ -23,7 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from bot import build_bot_from_env  # noqa: E402
-from services.startup_diagnostics import StartupDiagnostics, StartupStageResult, format_exception_brief  # noqa: E402
+from services.startup_diagnostics import StartupDiagnostics, format_exception_brief  # noqa: E402
 
 
 # ------------------------------------------------------------
@@ -118,15 +117,15 @@ def install_signal_handlers(loop: asyncio.AbstractEventLoop, bot: discord.Client
 
 async def main() -> None:
     diagnostics = StartupDiagnostics()
-    diagnostics.stages.append(
-        StartupStageResult(
-            stage_name="process_start",
-            status="PASS",
-            summary="Process boot sequence started",
-            started_at=diagnostics.boot_started_at,
-            finished_at=diagnostics.boot_started_at,
-            duration_ms=0,
-        )
+    diagnostics.record_entry(
+        phase="startup",
+        status="PASS",
+        fatal=False,
+        category="startup",
+        subsystem="startup",
+        source="process_start",
+        summary="Process boot sequence started",
+        stage="process_start",
     )
 
     await diagnostics.run_stage("logging_init", setup_logging, summary_on_pass="Rich logging initialized")
@@ -155,22 +154,10 @@ async def main() -> None:
 
         await diagnostics.run_stage("bot_login_and_start", lambda: bot.start(token), fatal=True, summary_on_pass="bot.start completed")
     except discord.LoginFailure as exc:
-        diagnostics.record_failure(
-            stage_name="bot_login_and_start",
-            summary="Discord rejected BOT_TOKEN",
-            exception=exc,
-            traceback_text="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
-            fatal=True,
-        )
+        diagnostics.capture_exception(exc, phase="startup", fatal=True, category="discord", subsystem="startup", source="bot_login_and_start", summary="Discord rejected BOT_TOKEN")
         diagnostics.logger.error("Invalid BOT_TOKEN (Discord rejected it).")
     except Exception as exc:
-        diagnostics.record_failure(
-            stage_name="main_runtime",
-            summary=format_exception_brief(exc),
-            exception=exc,
-            traceback_text="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
-            fatal=True,
-        )
+        diagnostics.capture_exception(exc, phase="startup", fatal=True, category="startup", subsystem="startup", source="main_runtime", summary=format_exception_brief(exc))
         log.exception("Bot crashed")
     finally:
         diagnostics.write_local_report_file(bot)

@@ -5,7 +5,6 @@ import datetime as dt
 import logging
 import os
 import sys
-import traceback
 from pathlib import Path
 from typing import Iterable
 
@@ -13,7 +12,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from services.error_logging import ErrorDumpWriter, build_context_from_interaction
+from services.error_logging import build_context_from_command, build_context_from_interaction
 from services.startup_diagnostics import StartupDiagnostics
 
 log = logging.getLogger("bot")
@@ -73,13 +72,22 @@ def _iter_extension_modules(cogs_dir: Path, cogs_package: str) -> list[str]:
 
 class PulseCommandTree(app_commands.CommandTree["PulseBot"]):
     async def on_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
-        monitor = getattr(self.client, "error_monitor_cog", None)
-        if monitor is not None:
-            monitor.log_exception(error, source="app_command", **build_context_from_interaction(interaction))
-        else:
-            writer = getattr(self.client, "error_dump_writer", None)
-            if writer is not None:
-                writer.log_error(error, source="app_command", **build_context_from_interaction(interaction))
+        diagnostics = getattr(self.client, "startup_diagnostics", None)
+        if diagnostics is not None:
+            info = build_context_from_interaction(interaction)
+            diagnostics.capture_exception(
+                error,
+                category="app_command",
+                subsystem="interactions",
+                source="tree.on_error",
+                summary=str(error),
+                guild_id=getattr(info.get("guild"), "id", None),
+                channel_id=getattr(info.get("channel"), "id", None),
+                user_id=getattr(info.get("user"), "id", None),
+                command_name=info.get("command_name"),
+                interaction_type=info.get("interaction_type"),
+                extra_context=info.get("extras", {}),
+            )
         await super().on_error(interaction, error)
 
 
@@ -122,8 +130,6 @@ class PulseBot(commands.Bot):
         self._bg_tasks: set[asyncio.Task] = set()
         self._ready_once = asyncio.Event()
         self._startup_report_sent = False
-        self.error_dump_writer = ErrorDumpWriter()
-        self.error_monitor_cog = None
         self._persistent_views_registered = 0
 
     async def setup_hook(self) -> None:
@@ -176,7 +182,15 @@ class PulseBot(commands.Bot):
             async with engine.begin() as conn:
                 await conn.run_sync(lambda sync_conn: Base.metadata.create_all(sync_conn, checkfirst=True))
             log.info("DB schema ensured (checkfirst=True)")
-        except Exception:
+        except Exception as exc:
+            if self.startup_diagnostics is not None:
+                self.startup_diagnostics.capture_exception(
+                    exc,
+                    category="database",
+                    subsystem="database",
+                    source="db_schema_init",
+                    summary="DB schema ensure failed",
+                )
             log.exception("DB schema ensure failed, continuing without crash")
 
     async def _sync_app_commands(self) -> None:
@@ -192,7 +206,15 @@ class PulseBot(commands.Bot):
             else:
                 synced = await self.tree.sync()
                 log.info("Globally synced %d app command(s).", len(synced))
-        except Exception:
+        except Exception as exc:
+            if self.startup_diagnostics is not None:
+                self.startup_diagnostics.capture_exception(
+                    exc,
+                    category="sync",
+                    subsystem="sync",
+                    source="command_tree_sync",
+                    summary="App command sync failed",
+                )
             log.exception("App command sync failed")
 
     async def on_ready(self) -> None:
@@ -206,15 +228,24 @@ class PulseBot(commands.Bot):
             await self.startup_diagnostics.run_stage("on_ready", lambda: None, summary_on_pass="on_ready fired")
             if not self._startup_report_sent:
                 self._startup_report_sent = True
-                send_task = asyncio.create_task(self.startup_diagnostics.send_startup_report(self), name="startup.report.delivery")
+                send_task = asyncio.create_task(self.startup_diagnostics.send_report(self), name="startup.report.delivery")
                 self.startup_diagnostics.add_startup_task(send_task)
+                self.startup_diagnostics.mark_startup_complete()
 
     async def close(self) -> None:
         backup_cog = self.get_cog("EconomyBackupsCog")
         if backup_cog is not None and hasattr(backup_cog, "run_pre_restart_backup"):
             try:
                 await backup_cog.run_pre_restart_backup(reason="shutdown")
-            except Exception:
+            except Exception as exc:
+                if self.startup_diagnostics is not None:
+                    self.startup_diagnostics.capture_exception(
+                        exc,
+                        category="economy",
+                        subsystem="economy",
+                        source="pre_shutdown_backup",
+                        summary="Pre-shutdown economy backup failed",
+                    )
                 log.exception("Pre-shutdown economy backup failed")
         await self.stop_background_tasks()
         await super().close()
@@ -237,6 +268,15 @@ class PulseBot(commands.Bot):
                 loaded += 1
             except Exception:
                 failed += 1
+                if self.startup_diagnostics is not None:
+                    self.startup_diagnostics.capture_exception(
+                        sys.exc_info()[1] or RuntimeError(f"Failed to load extension {ext}"),
+                        category="extension",
+                        subsystem="cogs",
+                        source="extension_load",
+                        summary=f"Failed to load extension: {ext}",
+                        extension_name=ext,
+                    )
                 log.exception("Failed to load: %s", ext)
 
         log.info("Extension load summary: %d/%d loaded, %d failed.", loaded, len(exts), failed)
@@ -249,6 +289,15 @@ class PulseBot(commands.Bot):
                 results[ext] = True
             except Exception:
                 results[ext] = False
+                if self.startup_diagnostics is not None:
+                    self.startup_diagnostics.capture_exception(
+                        sys.exc_info()[1] or RuntimeError(f"Failed to reload extension {ext}"),
+                        category="extension",
+                        subsystem="cogs",
+                        source="extension_reload",
+                        summary=f"Failed to reload extension: {ext}",
+                        extension_name=ext,
+                    )
                 log.exception("Failed to reload: %s", ext)
         return results
 
@@ -295,7 +344,7 @@ class PulseBot(commands.Bot):
         task = asyncio.create_task(coro, name=name)
         self._bg_tasks.add(task)
         if self.startup_diagnostics is not None:
-            self.startup_diagnostics.add_startup_task(task)
+            self.startup_diagnostics.attach_task(task, subsystem="tasks", source="background_task", recurring=True)
 
         def _done(_t: asyncio.Task) -> None:
             self._bg_tasks.discard(_t)
@@ -305,18 +354,14 @@ class PulseBot(commands.Bot):
                 pass
             except Exception as exc:
                 if self.startup_diagnostics is not None:
-                    self.startup_diagnostics.record_failure(
-                        stage_name=f"background_task:{_t.get_name()}",
+                    self.startup_diagnostics.capture_exception(
+                        exc,
+                        category="task",
+                        subsystem="tasks",
+                        source="background_task.done_callback",
                         summary="Background task crashed",
-                        exception=exc,
-                        traceback_text="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
-                        fatal=False,
+                        task_name=_t.get_name(),
                     )
-                monitor = getattr(self, "error_monitor_cog", None)
-                if monitor is not None:
-                    monitor.log_exception(exc, source="background_task", task_name=_t.get_name())
-                else:
-                    self.error_dump_writer.log_error(exc, source="background_task", task_name=_t.get_name())
                 log.exception("Background task crashed: %s", _t.get_name())
 
         task.add_done_callback(_done)
@@ -352,6 +397,37 @@ class PulseBot(commands.Bot):
         if self.startup_diagnostics is not None:
             self._persistent_views_registered += 1
             self.startup_diagnostics.logger.info("Persistent view registered: %s", type(view).__name__)
+
+    async def on_command_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
+        if self.startup_diagnostics is not None:
+            info = build_context_from_command(ctx)
+            self.startup_diagnostics.capture_exception(
+                error,
+                category="command",
+                subsystem="commands",
+                source="on_command_error",
+                summary=str(error),
+                guild_id=getattr(info.get("guild"), "id", None),
+                channel_id=getattr(info.get("channel"), "id", None),
+                user_id=getattr(info.get("user"), "id", None),
+                command_name=info.get("command_name"),
+                extra_context=info.get("extras", {}),
+            )
+
+    async def on_error(self, event_method: str, *args, **kwargs) -> None:
+        err = sys.exc_info()[1]
+        if err is None:
+            err = RuntimeError(f"Unhandled event error in {event_method}")
+        if self.startup_diagnostics is not None:
+            self.startup_diagnostics.capture_exception(
+                err,
+                category="event",
+                subsystem="events",
+                source=event_method,
+                summary=f"Unhandled listener error in {event_method}",
+                extra_context={"arg_count": len(args), "kwarg_keys": list(kwargs.keys())},
+            )
+        await super().on_error(event_method, *args, **kwargs)
 
 
 async def build_bot_from_env(startup_diagnostics: StartupDiagnostics | None = None) -> PulseBot:

@@ -9,12 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from services.error_logging import (
-    ErrorDumpWriter,
-    build_context_from_command,
-    build_context_from_interaction,
-    merge_logging_context,
-)
+from services.error_logging import build_context_from_command, build_context_from_interaction, merge_logging_context
 
 log = logging.getLogger("error_monitor.cog")
 
@@ -31,43 +26,81 @@ def _is_owner_or_admin(bot: commands.Bot, user: discord.abc.User | discord.Membe
 class ErrorMonitor(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.writer = getattr(bot, "error_dump_writer", ErrorDumpWriter())
-        setattr(bot, "error_dump_writer", self.writer)
+        self.diagnostics = getattr(bot, "startup_diagnostics", None)
         self._install_ui_hooks()
         self._install_exception_hooks()
 
-    def cog_unload(self) -> None:
-        if getattr(self.bot, "error_monitor_cog", None) is self:
-            self.bot.error_monitor_cog = None
+    def _capture(self, error: BaseException, *, subsystem: str, source: str, category: str, context: dict[str, Any] | None = None) -> None:
+        if self.diagnostics is None:
+            return
+        context = context or {}
+        self.diagnostics.capture_exception(
+            error,
+            category=category,
+            subsystem=subsystem,
+            source=source,
+            summary=str(error),
+            guild_id=getattr(context.get("guild"), "id", None),
+            channel_id=getattr(context.get("channel"), "id", None),
+            user_id=getattr(context.get("user"), "id", None),
+            command_name=context.get("command_name"),
+            interaction_type=context.get("interaction_type"),
+            task_name=context.get("task_name"),
+            extra_context=context.get("extras", {}),
+        )
 
     def _install_ui_hooks(self) -> None:
-        if not getattr(discord.ui.View, "_pulse_error_monitor_installed", False):
+        if not getattr(discord.ui.View, "_pulse_diagnostics_installed", False):
             original_view_error = discord.ui.View.on_error
 
             async def view_on_error(view: discord.ui.View, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[Any]) -> None:
-                bot = getattr(interaction.client, "error_monitor_cog", None)
-                if bot is not None:
+                diag = getattr(interaction.client, "startup_diagnostics", None)
+                if diag is not None:
                     extras = {"view_type": type(view).__name__, "item_type": type(item).__name__, "item_custom_id": getattr(item, "custom_id", None)}
                     context = merge_logging_context(build_context_from_interaction(interaction), extras=extras)
-                    bot.log_exception(error, source="view", **context)
+                    diag.capture_exception(
+                        error,
+                        category="view",
+                        subsystem="views",
+                        source="view.on_error",
+                        summary=str(error),
+                        guild_id=getattr(context.get("guild"), "id", None),
+                        channel_id=getattr(context.get("channel"), "id", None),
+                        user_id=getattr(context.get("user"), "id", None),
+                        command_name=context.get("command_name"),
+                        interaction_type=context.get("interaction_type"),
+                        extra_context=context.get("extras", {}),
+                    )
                 await original_view_error(view, interaction, error, item)
 
             discord.ui.View.on_error = view_on_error
-            setattr(discord.ui.View, "_pulse_error_monitor_installed", True)
+            setattr(discord.ui.View, "_pulse_diagnostics_installed", True)
 
-        if not getattr(discord.ui.Modal, "_pulse_error_monitor_installed", False):
+        if not getattr(discord.ui.Modal, "_pulse_diagnostics_installed", False):
             original_modal_error = discord.ui.Modal.on_error
 
             async def modal_on_error(modal: discord.ui.Modal, interaction: discord.Interaction, error: Exception) -> None:
-                bot = getattr(interaction.client, "error_monitor_cog", None)
-                if bot is not None:
+                diag = getattr(interaction.client, "startup_diagnostics", None)
+                if diag is not None:
                     extras = {"modal_type": type(modal).__name__, "modal_title": getattr(modal, "title", None)}
                     context = merge_logging_context(build_context_from_interaction(interaction), extras=extras)
-                    bot.log_exception(error, source="modal", **context)
+                    diag.capture_exception(
+                        error,
+                        category="modal",
+                        subsystem="modals",
+                        source="modal.on_error",
+                        summary=str(error),
+                        guild_id=getattr(context.get("guild"), "id", None),
+                        channel_id=getattr(context.get("channel"), "id", None),
+                        user_id=getattr(context.get("user"), "id", None),
+                        command_name=context.get("command_name"),
+                        interaction_type=context.get("interaction_type"),
+                        extra_context=context.get("extras", {}),
+                    )
                 await original_modal_error(modal, interaction, error)
 
             discord.ui.Modal.on_error = modal_on_error
-            setattr(discord.ui.Modal, "_pulse_error_monitor_installed", True)
+            setattr(discord.ui.Modal, "_pulse_diagnostics_installed", True)
 
     def _install_exception_hooks(self) -> None:
         loop = asyncio.get_running_loop()
@@ -76,28 +109,15 @@ class ErrorMonitor(commands.Cog):
         def handle_loop_exception(loop_: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
             try:
                 exception = context.get("exception")
-                task_name = getattr(context.get("task"), "get_name", lambda: None)()
-                event_name = context.get("message")
-                loop_extras = {k: repr(v) for k, v in context.items() if k != "exception"}
-                if isinstance(exception, BaseException):
-                    self.log_exception(
+                if isinstance(exception, BaseException) and self.diagnostics is not None:
+                    self.diagnostics.capture_exception(
                         exception,
-                        source="asyncio",
-                        **merge_logging_context(
-                            event_name=event_name,
-                            task_name=task_name,
-                            extras=loop_extras,
-                        ),
-                    )
-                else:
-                    self.log_exception(
-                        RuntimeError(context.get("message", "Asyncio loop exception")),
-                        source="asyncio",
-                        **merge_logging_context(
-                            event_name=event_name,
-                            task_name=task_name,
-                            extras={k: repr(v) for k, v in context.items()},
-                        ),
+                        category="asyncio",
+                        subsystem="tasks",
+                        source="error_monitor.loop_handler",
+                        summary=context.get("message", "Asyncio loop exception"),
+                        task_name=getattr(context.get("task"), "get_name", lambda: None)(),
+                        extra_context={k: repr(v) for k, v in context.items() if k != "exception"},
                     )
             except Exception:
                 log.exception("Error monitor failed inside asyncio exception handler")
@@ -112,18 +132,19 @@ class ErrorMonitor(commands.Cog):
 
         def handle_sys_exception(exc_type: type[BaseException], exc_value: BaseException, exc_traceback: Any) -> None:
             try:
-                self.log_exception(exc_value, source="sys.excepthook", event_name="unhandled_exception")
+                if self.diagnostics is not None:
+                    self.diagnostics.capture_exception(
+                        exc_value,
+                        category="unhandled",
+                        subsystem="process",
+                        source="error_monitor.sys.excepthook",
+                        summary="Unhandled exception",
+                    )
             except Exception:
                 log.exception("Error monitor failed inside sys.excepthook")
             previous_hook(exc_type, exc_value, exc_traceback)
 
         sys.excepthook = handle_sys_exception
-
-    def log_exception(self, error: BaseException, *, source: str, **context: Any) -> None:
-        try:
-            self.writer.log_error(error, source=source, **context)
-        except Exception:
-            log.exception("Error monitor failed to log exception from source=%s", source)
 
     @commands.Cog.listener()
     async def on_command_error(self, ctx: commands.Context[Any], error: commands.CommandError) -> None:
@@ -131,65 +152,62 @@ class ErrorMonitor(commands.Cog):
             return
         if getattr(ctx.cog, "cog_command_error", None) and ctx.cog is not self:
             return
-        self.log_exception(error, source="prefix_command", **build_context_from_command(ctx))
+        self._capture(error, subsystem="commands", source="cog.on_command_error", category="prefix_command", context=build_context_from_command(ctx))
 
     @commands.Cog.listener()
     async def on_error(self, event_method: str, *args: Any, **kwargs: Any) -> None:
         error = sys.exc_info()[1]
         if error is None:
             error = RuntimeError(f"Unhandled event error in {event_method}")
-        extras = {
-            "arg_count": len(args),
-            "kwarg_keys": list(kwargs.keys()),
-        }
-        self.log_exception(
+        self._capture(
             error,
-            source="event",
-            **merge_logging_context(event_name=event_method, extras=extras),
+            subsystem="events",
+            source=event_method,
+            category="event",
+            context=merge_logging_context(event_name=event_method, extras={"arg_count": len(args), "kwarg_keys": list(kwargs.keys())}),
         )
 
-    @app_commands.command(name="recenterrors", description="Show the most recent logged bot errors.")
+    @app_commands.command(name="recenterrors", description="Show the most recent diagnostics errors.")
     @app_commands.default_permissions(administrator=True)
-    async def recent_errors(self, interaction: discord.Interaction, limit: app_commands.Range[int, 1, 10] = 5) -> None:
+    async def recent_errors(self, interaction: discord.Interaction, limit: app_commands.Range[int, 1, 20] = 10) -> None:
         if not _is_owner_or_admin(self.bot, interaction.user):
-            await interaction.response.send_message("You are not allowed to inspect error logs.", ephemeral=True)
+            await interaction.response.send_message("You are not allowed to inspect diagnostics.", ephemeral=True)
             return
 
-        entries = self.writer.recent_errors(limit)
+        if self.diagnostics is None:
+            await interaction.response.send_message("Diagnostics service is unavailable.", ephemeral=True)
+            return
+
+        entries = [e for e in self.diagnostics.entries if e.status == "FAIL"][-limit:]
         if not entries:
             await interaction.response.send_message("No recent errors have been captured yet.", ephemeral=True)
             return
 
-        lines = []
-        for entry in reversed(entries):
-            lines.append(
-                f"• `{entry.timestamp}` | `{entry.error_type}` | source=`{entry.source}` | "
-                f"command=`{entry.command_name or '-'}` | event=`{entry.event_name or '-'}` | task=`{entry.task_name or '-'}`\n"
-                f"  {entry.error_message[:240]}"
-            )
-
+        lines = [
+            f"• `{e.timestamp.isoformat()}` | `{e.exception_type or e.category}` | {e.subsystem}/{e.source} | {e.summary[:160]}"
+            for e in reversed(entries)
+        ]
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
-    @app_commands.command(name="lasterrordump", description="Upload the current daily error dump file.")
+    @app_commands.command(name="diagnostics", description="Open the central diagnostics report.")
     @app_commands.default_permissions(administrator=True)
-    async def last_error_dump(self, interaction: discord.Interaction) -> None:
+    async def diagnostics_report(self, interaction: discord.Interaction) -> None:
         if not _is_owner_or_admin(self.bot, interaction.user):
-            await interaction.response.send_message("You are not allowed to inspect error logs.", ephemeral=True)
+            await interaction.response.send_message("You are not allowed to inspect diagnostics.", ephemeral=True)
             return
 
-        log_path = self.writer.latest_log_path()
-        if not log_path.exists():
-            await interaction.response.send_message("No error dump file exists yet for today.", ephemeral=True)
+        if self.diagnostics is None:
+            await interaction.response.send_message("Diagnostics service is unavailable.", ephemeral=True)
             return
+
+        from services.startup_diagnostics import DiagnosticsReportView
 
         await interaction.response.send_message(
-            content=f"Latest error dump: `{log_path.name}`",
+            embed=self.diagnostics.render_summary_embed(self.bot),
+            view=DiagnosticsReportView(self.diagnostics),
             ephemeral=True,
-            file=discord.File(log_path),
         )
 
 
 async def setup(bot: commands.Bot) -> None:
-    cog = ErrorMonitor(bot)
-    setattr(bot, "error_monitor_cog", cog)
-    await bot.add_cog(cog)
+    await bot.add_cog(ErrorMonitor(bot))
