@@ -2340,7 +2340,7 @@ class ManageBusinessSelect(discord.ui.Select):
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
 
-        embed = _build_business_detail_embed(user=interaction.user, snap=detail, show_details=self.show_details)
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail, show_details=False)
         view = BusinessDetailView(
             cog=self.cog,
             owner_id=self.owner_id,
@@ -2505,7 +2505,7 @@ class BusinessHubView(BusinessBaseView):
         if detail is None:
             await interaction.followup.send("Select an owned business first.", ephemeral=True)
             return
-        embed = _build_business_detail_embed(user=interaction.user, snap=detail, show_details=self.show_details)
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail, show_details=False)
         view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=detail.key, owned=detail.owned, detail=detail)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
