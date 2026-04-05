@@ -208,6 +208,8 @@ except Exception:
         worker_slots_total: int
         manager_slots_used: int
         manager_slots_total: int
+        affordable_upgrades_now: int = 0
+        upgrade_guard_text: Optional[str] = None
         image_url: Optional[str] = None
         banner_url: Optional[str] = None
         notes: Optional[List[str]] = None
@@ -535,7 +537,7 @@ except Exception:
         guild_id: int,
         user_id: int,
         business_key: str,
-        quantity: int = 1,
+        quantity: int | str = 1,
         include_snapshots: bool = True,
     ) -> BusinessActionResult:
         _ = session, guild_id, user_id, business_key, quantity, include_snapshots
@@ -1536,6 +1538,17 @@ def _build_business_detail_embed(
         event_est = max(int(manager_est * 0.35), 0)
         manager_est = max(manager_est - event_est, 0)
     mode_label = _safe_str(getattr(snap, "run_mode", None), "Standard")
+    affordable_now = int(getattr(snap, "affordable_upgrades_now", 0) or 0)
+    guard_text = _safe_str(getattr(snap, "upgrade_guard_text", None), "")
+    if getattr(snap, "upgrade_cost", None) is not None:
+        progression_upgrade_line = (
+            f"Next Upgrade: `{_fmt_compact(int(snap.upgrade_cost))} Silver` • "
+            f"Affordable now: `{_fmt_int(affordable_now)} levels`"
+        )
+    elif guard_text:
+        progression_upgrade_line = f"Next Upgrade: `{guard_text}`"
+    else:
+        progression_upgrade_line = "Next Upgrade: `Unavailable`"
 
     e = _base_embed(
         title=f"{snap.emoji} {snap.name}",
@@ -1565,7 +1578,8 @@ def _build_business_detail_embed(
         name="PROGRESSION",
         value=(
             f"Level: `{_fmt_int(snap.visible_level)}/{_fmt_int(snap.max_level)}`\n"
-            f"Main Multiplier: `x{snap.prestige_multiplier}`"
+            f"Main Multiplier: `x{snap.prestige_multiplier}`\n"
+            f"{progression_upgrade_line}"
         ),
         inline=True,
     )
@@ -3025,6 +3039,7 @@ class BusinessDetailView(BusinessBaseView):
         self.status_button.label = "Hide Details" if self.show_details else "View Details"
         is_enabled = bool(upgrade_enabled) if upgrade_enabled is not None else bool(owned)
         self.upgrade_button.disabled = (not is_enabled) or bool(getattr(detail, "upgrade_cost", None) is None)
+        self.upgrade_max_button.disabled = (not is_enabled) or bool(getattr(detail, "upgrade_cost", None) is None)
         self.upgrade_5_button.disabled = (not is_enabled) or (not bool(getattr(detail, "bulk_upgrade_5_unlocked", False))) or bool(getattr(detail, "upgrade_cost", None) is None)
         self.upgrade_10_button.disabled = (not is_enabled) or (not bool(getattr(detail, "bulk_upgrade_10_unlocked", False))) or bool(getattr(detail, "upgrade_cost", None) is None)
         self.prestige_button.disabled = (not is_enabled) or (not bool(getattr(detail, "can_prestige", False)))
@@ -3157,6 +3172,41 @@ class BusinessDetailView(BusinessBaseView):
             return
         embed = _build_business_detail_embed(user=interaction.user, snap=detail, show_details=self.show_details)
         embed.add_field(name="Upgrade Business", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
+        view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail, show_details=self.show_details)
+        await _safe_edit_panel(interaction, embed=embed, view=view)
+
+    @discord.ui.button(label="Upgrade Max", style=discord.ButtonStyle.primary, emoji="⏫", row=1)
+    async def upgrade_max_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        _ = button
+        await _safe_defer(interaction)
+        async with self.cog.sessionmaker() as session:
+            async with session.begin():
+                await ensure_user_rows(session, guild_id=self.guild_id, user_id=self.owner_id)
+                result = await upgrade_business(
+                    session,
+                    guild_id=self.guild_id,
+                    user_id=self.owner_id,
+                    business_key=self.business_key,
+                    quantity="max",
+                    include_snapshots=True,
+                )
+                detail = result.manage_snapshot or await get_business_manage_snapshot(
+                    session,
+                    guild_id=self.guild_id,
+                    user_id=self.owner_id,
+                    business_key=self.business_key,
+                )
+                if result.snapshot is None:
+                    await get_business_hub_snapshot(
+                        session,
+                        guild_id=self.guild_id,
+                        user_id=self.owner_id,
+                    )
+        if detail is None:
+            await interaction.followup.send("That business could not be found.", ephemeral=True)
+            return
+        embed = _build_business_detail_embed(user=interaction.user, snap=detail, show_details=self.show_details)
+        embed.add_field(name="Upgrade Max", value=("✅ " if result.ok else "❌ ") + result.message, inline=False)
         view = BusinessDetailView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, business_key=self.business_key, owned=detail.owned, detail=detail, show_details=self.show_details)
         await _safe_edit_panel(interaction, embed=embed, view=view)
 
