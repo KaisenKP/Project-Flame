@@ -223,6 +223,15 @@ class BusinessActionResult:
 
 
 @dataclass(slots=True)
+class BulkRunActionSummary:
+    attempted: int
+    succeeded: int
+    already_in_state: int
+    failed: int
+    errors: list[str]
+
+
+@dataclass(slots=True)
 class HiredWorkerSnapshot:
     slot_index: int
     worker_name: str
@@ -1083,6 +1092,13 @@ def _normalize_slot_index(slot_index: int) -> int:
     return max(int(slot_index), 0)
 
 
+def _trim_text(text: str, limit: int) -> str:
+    value = str(text or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 1)].rstrip() + "…"
+
+
 # =========================================================
 # DB HELPERS
 # =========================================================
@@ -1917,6 +1933,7 @@ async def start_business_run(
     user_id: int,
     business_key: str,
     run_mode_key: str = RUN_MODE_STANDARD,
+    include_snapshots: bool = True,
 ) -> BusinessActionResult:
     defn = _def_for_key(business_key)
     if defn is None:
@@ -1947,13 +1964,16 @@ async def start_business_run(
     )
     if current_run is not None:
         remaining = _hours_remaining(current_run.ends_at)
-        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
-        manage = await get_business_manage_snapshot(
-            session,
-            guild_id=guild_id,
-            user_id=user_id,
-            business_key=business_key,
-        )
+        hub = None
+        manage = None
+        if include_snapshots:
+            hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+            manage = await get_business_manage_snapshot(
+                session,
+                guild_id=guild_id,
+                user_id=user_id,
+                business_key=business_key,
+            )
         return BusinessActionResult(
             ok=False,
             message=(
@@ -2174,13 +2194,16 @@ async def start_business_run(
                 "completed_at_iso": now.isoformat(),
             }
 
-    hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
-    manage = await get_business_manage_snapshot(
-        session,
-        guild_id=guild_id,
-        user_id=user_id,
-        business_key=business_key,
-    )
+    hub = None
+    manage = None
+    if include_snapshots:
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        manage = await get_business_manage_snapshot(
+            session,
+            guild_id=guild_id,
+            user_id=user_id,
+            business_key=business_key,
+        )
 
     return BusinessActionResult(
         ok=True,
@@ -2202,6 +2225,7 @@ async def stop_business_run(
     guild_id: int,
     user_id: int,
     business_key: str,
+    include_snapshots: bool = True,
 ) -> BusinessActionResult:
     defn = _def_for_key(business_key)
     if defn is None:
@@ -2214,13 +2238,16 @@ async def stop_business_run(
         business_key=business_key,
     )
     if current_run is None:
-        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
-        manage = await get_business_manage_snapshot(
-            session,
-            guild_id=guild_id,
-            user_id=user_id,
-            business_key=business_key,
-        )
+        hub = None
+        manage = None
+        if include_snapshots:
+            hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+            manage = await get_business_manage_snapshot(
+                session,
+                guild_id=guild_id,
+                user_id=user_id,
+                business_key=business_key,
+            )
         return BusinessActionResult(
             ok=False,
             message=f"**{defn.name}** is not currently running.",
@@ -2246,13 +2273,16 @@ async def stop_business_run(
         "estimated_unclaimed_silver": int(estimated_earned),
     }
 
-    hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
-    manage = await get_business_manage_snapshot(
-        session,
-        guild_id=guild_id,
-        user_id=user_id,
-        business_key=business_key,
-    )
+    hub = None
+    manage = None
+    if include_snapshots:
+        hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        manage = await get_business_manage_snapshot(
+            session,
+            guild_id=guild_id,
+            user_id=user_id,
+            business_key=business_key,
+        )
 
     return BusinessActionResult(
         ok=True,
@@ -2263,6 +2293,82 @@ async def stop_business_run(
         ),
         snapshot=hub,
         manage_snapshot=manage,
+    )
+
+
+async def start_all_business_runs(
+    session,
+    *,
+    guild_id: int,
+    user_id: int,
+) -> BulkRunActionSummary:
+    owned_rows = await _get_owned_rows_for_user(session, guild_id=guild_id, user_id=user_id)
+    errors: list[str] = []
+    succeeded = 0
+    already_in_state = 0
+    failed = 0
+    for ownership in owned_rows:
+        result = await start_business_run(
+            session,
+            guild_id=guild_id,
+            user_id=user_id,
+            business_key=str(ownership.business_key),
+            include_snapshots=False,
+        )
+        if result.ok:
+            succeeded += 1
+            continue
+        text = str(result.message or "")
+        if "already running" in text.lower():
+            already_in_state += 1
+            continue
+        failed += 1
+        if text:
+            errors.append(_trim_text(text, 140))
+    return BulkRunActionSummary(
+        attempted=len(owned_rows),
+        succeeded=succeeded,
+        already_in_state=already_in_state,
+        failed=failed,
+        errors=errors[:3],
+    )
+
+
+async def stop_all_business_runs(
+    session,
+    *,
+    guild_id: int,
+    user_id: int,
+) -> BulkRunActionSummary:
+    owned_rows = await _get_owned_rows_for_user(session, guild_id=guild_id, user_id=user_id)
+    errors: list[str] = []
+    succeeded = 0
+    already_in_state = 0
+    failed = 0
+    for ownership in owned_rows:
+        result = await stop_business_run(
+            session,
+            guild_id=guild_id,
+            user_id=user_id,
+            business_key=str(ownership.business_key),
+            include_snapshots=False,
+        )
+        if result.ok:
+            succeeded += 1
+            continue
+        text = str(result.message or "")
+        if "not currently running" in text.lower():
+            already_in_state += 1
+            continue
+        failed += 1
+        if text:
+            errors.append(_trim_text(text, 140))
+    return BulkRunActionSummary(
+        attempted=len(owned_rows),
+        succeeded=succeeded,
+        already_in_state=already_in_state,
+        failed=failed,
+        errors=errors[:3],
     )
 
 

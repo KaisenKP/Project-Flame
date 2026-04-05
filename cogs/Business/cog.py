@@ -132,6 +132,8 @@ try:
         prestige_business,
         get_business_def_by_key,
         get_staff_grant_catalog,
+        start_all_business_runs,
+        stop_all_business_runs,
     )
 except Exception:
     @dataclass(slots=True)
@@ -294,6 +296,14 @@ except Exception:
     def get_staff_grant_catalog(*, staff_kind: str, business_key: Optional[str] = None, rarity_filter: Optional[set[str]] = None) -> list[StaffCatalogEntry]:
         _ = (staff_kind, business_key, rarity_filter)
         return []
+
+    async def start_all_business_runs(session, *, guild_id: int, user_id: int):
+        _ = (session, guild_id, user_id)
+        raise RuntimeError("Bulk business start is unavailable because core imports failed.")
+
+    async def stop_all_business_runs(session, *, guild_id: int, user_id: int):
+        _ = (session, guild_id, user_id)
+        raise RuntimeError("Bulk business stop is unavailable because core imports failed.")
 
 
     async def fetch_business_defs(session) -> Sequence[BusinessDef]:
@@ -1315,10 +1325,15 @@ def _build_hub_embed(
 
     rows: list[str] = []
     active_event_rows: list[str] = []
+    idle_hourly = 0
+    projected_cycle_total = 0
     for c in owned_cards[:10]:
         marker = "▶" if selected_card and c.key == selected_card.key else "•"
         time_remaining = _format_hours_short(c.runtime_remaining_hours) if c.running else "Ready"
         status_label = "Running" if c.running else "Idle"
+        if not c.running:
+            idle_hourly += int(getattr(c, "hourly_profit", 0) or 0)
+        projected_cycle_total += int(getattr(c, "projected_payout", int(c.hourly_profit) * _estimated_cycle_hours_for_card(c)))
         rows.append(
             f"{marker} {c.emoji} **{c.name}**\n"
             f"💰 `{_fmt_compact(c.hourly_profit)}/hr` • ⏱ `{time_remaining}` • `{status_label}`"
@@ -1346,6 +1361,16 @@ def _build_hub_embed(
 
     if active_event_rows:
         e.add_field(name="🔥 ACTIVE EVENTS", value="\n\n".join(active_event_rows[:5]), inline=False)
+    run_ratio = _progress_bar(sum(1 for card in owned_cards if card.running), max(len(owned_cards), 1), width=10)
+    e.add_field(
+        name="Portfolio Health",
+        value=(
+            f"Run Coverage: `{run_ratio}`\n"
+            f"Idle Opportunity: `{_fmt_compact(idle_hourly)}/hr`\n"
+            f"Projected Cycle Value: `{_fmt_compact(projected_cycle_total)}`"
+        ),
+        inline=False,
+    )
 
     if selected_card:
         projected_total = int(getattr(selected_card, "projected_payout", int(selected_card.hourly_profit) * _estimated_cycle_hours_for_card(selected_card)))
@@ -2592,26 +2617,18 @@ class BusinessHubView(BusinessBaseView):
         started = 0
         already_running = 0
         failed = 0
+        attempted = 0
+        top_errors: list[str] = []
         error_message: Optional[str] = None
         try:
             async with self.cog.sessionmaker() as session:
                 async with session.begin():
-                    hub = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
-                    owned_keys = [card.key for card in hub.cards if card.owned]
-                    for business_key in owned_keys:
-                        result = await start_business_run(
-                            session,
-                            guild_id=self.guild_id,
-                            user_id=self.owner_id,
-                            business_key=business_key,
-                        )
-                        if result.ok:
-                            started += 1
-                            continue
-                        if "already running" in (result.message or "").lower():
-                            already_running += 1
-                        else:
-                            failed += 1
+                    batch = await start_all_business_runs(session, guild_id=self.guild_id, user_id=self.owner_id)
+                    started = int(batch.succeeded)
+                    already_running = int(batch.already_in_state)
+                    failed = int(batch.failed)
+                    attempted = int(batch.attempted)
+                    top_errors = list(batch.errors)
                     snap = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
         except Exception:
             log.exception(
@@ -2624,13 +2641,18 @@ class BusinessHubView(BusinessBaseView):
                 async with session.begin():
                     snap = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
 
+        coverage = _progress_bar(started + already_running, max(attempted, 1), width=10)
         summary = (
+            f"Processed: **{attempted}**\n"
+            f"Coverage: `{coverage}`\n"
             f"Started: **{started}**\n"
             f"Already running: **{already_running}**\n"
             f"Failed: **{failed}**"
         )
         embed = _build_hub_embed(user=interaction.user, snap=snap, selected_business_key=self.selected_business_key)
         embed.add_field(name="Start All Businesses", value=summary, inline=False)
+        if top_errors:
+            embed.add_field(name="Top Errors", value="\n".join(f"• {line}" for line in top_errors[:3]), inline=False)
         if error_message:
             embed.add_field(name="⚠️ Bulk Action Error", value=error_message, inline=False)
         view = BusinessHubView(
@@ -2653,26 +2675,18 @@ class BusinessHubView(BusinessBaseView):
         stopped = 0
         already_stopped = 0
         failed = 0
+        attempted = 0
+        top_errors: list[str] = []
         error_message: Optional[str] = None
         try:
             async with self.cog.sessionmaker() as session:
                 async with session.begin():
-                    hub = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
-                    owned_keys = [card.key for card in hub.cards if card.owned]
-                    for business_key in owned_keys:
-                        result = await stop_business_run(
-                            session,
-                            guild_id=self.guild_id,
-                            user_id=self.owner_id,
-                            business_key=business_key,
-                        )
-                        if result.ok:
-                            stopped += 1
-                            continue
-                        if "not currently running" in (result.message or "").lower():
-                            already_stopped += 1
-                        else:
-                            failed += 1
+                    batch = await stop_all_business_runs(session, guild_id=self.guild_id, user_id=self.owner_id)
+                    stopped = int(batch.succeeded)
+                    already_stopped = int(batch.already_in_state)
+                    failed = int(batch.failed)
+                    attempted = int(batch.attempted)
+                    top_errors = list(batch.errors)
                     snap = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
         except Exception:
             log.exception(
@@ -2685,13 +2699,18 @@ class BusinessHubView(BusinessBaseView):
                 async with session.begin():
                     snap = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
 
+        coverage = _progress_bar(stopped + already_stopped, max(attempted, 1), width=10)
         summary = (
+            f"Processed: **{attempted}**\n"
+            f"Coverage: `{coverage}`\n"
             f"Stopped: **{stopped}**\n"
             f"Already stopped: **{already_stopped}**\n"
             f"Failed: **{failed}**"
         )
         embed = _build_hub_embed(user=interaction.user, snap=snap, selected_business_key=self.selected_business_key)
         embed.add_field(name="Cash Out All Businesses", value=summary, inline=False)
+        if top_errors:
+            embed.add_field(name="Top Errors", value="\n".join(f"• {line}" for line in top_errors[:3]), inline=False)
         if error_message:
             embed.add_field(name="⚠️ Bulk Action Error", value=error_message, inline=False)
         view = BusinessHubView(
