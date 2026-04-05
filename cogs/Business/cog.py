@@ -594,6 +594,12 @@ VIEW_TIMEOUT = 180
 EMBED_COLOR = discord.Color.from_rgb(88, 101, 242)
 SUCCESS_COLOR = discord.Color.green()
 ERROR_COLOR = discord.Color.red()
+PREMIUM_ACTION_BUTTONS = {
+    "liquor_store": ("Restock", "Cheap Stock", "Premium Stock"),
+    "underground_market": ("Lock Deal", "Play Safe", "Take Risk"),
+    "cartel": ("Collect Pressure", "Lock Down", "Expand"),
+    "shadow_government": ("Build Power", "Call Favors", "Cash Out"),
+}
 
 
 # =========================================================
@@ -749,6 +755,10 @@ def _hub_color_for_business_key(business_key: Optional[str]) -> discord.Color:
         "restaurant": discord.Color.from_rgb(220, 96, 52),
         "farm": discord.Color.from_rgb(92, 163, 74),
         "nightclub": discord.Color.from_rgb(108, 92, 231),
+        "liquor_store": discord.Color.from_rgb(193, 127, 68),
+        "underground_market": discord.Color.from_rgb(126, 87, 194),
+        "cartel": discord.Color.from_rgb(198, 40, 40),
+        "shadow_government": discord.Color.from_rgb(69, 90, 100),
     }
     return palette.get(str(business_key or "").lower(), EMBED_COLOR)
 
@@ -1863,6 +1873,18 @@ def _build_run_summary_embed(*, summary: dict) -> discord.Embed:
         ),
         inline=False,
     )
+    premium = dict(summary.get("premium", {}))
+    if premium:
+        e.add_field(
+            name="👑 Premium Moments",
+            value=(
+                f"- Start Choice: **{premium.get('start_action', 'Standard')}**\n"
+                f"- Special Moment: **{premium.get('last_moment', 'No special moment')}**\n"
+                f"- Premium Impact: **{_fmt_int(int(premium.get('premium_income_delta', 0) or 0))}**\n"
+                f"- Control/Power End: **{_fmt_int(int(premium.get('control_end', 0) or 0))} / {_fmt_int(int(premium.get('power_end', 0) or 0))}**"
+            ),
+            inline=False,
+        )
     e.add_field(name="🧠", value=_summary_reaction_line(summary), inline=False)
     return e
 
@@ -1879,6 +1901,18 @@ def _build_run_detail_embed(*, summary: dict) -> discord.Embed:
     e.add_field(name="Event Log", value="\n".join(event_lines[:12]) if event_lines else "No events triggered.", inline=False)
     impactful = summary.get("most_impactful_factor", "base")
     e.add_field(name="Most Impactful Factor", value=f"**{str(impactful).title()}**", inline=False)
+    premium = dict(summary.get("premium", {}))
+    if premium:
+        e.add_field(
+            name="Premium Track",
+            value=(
+                f"Start: **{premium.get('start_action', 'Standard')}**\n"
+                f"Last swing: **{premium.get('last_moment', 'No special moment')}**\n"
+                f"Stock Left: **{_fmt_int(int(premium.get('stock_left', 0) or 0))}** • "
+                f"Power Bank: **{_fmt_int(int(premium.get('power_bank', 0) or 0))}**"
+            ),
+            inline=False,
+        )
     return e
 
 
@@ -2983,6 +3017,12 @@ class BusinessDetailView(BusinessBaseView):
         self.stop_button.disabled = (not is_enabled) or not bool(getattr(detail, 'running', False))
         self.run_safe_button.disabled = self.run_button.disabled
         self.run_aggressive_button.disabled = self.run_button.disabled or int(getattr(detail, 'level', 0) or 0) < 50
+        labels = PREMIUM_ACTION_BUTTONS.get(str(business_key))
+        if labels:
+            self.run_button.label = labels[0]
+            self.run_safe_button.label = labels[1]
+            self.run_aggressive_button.label = labels[2]
+            self.run_aggressive_button.disabled = self.run_button.disabled
 
     async def _reload_detail(self):
         async with self.cog.sessionmaker() as session:
@@ -4620,6 +4660,7 @@ class BusinessCog(commands.Cog):
             "hourly_breakdown": hourly_breakdown,
             "event_lines": event_lines,
             "most_impactful_factor": most_impactful_factor,
+            "premium": dict(summary_data.get("premium", {})),
             "completed_at": datetime.now(timezone.utc).isoformat(),
         }
 

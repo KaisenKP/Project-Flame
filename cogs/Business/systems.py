@@ -216,6 +216,38 @@ BUSINESS_TRAITS: dict[str, BusinessTraitDef] = {
         _event("radiation_front", "Radiation Front", EVENT_TYPE_NEGATIVE, EVENT_RARITY_UNCOMMON, 9, 1, multiplier_bp=-5500, description="Radiation shielding protocols reduce operational tempo."),
         _event("reactor_trip", "Reactor Trip", EVENT_TYPE_NEGATIVE, EVENT_RARITY_RARE, 5, 2, multiplier_bp=-10000, pause=20, description="Power instability forces emergency output limits."),
     )),
+    "liquor_store": BusinessTraitDef("liquor_store", "nightlife_trade", 13200, 52, 12000, 12600, 9800, 14500, 10400, "Rare bottle rushes", "Stock risk", (
+        _event("rush_night", "Rush Night", EVENT_TYPE_POSITIVE, EVENT_RARITY_COMMON, 14, 1, multiplier_bp=7800, description="Nightlife traffic pours into your premium shelves."),
+        _event("vip_case_drop", "VIP Case Drop", EVENT_TYPE_POSITIVE, EVENT_RARITY_UNCOMMON, 10, 2, multiplier_bp=18000, description="A premium merch run clears in minutes."),
+        _event("collector_bidding_war", "Collector Bidding War", EVENT_TYPE_POSITIVE, EVENT_RARITY_RARE, 7, 1, multiplier_bp=32000, description="Rare bottles spark a bidding war."),
+        _event("citywide_party_weekend", "Citywide Party Weekend", EVENT_TYPE_POSITIVE, EVENT_RARITY_EPIC, 3, 2, multiplier_bp=60000, description="Every district is buying premium stock at once."),
+        _event("legendary_cellar_unlock", "Legendary Cellar Unlock", EVENT_TYPE_POSITIVE, EVENT_RARITY_LEGENDARY, 1, 2, multiplier_bp=125000, description="An ultra-rare cellar unlock prints money."),
+        _event("dry_shelf_crunch", "Dry Shelf Crunch", EVENT_TYPE_NEGATIVE, EVENT_RARITY_UNCOMMON, 8, 1, multiplier_bp=-5200, description="Stock runs low and premium sales cool off."),
+    )),
+    "underground_market": BusinessTraitDef("underground_market", "black_market", 13600, 36, 13200, 13400, 12600, 15200, 10000, "Hot item swings", "Very high risk", (
+        _event("hot_item_ping", "Hot Item Ping", EVENT_TYPE_POSITIVE, EVENT_RARITY_COMMON, 14, 1, multiplier_bp=8500, description="A hot item catches fire instantly."),
+        _event("silent_auction_hit", "Silent Auction Hit", EVENT_TYPE_POSITIVE, EVENT_RARITY_UNCOMMON, 11, 2, multiplier_bp=20500, description="An under-the-table deal lands at peak margin."),
+        _event("perfect_flip_chain", "Perfect Flip Chain", EVENT_TYPE_POSITIVE, EVENT_RARITY_RARE, 7, 1, multiplier_bp=35000, description="Back-to-back flips chain into huge gains."),
+        _event("ghost_manifest", "Ghost Manifest", EVENT_TYPE_POSITIVE, EVENT_RARITY_EPIC, 3, 2, multiplier_bp=64000, description="A rare manifest opens impossible inventory."),
+        _event("midnight_gold_rush", "Midnight Gold Rush", EVENT_TYPE_POSITIVE, EVENT_RARITY_LEGENDARY, 1, 2, multiplier_bp=130000, description="One hot run carries the whole cycle."),
+        _event("deal_burn", "Deal Burn", EVENT_TYPE_NEGATIVE, EVENT_RARITY_UNCOMMON, 9, 1, multiplier_bp=-6400, description="A weak flip burns your best window."),
+    )),
+    "cartel": BusinessTraitDef("cartel", "power_network", 14200, 44, 11400, 11800, 11800, 15000, 10600, "Control snowball", "Pressure risk", (
+        _event("territory_lock", "Territory Lock", EVENT_TYPE_POSITIVE, EVENT_RARITY_COMMON, 14, 1, multiplier_bp=9200, description="Control stays tight and cash flow rises."),
+        _event("pressure_wave", "Pressure Wave", EVENT_TYPE_POSITIVE, EVENT_RARITY_UNCOMMON, 11, 2, multiplier_bp=22000, description="Pressure on the map boosts all active lanes."),
+        _event("chain_takeover", "Chain Takeover", EVENT_TYPE_POSITIVE, EVENT_RARITY_RARE, 7, 2, multiplier_bp=39000, description="Multiple operations flip under your control."),
+        _event("iron_night", "Iron Night", EVENT_TYPE_POSITIVE, EVENT_RARITY_EPIC, 3, 1, multiplier_bp=70000, description="The whole machine runs at max pressure."),
+        _event("total_lock", "Total Lock", EVENT_TYPE_POSITIVE, EVENT_RARITY_LEGENDARY, 1, 2, multiplier_bp=138000, description="You held total control across every route."),
+        _event("control_crack", "Control Crack", EVENT_TYPE_NEGATIVE, EVENT_RARITY_UNCOMMON, 9, 1, multiplier_bp=-7000, description="A crack in control weakens your take."),
+    )),
+    "shadow_government": BusinessTraitDef("shadow_government", "meta_power", 14800, 58, 10800, 12000, 9000, 16000, 11200, "Economy control", "Exposure risk", (
+        _event("favor_collection", "Favor Collection", EVENT_TYPE_POSITIVE, EVENT_RARITY_COMMON, 13, 1, multiplier_bp=9800, description="A favor cashes in quietly."),
+        _event("silent_directive", "Silent Directive", EVENT_TYPE_POSITIVE, EVENT_RARITY_UNCOMMON, 10, 2, multiplier_bp=23000, description="A quiet order tilts payouts your way."),
+        _event("market_string_pull", "Market String Pull", EVENT_TYPE_POSITIVE, EVENT_RARITY_RARE, 7, 1, multiplier_bp=42000, description="You pull the right string at the right time."),
+        _event("network_override", "Network Override", EVENT_TYPE_POSITIVE, EVENT_RARITY_EPIC, 3, 2, multiplier_bp=76000, description="Your network boosts everything at once."),
+        _event("economic_blackout", "Economic Blackout", EVENT_TYPE_POSITIVE, EVENT_RARITY_LEGENDARY, 1, 2, multiplier_bp=145000, description="You bend the whole economy for one cycle."),
+        _event("leak_scare", "Leak Scare", EVENT_TYPE_NEGATIVE, EVENT_RARITY_UNCOMMON, 8, 1, multiplier_bp=-5600, description="Rumors force a short pullback."),
+    )),
 }
 
 DEFAULT_TRAIT = BusinessTraitDef("default", "general", 10000, 60, 10000, 10000, 10000, 10000, 10000, "Balanced", "Medium", (
@@ -263,6 +295,10 @@ def worker_role_label(worker_type: str, business_key: str) -> str:
         "nightclub": {"fast": "Runner", "efficient": "Promoter", "kind": "Bartender"},
         "factory": {"fast": "Loader", "efficient": "Technician", "kind": "Inspector"},
         "tech_company": {"fast": "Growth Rep", "efficient": "Engineer", "kind": "Support Lead"},
+        "liquor_store": {"fast": "Runner", "efficient": "Stock Lead", "kind": "Floor Host"},
+        "underground_market": {"fast": "Scout", "efficient": "Broker", "kind": "Closer"},
+        "cartel": {"fast": "Enforcer", "efficient": "Operator", "kind": "Fixer"},
+        "shadow_government": {"fast": "Courier", "efficient": "Analyst", "kind": "Liaison"},
     }
     return mapping.get(business_key, {}).get(worker_type, worker_type.title())
 
@@ -274,6 +310,10 @@ def manager_role_label(business_key: str, slot_index: int = 0) -> str:
         "nightclub": ("Security Manager", "Marketing Manager"),
         "factory": ("Technical Lead", "Operations Manager"),
         "tech_company": ("Technical Lead", "Finance Manager"),
+        "liquor_store": ("Floor Boss", "Supply Boss"),
+        "underground_market": ("Deal Boss", "Intel Boss"),
+        "cartel": ("Control Boss", "Pressure Boss"),
+        "shadow_government": ("Power Broker", "Favor Broker"),
     }
     pool = roles.get(business_key, ("Operations Manager", "Finance Manager"))
     return pool[min(max(int(slot_index), 0), len(pool) - 1)]
