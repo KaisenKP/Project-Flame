@@ -132,8 +132,11 @@ try:
         prestige_business,
         get_business_def_by_key,
         get_staff_grant_catalog,
+        migrate_worker_system_for_all_users,
+        restore_archived_workers_for_business,
         start_all_business_runs,
         stop_all_business_runs,
+        WORKER_MIGRATION_VERSION,
     )
 except Exception:
     @dataclass(slots=True)
@@ -306,6 +309,16 @@ except Exception:
     async def stop_all_business_runs(session, *, guild_id: int, user_id: int):
         _ = (session, guild_id, user_id)
         raise RuntimeError("Bulk business stop is unavailable because core imports failed.")
+
+    WORKER_MIGRATION_VERSION = 0
+
+    async def migrate_worker_system_for_all_users(session) -> dict[str, int]:
+        _ = session
+        return {"migrated": 0, "skipped": 0, "failed": 0}
+
+    async def restore_archived_workers_for_business(session, *, guild_id: int, user_id: int, business_key: str, migration_version: int = 0) -> tuple[bool, str]:
+        _ = (session, guild_id, user_id, business_key, migration_version)
+        return False, "Restore is unavailable because core imports failed."
 
 
     async def fetch_business_defs(session) -> Sequence[BusinessDef]:
@@ -1439,6 +1452,50 @@ def _build_buy_menu_embed(
     return e
 
 
+def _build_worker_migration_embed(*, summary: dict) -> discord.Embed:
+    old_workers = int(summary.get("old_workers", 0) or 0)
+    new_workers = int(summary.get("new_workers", 0) or 0)
+    slot_before = int(summary.get("slot_before", 0) or 0)
+    slot_after = int(summary.get("slot_after", 0) or 0)
+    power_delta = float(summary.get("estimated_power_delta_pct", 0.0) or 0.0)
+    merge_lines = list(summary.get("merge_lines", []) or [])
+    embed = _base_embed(
+        title="✨ Worker System Upgraded",
+        description=(
+            "Your roster was consolidated into a new worker generation with fewer, much stronger workers.\n"
+            "Sorry for the sudden change. We rebuilt the worker system to make it cleaner, stronger, and less grindy going forward."
+        ),
+        color=SUCCESS_COLOR,
+    )
+    embed.add_field(
+        name="Before vs After",
+        value=(
+            f"Old workers: **{_fmt_int(old_workers)}**\n"
+            f"New workers: **{_fmt_int(new_workers)}**\n"
+            f"Worker slots: **{_fmt_int(slot_before)} → {_fmt_int(slot_after)}**\n"
+            f"Estimated roster power impact: **{power_delta:+.1f}%**"
+        ),
+        inline=False,
+    )
+    if merge_lines:
+        embed.add_field(
+            name="Merged Summary",
+            value="\n".join(f"• {line}" for line in merge_lines[:8]),
+            inline=False,
+        )
+    embed.add_field(
+        name="What changed",
+        value=(
+            "• Prestige now grants **+1 worker slot**.\n"
+            "• Prestige now increases high-rarity worker and manager odds.\n"
+            "• This migration was one-time and permanent."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="You were upgraded — your roster is now cleaner and stronger.")
+    return embed
+
+
 def _build_run_menu_embed(
     *,
     user: discord.abc.User,
@@ -1708,7 +1765,7 @@ def _build_worker_assignments_embed(
     odds_line, adjusted_odds_line = _worker_odds_lines()
     color = _worker_embed_color(detail, all_slots)
     title = f"Worker Roster • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}"
-    description = f"{slot_fill}\nHire, organize, and manage your workforce."
+    description = f"{slot_fill}\nHire, organize, and manage your workforce. (Base 3 slots +1 per prestige)"
     e = _base_embed(title=title, description=description, color=color)
     e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
 
@@ -1778,7 +1835,7 @@ def _build_manager_assignments_embed(
     odds_line, adjusted_odds_line = _manager_odds_lines()
     color = _manager_embed_color(detail, all_slots)
     title = f"Manager Roster • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}"
-    description = f"{slot_fill}\nHire, reroll, and manage staff for this business."
+    description = f"{slot_fill}\nHire, reroll, and manage staff for this business. (Base 3 slots +1 per prestige)"
     e = _base_embed(title=title, description=description, color=color)
     e.set_author(name=_safe_str(user), icon_url=_author_icon_url(user))
 
@@ -4801,6 +4858,16 @@ class BusinessCog(commands.Cog):
     async def cog_load(self) -> None:
         await self._ensure_business_prestige_merge()
         await self._run_one_time_upgrade_refund()
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                migration_result = await migrate_worker_system_for_all_users(session)
+        log.info(
+            "worker_system_migration_v%s done | migrated=%s skipped=%s failed=%s",
+            WORKER_MIGRATION_VERSION,
+            migration_result.get("migrated"),
+            migration_result.get("skipped"),
+            migration_result.get("failed"),
+        )
         await reconcile_incomplete_jobs(service=self.vip_hiring_service)
         await self._resume_active_auto_hire_sessions()
         log.info(
@@ -4846,6 +4913,53 @@ class BusinessCog(commands.Cog):
                     user_id=user_id,
                 )
         return snap
+
+    async def _consume_worker_migration_summary(self, *, guild_id: int, user_id: int) -> Optional[dict]:
+        if WORKER_MIGRATION_VERSION <= 0:
+            return None
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                rows = list(
+                    (
+                        await session.scalars(
+                            select(BusinessOwnershipRow).where(
+                                BusinessOwnershipRow.guild_id == int(guild_id),
+                                BusinessOwnershipRow.user_id == int(user_id),
+                                BusinessOwnershipRow.worker_migration_version >= int(WORKER_MIGRATION_VERSION),
+                                BusinessOwnershipRow.worker_migration_summary_seen.is_(False),
+                            )
+                        )
+                    ).all()
+                )
+                if not rows:
+                    return None
+                old_workers = 0
+                new_workers = 0
+                slot_before = 0
+                slot_after = 0
+                power_delta_values: list[float] = []
+                merge_lines: list[str] = []
+                for row in rows:
+                    data = dict(getattr(row, "worker_migration_summary_json", {}) or {})
+                    old_workers += int(data.get("old_worker_count", 0) or 0)
+                    new_workers += int(data.get("new_worker_count", 0) or 0)
+                    slot_before += int(data.get("old_worker_count", 0) or 0)
+                    slot_after += max(int(getattr(row, "worker_slot_legacy_floor", 0) or 0), int(getattr(row, "prestige", 0) or 0) + 3)
+                    try:
+                        power_delta_values.append(float(data.get("estimated_power_delta_pct", 0.0) or 0.0))
+                    except Exception:
+                        power_delta_values.append(0.0)
+                    merge_lines.extend([str(line) for line in list(data.get("merge_summary_lines", []) or [])])
+                    row.worker_migration_summary_seen = True
+                estimated_power_delta_pct = (sum(power_delta_values) / len(power_delta_values)) if power_delta_values else 0.0
+                return {
+                    "old_workers": old_workers,
+                    "new_workers": new_workers,
+                    "slot_before": slot_before,
+                    "slot_after": slot_after,
+                    "estimated_power_delta_pct": estimated_power_delta_pct,
+                    "merge_lines": merge_lines,
+                }
 
     @app_commands.command(name="business", description="Open your business management hub.")
     async def business_cmd(self, interaction: discord.Interaction) -> None:
@@ -4896,6 +5010,9 @@ class BusinessCog(commands.Cog):
             hub_snapshot=snap,
         )
         await interaction.followup.send(embed=embed, view=view)
+        migration_summary = await self._consume_worker_migration_summary(guild_id=guild_id, user_id=user_id)
+        if migration_summary:
+            await interaction.followup.send(embed=_build_worker_migration_embed(summary=migration_summary), ephemeral=True)
         if pending:
             latest = dict(pending[-1])
             await interaction.followup.send(
@@ -4915,6 +5032,27 @@ class BusinessCog(commands.Cog):
         self._set_notifications_enabled_for(guild_id=guild_id, user_id=user_id, enabled=bool(enabled))
         msg = "Business completion notifications are now **ON**." if enabled else "Business completion notifications are now **OFF**. You'll see summaries next time you run `/business`."
         await interaction.response.send_message(msg, ephemeral=True)
+
+    @app_commands.command(name="admin_restore_worker_archive", description="Admin: restore archived workers for a migrated business.")
+    async def admin_restore_worker_archive_cmd(self, interaction: discord.Interaction, user: discord.Member, business_key: str) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("This only works in a server.", ephemeral=True)
+            return
+        if not await self._business_admin_authorized(interaction):
+            await interaction.response.send_message(_ACCESS_DENIED, ephemeral=True)
+            return
+        await _safe_defer(interaction, thinking=True, ephemeral=True)
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                ok, message = await restore_archived_workers_for_business(
+                    session,
+                    guild_id=int(interaction.guild.id),
+                    user_id=int(user.id),
+                    business_key=str(business_key).strip().lower(),
+                    migration_version=WORKER_MIGRATION_VERSION,
+                )
+        color = SUCCESS_COLOR if ok else ERROR_COLOR
+        await interaction.followup.send(embed=discord.Embed(title="Worker Archive Restore", description=message, color=color), ephemeral=True)
 
 
 
