@@ -414,6 +414,54 @@ _BUSINESS_DEFS: tuple[BusinessDef, ...] = (
         prestige_growth_rate="2.15",
         flavor="Mining rocks in space because Earth was apparently too easy.",
     ),
+    BusinessDef(
+        key="liquor_store",
+        name="Liquor Store",
+        emoji="🥃",
+        description="Limited stock, rush nights, and rare bottle drops.",
+        cost_silver=100_000_000,
+        base_hourly_income=260_000,
+        base_upgrade_cost=25_000_000,
+        prestige_base_cost=14_000_000,
+        prestige_growth_rate="2.10",
+        flavor="Premium shelves, midnight lines, and a very loud cash drawer.",
+    ),
+    BusinessDef(
+        key="underground_market",
+        name="Underground Market",
+        emoji="🕶️",
+        description="Safe flips or risky hits with hot-item spikes.",
+        cost_silver=250_000_000,
+        base_hourly_income=420_000,
+        base_upgrade_cost=40_000_000,
+        prestige_base_cost=20_000_000,
+        prestige_growth_rate="2.08",
+        flavor="Rare goods move fast when the right whispers spread.",
+    ),
+    BusinessDef(
+        key="cartel",
+        name="The Cartel",
+        emoji="💼",
+        description="Build control, hold pressure, and run the map.",
+        cost_silver=500_000_000,
+        base_hourly_income=700_000,
+        base_upgrade_cost=75_000_000,
+        prestige_base_cost=30_000_000,
+        prestige_growth_rate="2.05",
+        flavor="Power under the table. Money above it.",
+    ),
+    BusinessDef(
+        key="shadow_government",
+        name="The Shadow Government",
+        emoji="🕴️",
+        description="Hidden power that can boost your whole network.",
+        cost_silver=1_000_000_000,
+        base_hourly_income=1_200_000,
+        base_upgrade_cost=125_000_000,
+        prestige_base_cost=50_000_000,
+        prestige_growth_rate="2.02",
+        flavor="You don't chase markets anymore. You tilt them.",
+    ),
 )
 
 _BUSINESS_DEF_MAP: Dict[str, BusinessDef] = {b.key: b for b in _BUSINESS_DEFS}
@@ -445,6 +493,30 @@ MANAGER_CANDIDATE_REROLL_COST = 1_000
 RUN_STATUS_RUNNING = "running"
 RUN_STATUS_COMPLETED = "completed"
 RUN_STATUS_CANCELLED = "cancelled"
+PREMIUM_BUSINESS_KEYS = {"liquor_store", "underground_market", "cartel", "shadow_government"}
+
+PREMIUM_START_ACTIONS: dict[str, dict[str, dict[str, object]]] = {
+    "liquor_store": {
+        RUN_MODE_STANDARD: {"label": "Restock", "stock_mode": "balanced", "hype_boost": 0, "profit_bp": 300, "start_stock": 100},
+        RUN_MODE_SAFE: {"label": "Cheap Stock", "stock_mode": "cheap", "hype_boost": -200, "profit_bp": -600, "start_stock": 120},
+        RUN_MODE_AGGRESSIVE: {"label": "Premium Stock", "stock_mode": "premium", "hype_boost": 1200, "profit_bp": 1800, "start_stock": 90},
+    },
+    "underground_market": {
+        RUN_MODE_STANDARD: {"label": "Lock Deal", "risk": "mixed", "hot_push": 600, "profit_bp": 700},
+        RUN_MODE_SAFE: {"label": "Play Safe", "risk": "safe", "hot_push": -300, "profit_bp": -900},
+        RUN_MODE_AGGRESSIVE: {"label": "Take Risk", "risk": "risky", "hot_push": 1400, "profit_bp": 2200},
+    },
+    "cartel": {
+        RUN_MODE_STANDARD: {"label": "Collect Pressure", "control_delta": 0, "pressure_start": 30, "profit_bp": 800},
+        RUN_MODE_SAFE: {"label": "Lock Down", "control_delta": 12, "pressure_start": 20, "profit_bp": 500},
+        RUN_MODE_AGGRESSIVE: {"label": "Expand", "control_delta": -8, "pressure_start": 55, "profit_bp": 2000},
+    },
+    "shadow_government": {
+        RUN_MODE_STANDARD: {"label": "Build Power", "focus": "power", "network_boost_bp": 1500, "profit_bp": 400},
+        RUN_MODE_SAFE: {"label": "Call Favors", "focus": "network", "network_boost_bp": 2400, "profit_bp": 900},
+        RUN_MODE_AGGRESSIVE: {"label": "Cash Out", "focus": "cashout", "network_boost_bp": 800, "profit_bp": 3200},
+    },
+}
 
 
 # =========================================================
@@ -1295,6 +1367,71 @@ async def _get_run_mode_key_for_ownership(session, *, ownership: BusinessOwnersh
     return str((await _get_active_manager_rows_for_ownership(session, ownership_id=int(ownership.id)) and RUN_MODE_STANDARD) or RUN_MODE_STANDARD)
 
 
+def _is_premium_business_key(business_key: str) -> bool:
+    return str(business_key).strip().lower() in PREMIUM_BUSINESS_KEYS
+
+
+async def _active_shadow_network_bonus_bp(session, *, guild_id: int, user_id: int, target_business_key: str) -> int:
+    if str(target_business_key) == "shadow_government":
+        return 0
+    shadow_run = await _get_running_run_for_business(
+        session,
+        guild_id=guild_id,
+        user_id=user_id,
+        business_key="shadow_government",
+    )
+    if shadow_run is None:
+        return 0
+    premium = dict((shadow_run.snapshot_json or {}).get("premium_run", {}))
+    if premium.get("business_key") != "shadow_government":
+        return 0
+    return max(int(premium.get("network_boost_bp", 0) or 0), 0)
+
+
+async def _recent_shadow_power_bank(session, *, guild_id: int, user_id: int) -> int:
+    rows = await session.scalars(
+        select(BusinessRunRow)
+        .where(
+            BusinessRunRow.guild_id == int(guild_id),
+            BusinessRunRow.user_id == int(user_id),
+            BusinessRunRow.business_key == "shadow_government",
+            BusinessRunRow.status == RUN_STATUS_COMPLETED,
+        )
+        .order_by(BusinessRunRow.completed_at.desc(), BusinessRunRow.id.desc())
+        .limit(5)
+    )
+    for row in rows:
+        tracking = dict((row.report_json or {}).get("summary_tracking", {}))
+        premium = dict(tracking.get("premium", {}))
+        bank = int(premium.get("power_bank", 0) or 0)
+        if bank > 0:
+            return min(bank, 120)
+    return 0
+
+
+async def _recent_cartel_control_streak(session, *, guild_id: int, user_id: int) -> int:
+    rows = await session.scalars(
+        select(BusinessRunRow)
+        .where(
+            BusinessRunRow.guild_id == int(guild_id),
+            BusinessRunRow.user_id == int(user_id),
+            BusinessRunRow.business_key == "cartel",
+            BusinessRunRow.status == RUN_STATUS_COMPLETED,
+        )
+        .order_by(BusinessRunRow.completed_at.desc(), BusinessRunRow.id.desc())
+        .limit(6)
+    )
+    streak = 0
+    for row in rows:
+        tracking = dict((row.report_json or {}).get("summary_tracking", {}))
+        premium = dict(tracking.get("premium", {}))
+        if bool(premium.get("control_kept", False)):
+            streak += 1
+        else:
+            break
+    return min(streak, 5)
+
+
 async def _compute_run_state_summary(session, *, ownership: BusinessOwnershipRow, defn: BusinessDef, running_row: Optional[BusinessRunRow]) -> dict:
     level, _ = await _resolve_effective_business_progress(session, ownership=ownership)
     worker_rows = await _get_active_worker_rows_for_ownership(session, ownership_id=int(ownership.id))
@@ -1314,6 +1451,15 @@ async def _compute_run_state_summary(session, *, ownership: BusinessOwnershipRow
     owned_rows = await _get_owned_rows_for_user(session, guild_id=int(ownership.guild_id), user_id=int(ownership.user_id))
     running_map = await _get_running_run_map_for_user(session, guild_id=int(ownership.guild_id), user_id=int(ownership.user_id))
     synergy_bp, synergy_labels = calc_synergy_bonus_bp(str(ownership.business_key), running_map.keys(), [row.business_key for row in owned_rows])
+    shadow_bonus_bp = await _active_shadow_network_bonus_bp(
+        session,
+        guild_id=int(ownership.guild_id),
+        user_id=int(ownership.user_id),
+        target_business_key=str(ownership.business_key),
+    )
+    if shadow_bonus_bp > 0:
+        synergy_bp += shadow_bonus_bp
+        synergy_labels = list(synergy_labels) + [f"Shadow network +{shadow_bonus_bp/100:.0f}%"]
     trait = get_business_trait(defn.key)
     return {
         "worker_bp": worker_bp,
@@ -1625,6 +1771,9 @@ async def get_business_manage_snapshot(
         f"Final Profit After Staff Bonuses: {hourly_profit:,}/hr",
         f"Mode: {state['run_mode_label']} | Synergy: {state['synergy_summary']}",
     ]
+    if _is_premium_business_key(defn.key):
+        notes.append("Premium Run: Make your setup choices in the first 2 minutes, then let it ride.")
+        notes.append("This business has exclusive run mechanics and a premium end summary.")
     if running_row is not None:
         notes.append(f"Event: {state['active_event_summary']}")
 
@@ -1815,6 +1964,13 @@ async def start_business_run(
 
     level, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
     run_mode = get_run_mode_for_level(level, run_mode_key)
+    premium_action = None
+    premium_state: dict[str, object] = {}
+    if _is_premium_business_key(defn.key):
+        mode_map = PREMIUM_START_ACTIONS.get(defn.key, {})
+        premium_action = dict(mode_map.get(run_mode_key) or mode_map.get(RUN_MODE_STANDARD) or {})
+        run_mode = get_run_mode_for_level(level, RUN_MODE_STANDARD)
+
     total_runtime_hours = await _calc_total_runtime_hours_for_owned_business(
         session,
         ownership=ownership,
@@ -1826,6 +1982,20 @@ async def start_business_run(
         defn=defn,
     )
     hourly_profit = _apply_bp(hourly_profit, run_mode.profit_bp)
+    if premium_action:
+        hourly_profit = _apply_bp(hourly_profit, int(premium_action.get("profit_bp", 0) or 0))
+        if defn.key == "shadow_government":
+            bank = await _recent_shadow_power_bank(session, guild_id=guild_id, user_id=user_id)
+            bank_bonus_bp = min(bank * 20, 1800)
+            hourly_profit = _apply_bp(hourly_profit, bank_bonus_bp)
+            premium_state["power_bank"] = bank
+            premium_state["power_bank_bonus_bp"] = bank_bonus_bp
+        if defn.key == "cartel":
+            streak = await _recent_cartel_control_streak(session, guild_id=guild_id, user_id=user_id)
+            streak_bonus_bp = streak * 400
+            hourly_profit = _apply_bp(hourly_profit, streak_bonus_bp)
+            premium_state["control_streak"] = streak
+            premium_state["control_streak_bonus_bp"] = streak_bonus_bp
     # Snapshot a presentational-only contribution breakdown for end-of-run summaries.
     trait = get_business_trait(defn.key)
     base_after_scaling = int(defn.base_hourly_income)
@@ -1900,6 +2070,41 @@ async def start_business_run(
         ends_at=ends_at,
         run_mode_key=run_mode.key,
     )
+    if premium_action:
+        premium_state.update(
+            {
+                "business_key": defn.key,
+                "setup_locked_after_seconds": 120,
+                "start_action": str(premium_action.get("label", "Start")),
+                "run_mode_key": str(run_mode_key),
+                "network_boost_bp": int(premium_action.get("network_boost_bp", 0) or 0),
+            }
+        )
+        if defn.key == "liquor_store":
+            premium_state.update(
+                {
+                    "stock_mode": str(premium_action.get("stock_mode", "balanced")),
+                    "stock": int(premium_action.get("start_stock", 100) or 100),
+                    "hype_boost": int(premium_action.get("hype_boost", 0) or 0),
+                }
+            )
+        elif defn.key == "underground_market":
+            premium_state.update(
+                {
+                    "risk": str(premium_action.get("risk", "mixed")),
+                    "hot_push": int(premium_action.get("hot_push", 0) or 0),
+                    "locked_deal": random.choice(("Rare Merch", "Hidden Supply", "Night Flip", "Backdoor Drop")),
+                }
+            )
+        elif defn.key == "cartel":
+            premium_state.update(
+                {
+                    "control": _clamp_int(70 + int(premium_action.get("control_delta", 0) or 0), 35, 100),
+                    "pressure": _clamp_int(int(premium_action.get("pressure_start", 25) or 25), 0, 100),
+                }
+            )
+        elif defn.key == "shadow_government":
+            premium_state.update({"focus": str(premium_action.get("focus", "power"))})
 
     run = BusinessRunRow(
         ownership_id=int(ownership.id),
@@ -1925,13 +2130,14 @@ async def start_business_run(
             "started_at_iso": now.isoformat(),
             "ends_at_iso": ends_at.isoformat(),
             "run_mode": run_mode.key,
-            "run_mode_label": run_mode.label,
+            "run_mode_label": str(premium_action.get("label")) if premium_action else run_mode.label,
             "summary_components": {
                 "base_hourly_income": int(baseline_hourly_component),
                 "worker_hourly_bonus": int(worker_hourly_component),
                 "manager_hourly_bonus": int(manager_hourly_component),
             },
             "event_plan": event_plan,
+            "premium_run": premium_state if premium_action else None,
         },
         report_json=None,
         silver_paid_total=0,
@@ -1981,6 +2187,7 @@ async def start_business_run(
             f"Runtime: **{total_runtime_hours}h**\n"
             f"Hourly profit: **{hourly_profit:,}/hr**\n"
             f"Projected run profit: **{(hourly_profit * total_runtime_hours):,} per run**"
+            + (f"\nSetup: **{premium_action.get('label')}** (locks in after 2 minutes)." if premium_action else "")
         ),
         snapshot=hub,
         manage_snapshot=manage,

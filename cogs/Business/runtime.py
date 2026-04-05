@@ -61,6 +61,7 @@ Design choices in this version:
 
 import asyncio
 import logging
+import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional, Sequence
@@ -307,6 +308,74 @@ def _finalize_run_in_place(run: BusinessRunRow, *, now: Optional[datetime] = Non
     run.report_json = _build_run_report_json(run, completed_at=now)
 
 
+def _premium_hour_adjustment(*, run: BusinessRunRow, premium: dict, hour_base_profit: int) -> tuple[int, str]:
+    key = str(run.business_key)
+    if key == "liquor_store":
+        stock = int(premium.get("stock", 100) or 0)
+        stock_mode = str(premium.get("stock_mode", "balanced"))
+        hype = int(premium.get("hype_boost", 0) or 0)
+        drain = random.randint(8, 14) + (2 if stock_mode == "premium" else -1 if stock_mode == "cheap" else 0)
+        stock = max(stock - drain, 0)
+        premium["stock"] = stock
+        bonus_bp = 0
+        if stock_mode == "premium":
+            bonus_bp += 1900
+        elif stock_mode == "cheap":
+            bonus_bp -= 700
+        if stock < 30:
+            bonus_bp -= 1600
+        rush_chance = 0.16 + (hype / 10_000)
+        if random.random() < rush_chance:
+            bonus_bp += 2600
+            premium["last_moment"] = "Rush Night popped off"
+        if random.random() < (0.08 if stock_mode == "premium" else 0.04):
+            return int(round(hour_base_profit * (bonus_bp / 10_000))) + int(hour_base_profit * 0.35), "Rare bottles sold out fast"
+        return int(round(hour_base_profit * (bonus_bp / 10_000))), "Shelf traffic"
+    if key == "underground_market":
+        risk = str(premium.get("risk", "mixed"))
+        hot_push = int(premium.get("hot_push", 0) or 0)
+        if risk == "safe":
+            low, high = -900, 1600
+        elif risk == "risky":
+            low, high = -2800, 4200
+        else:
+            low, high = -1600, 2500
+        roll_bp = random.randint(low, high)
+        if random.random() < (0.14 + hot_push / 20_000):
+            roll_bp += 3200
+            premium["last_moment"] = "Hot Deal carried the run"
+        return int(round(hour_base_profit * (roll_bp / 10_000))), "Deal swings"
+    if key == "cartel":
+        control = int(premium.get("control", 70) or 70)
+        pressure = int(premium.get("pressure", 20) or 20)
+        control = max(min(control + random.randint(-6, 5), 100), 20)
+        pressure = max(min(pressure + random.randint(-4, 9), 100), 0)
+        premium["control"] = control
+        premium["pressure"] = pressure
+        profit_bp = (control - 55) * 80 + pressure * 20
+        if control >= 80 and random.random() < 0.18:
+            profit_bp += 2200
+            premium["last_moment"] = "Pressure stayed high"
+        return int(round(hour_base_profit * (profit_bp / 10_000))), "Control pressure"
+    if key == "shadow_government":
+        focus = str(premium.get("focus", "power"))
+        power = int(premium.get("power", 35) or 35)
+        power = max(min(power + random.randint(2, 9), 150), 0)
+        premium["power"] = power
+        if focus == "cashout":
+            profit_bp = 1800 + power * 25
+        elif focus == "network":
+            profit_bp = 900 + power * 15
+        else:
+            profit_bp = 200 + power * 10
+            premium["power_bank"] = min(int(premium.get("power_bank", 0) or 0) + 2, 120)
+        if random.random() < 0.12:
+            premium["last_moment"] = "Favors paid off"
+            profit_bp += 2600
+        return int(round(hour_base_profit * (profit_bp / 10_000))), "Power shift"
+    return 0, "No premium effect"
+
+
 # =========================================================
 # SINGLE RUN PROCESSOR
 # =========================================================
@@ -352,6 +421,8 @@ async def process_single_run(
         positive_events = int(tracking.get("positive_events", 0) or 0)
         negative_events = int(tracking.get("negative_events", 0) or 0)
         highest_rarity = str(tracking.get("highest_rarity", "none"))
+        premium_tracking = dict(tracking.get("premium", {}))
+        premium_state = dict(snapshot.get("premium_run") or {})
         rarity_order = {"none": 0, "common": 1, "uncommon": 2, "rare": 3, "epic": 4, "legendary": 5, "mythical": 6}
         for hour_index in range(whole_hours_due):
             hour_start = as_utc(anchor + timedelta(hours=hour_index))
@@ -391,6 +462,19 @@ async def process_single_run(
             if pause_minutes > 0:
                 effective_hour_profit = int(round(effective_hour_profit * max(0.15, (60 - pause_minutes) / 60)))
             payout = effective_hour_profit + instant_bonus
+            premium_delta = 0
+            premium_reason = ""
+            if premium_state:
+                premium_delta, premium_reason = _premium_hour_adjustment(
+                    run=run,
+                    premium=premium_state,
+                    hour_base_profit=effective_hour_profit,
+                )
+                payout = max(payout + premium_delta, 0)
+                premium_tracking["hours_with_premium"] = int(premium_tracking.get("hours_with_premium", 0) or 0) + 1
+                premium_tracking["premium_income_delta"] = int(premium_tracking.get("premium_income_delta", 0) or 0) + int(premium_delta)
+                if premium_reason:
+                    premium_tracking["last_reason"] = premium_reason
             silver_paid += payout
             event_delta = payout - hourly_profit
             if event_delta >= 0:
@@ -404,6 +488,7 @@ async def process_single_run(
                     "ends_at_iso": hour_end.isoformat(),
                     "base_payout": int(hourly_profit),
                     "event_delta": int(event_delta),
+                    "premium_delta": int(premium_delta),
                     "total_payout": int(payout),
                 }
             )
@@ -442,10 +527,21 @@ async def process_single_run(
             "highest_single_hour_payout": max(per_hour_values) if per_hour_values else 0,
             "lowest_single_hour_payout": min(per_hour_values) if per_hour_values else 0,
             "highest_rarity": highest_rarity,
+            "premium": {
+                **premium_tracking,
+                "start_action": str(premium_state.get("start_action", "Standard")),
+                "last_moment": str(premium_state.get("last_moment", premium_tracking.get("last_reason", "No special moment"))),
+                "stock_left": int(premium_state.get("stock", 0) or 0),
+                "control_end": int(premium_state.get("control", 0) or 0),
+                "power_end": int(premium_state.get("power", 0) or 0),
+                "power_bank": int(premium_state.get("power_bank", 0) or 0),
+                "control_kept": bool(int(premium_state.get("control", 0) or 0) >= 65),
+            },
         }
         report["summary_tracking"] = tracking
         run.report_json = report
         snapshot["event_plan"] = plan
+        snapshot["premium_run"] = premium_state
         run.snapshot_json = snapshot
 
     completed = False
