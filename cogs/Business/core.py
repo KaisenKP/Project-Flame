@@ -53,6 +53,8 @@ import random
 from typing import Dict, List, Optional, Sequence
 
 from .systems import (
+    RUN_MODE_AGGRESSIVE,
+    RUN_MODE_SAFE,
     RUN_MODE_STANDARD,
     calc_synergy_bonus_bp,
     diminishing_worker_bonus_bp,
