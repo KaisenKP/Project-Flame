@@ -205,6 +205,8 @@ class BusinessManageSnapshot:
     trait_summary: str = "Balanced"
     stability_label: str = "Stable"
     next_unlock: Optional[str] = None
+    affordable_upgrades_now: int = 0
+    upgrade_guard_text: Optional[str] = None
     image_url: Optional[str] = None
     banner_url: Optional[str] = None
     notes: Optional[List[str]] = None
@@ -775,6 +777,36 @@ def _upgrade_cost(defn: BusinessDef, level: int) -> int:
     next_income = _effective_base_income(defn, level=current_level + 1, prestige=0)
     delta_income = max(int(next_income) - int(cur_income), 1)
     return max(int(round(delta_income * 12)), 1)
+
+
+def _compute_affordable_upgrade_count(
+    defn: BusinessDef,
+    *,
+    level: int,
+    prestige: int,
+    wallet_silver: int,
+    max_upgrades: Optional[int] = None,
+) -> tuple[int, int]:
+    normalized_level, normalized_prestige = _normalize_business_progress(level=level, prestige=prestige)
+    max_level_for_prestige = max_stored_level_for_prestige(normalized_prestige)
+    if normalized_level >= max_level_for_prestige:
+        return 0, 0
+    remaining_until_cap = max_level_for_prestige - normalized_level
+    if max_upgrades is not None:
+        remaining_until_cap = min(remaining_until_cap, max(int(max_upgrades), 0))
+    if remaining_until_cap <= 0:
+        return 0, 0
+
+    spendable = max(int(wallet_silver), 0)
+    total_cost = 0
+    bought = 0
+    for offset in range(remaining_until_cap):
+        cost = int(_upgrade_cost(defn, normalized_level + offset))
+        if total_cost + cost > spendable:
+            break
+        total_cost += cost
+        bought += 1
+    return bought, total_cost
 
 
 @dataclass(frozen=True, slots=True)
@@ -1759,6 +1791,7 @@ async def get_business_manage_snapshot(
             active_event_summary="No active events", active_event_lines=[], synergy_bonus_bp=0, synergy_summary="No synergy active",
             run_mode="Standard", run_mode_key=RUN_MODE_STANDARD, trait_summary=trait.positive_bias,
             stability_label=f"Stability {trait.stability}/100", next_unlock="Own the business to unlock staffing, modes, and synergies.",
+            affordable_upgrades_now=0, upgrade_guard_text=None,
             image_url=defn.image_url, banner_url=defn.banner_url,
             notes=["You do not own this business yet.", "Buy it from the Business Hub to unlock upgrades and staffing later."]
         )
@@ -1770,6 +1803,15 @@ async def get_business_manage_snapshot(
     hourly_profit = await _calc_display_hourly_profit_for_owned_business(session, ownership=ownership, defn=defn)
     runtime_remaining = _hours_remaining(running_row.ends_at) if running_row is not None else 0
     state = await _compute_run_state_summary(session, ownership=ownership, defn=defn, running_row=running_row)
+    wallet = await _get_wallet(session, guild_id=guild_id, user_id=user_id)
+    affordable_now, _ = _compute_affordable_upgrade_count(
+        defn,
+        level=level,
+        prestige=prestige,
+        wallet_silver=int(wallet.silver or 0),
+    )
+    at_cap = at_level_cap(stored_level=level, prestige=prestige)
+    guard_text = "At prestige cap, prestige to continue." if at_cap and prestige < MAX_BUSINESS_PRESTIGE else None
 
     next_unlock = None
     if level < 25:
@@ -1801,9 +1843,9 @@ async def get_business_manage_snapshot(
         total_visible_level=total_visible_level_for(stored_level=level, prestige=prestige),
         max_level=max_visible_level_for_prestige(prestige), prestige=prestige, hourly_profit=hourly_profit,
         base_hourly_income=int(defn.base_hourly_income),
-        upgrade_cost=None if at_level_cap(stored_level=level, prestige=prestige) else int(_upgrade_cost(defn, level)),
-        prestige_cost=int(_prestige_cost(defn, prestige)) if at_level_cap(stored_level=level, prestige=prestige) and prestige < MAX_BUSINESS_PRESTIGE else None,
-        can_prestige=at_level_cap(stored_level=level, prestige=prestige) and prestige < MAX_BUSINESS_PRESTIGE,
+        upgrade_cost=None if at_cap else int(_upgrade_cost(defn, level)),
+        prestige_cost=int(_prestige_cost(defn, prestige)) if at_cap and prestige < MAX_BUSINESS_PRESTIGE else None,
+        can_prestige=at_cap and prestige < MAX_BUSINESS_PRESTIGE,
         prestige_multiplier=prestige_multiplier_display(prestige), bulk_upgrade_1_unlocked=True,
         bulk_upgrade_5_unlocked=bulk_option_for(prestige, 5).unlocked, bulk_upgrade_10_unlocked=bulk_option_for(prestige, 10).unlocked,
         runtime_remaining_hours=runtime_remaining, total_runtime_hours=runtime_total, worker_slots_used=worker_used,
@@ -1813,7 +1855,9 @@ async def get_business_manage_snapshot(
         active_event_summary=str(state['active_event_summary']), active_event_lines=list(state['active_event_lines']),
         synergy_bonus_bp=int(state['synergy_bp']), synergy_summary=str(state['synergy_summary']),
         run_mode=str(state['run_mode_label']), run_mode_key=str(state['run_mode_key']), trait_summary=str(state['trait_summary']),
-        stability_label=str(state['stability_label']), next_unlock=next_unlock, image_url=defn.image_url, banner_url=defn.banner_url, notes=notes
+        stability_label=str(state['stability_label']), next_unlock=next_unlock,
+        affordable_upgrades_now=affordable_now, upgrade_guard_text=guard_text,
+        image_url=defn.image_url, banner_url=defn.banner_url, notes=notes
     )
 
 
@@ -2378,7 +2422,7 @@ async def upgrade_business(
     guild_id: int,
     user_id: int,
     business_key: str,
-    quantity: int = 1,
+    quantity: int | str = 1,
     include_snapshots: bool = True,
 ) -> BusinessActionResult:
     defn = _def_for_key(business_key)
@@ -2390,7 +2434,23 @@ async def upgrade_business(
         hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
         return BusinessActionResult(ok=False, message=f"You do not own **{defn.name}** yet.", snapshot=hub)
 
-    requested_quantity = max(int(quantity), 1)
+    max_mode = False
+    requested_quantity = 1
+    if isinstance(quantity, str):
+        token = quantity.strip().lower()
+        if token in {"max", "all", "*"}:
+            max_mode = True
+        else:
+            try:
+                requested_quantity = max(int(token), 1)
+            except ValueError:
+                return BusinessActionResult(ok=False, message="Quantity must be a positive number or 'max'.")
+    else:
+        parsed_quantity = int(quantity)
+        if parsed_quantity < 0:
+            max_mode = True
+        else:
+            requested_quantity = max(parsed_quantity, 1)
     old_level, old_prestige = await _resolve_effective_business_progress(session, ownership=ownership)
     old_visible_level = visible_level_for(old_level)
 
@@ -2409,24 +2469,20 @@ async def upgrade_business(
 
     wallet = await _get_wallet(session, guild_id=guild_id, user_id=user_id)
     balance = int(wallet.silver or 0)
-    unlock = bulk_option_for(old_prestige, requested_quantity)
-    if requested_quantity > 1 and not unlock.unlocked:
+    unlock = bulk_option_for(old_prestige, requested_quantity) if requested_quantity > 1 else None
+    if not max_mode and requested_quantity > 1 and unlock is not None and not unlock.unlocked:
         hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
         manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
         needed_prestige = 3 if requested_quantity == 5 else 10
         return BusinessActionResult(ok=False, message=f"Upgrade x{requested_quantity} unlocks at Prestige **{needed_prestige}**.", snapshot=hub, manage_snapshot=manage)
 
-    cap_level = max_stored_level_for_prestige(old_prestige)
-    affordable_cost = 0
-    actual_upgrades = 0
-    for lvl in range(old_level, min(old_level + requested_quantity, cap_level + 1)):
-        if lvl > cap_level - 1:
-            break
-        cost = int(_upgrade_cost(defn, lvl))
-        if balance < affordable_cost + cost:
-            break
-        affordable_cost += cost
-        actual_upgrades += 1
+    actual_upgrades, affordable_cost = _compute_affordable_upgrade_count(
+        defn,
+        level=old_level,
+        prestige=old_prestige,
+        wallet_silver=balance,
+        max_upgrades=None if max_mode else requested_quantity,
+    )
 
     if actual_upgrades <= 0:
         next_cost = int(_upgrade_cost(defn, old_level))
@@ -2458,7 +2514,7 @@ async def upgrade_business(
         manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
     new_hourly = int(manage.hourly_profit) if manage is not None else old_hourly
     new_runtime_hours = int(manage.total_runtime_hours) if manage is not None else old_runtime_hours
-    requested_text = f"x{requested_quantity}" if requested_quantity > 1 else "x1"
+    requested_text = "max affordable" if max_mode else (f"x{requested_quantity}" if requested_quantity > 1 else "x1")
     landed_at_cap = at_level_cap(stored_level=new_level, prestige=new_prestige)
     cap_suffix = "\nLevel cap reached. Prestige to keep scaling." if landed_at_cap else ""
 
