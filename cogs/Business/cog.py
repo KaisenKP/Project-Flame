@@ -1127,6 +1127,14 @@ def _progress_bar(current: int, total: int, *, width: int = 8) -> str:
     filled = round((current / total) * width)
     return "█" * filled + "░" * (width - filled)
 
+
+def _coverage_text(current: int, total: int, *, width: int = 10) -> str:
+    total = max(int(total), 1)
+    current = min(max(int(current), 0), total)
+    percent = round((current / total) * 100)
+    bar = _progress_bar(current, total, width=width)
+    return f"{current}/{total} ({percent}%) `{bar}`"
+
 def _manager_rarity_meta(rarity: object) -> tuple[str, str, discord.Color, int]:
     key = _safe_str(rarity, "common").strip().lower()
     table = {
@@ -1382,11 +1390,13 @@ def _build_hub_embed(
 
     if active_event_rows:
         e.add_field(name="🔥 ACTIVE EVENTS", value="\n\n".join(active_event_rows[:5]), inline=False)
-    run_ratio = _progress_bar(sum(1 for card in owned_cards if card.running), max(len(owned_cards), 1), width=10)
+    running_count = sum(1 for card in owned_cards if card.running)
+    total_owned = len(owned_cards)
+    run_ratio = _coverage_text(running_count, total_owned, width=10)
     e.add_field(
         name="Portfolio Health",
         value=(
-            f"Run Coverage: `{run_ratio}`\n"
+            f"Businesses Running: {run_ratio}\n"
             f"Idle Opportunity: `{_fmt_compact(idle_hourly)}/hr`\n"
             f"Projected Cycle Value: `{_fmt_compact(projected_cycle_total)}`"
         ),
@@ -2759,10 +2769,10 @@ class BusinessHubView(BusinessBaseView):
                 async with session.begin():
                     snap = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
 
-        coverage = _progress_bar(started + already_running, max(attempted, 1), width=10)
+        coverage = _coverage_text(started + already_running, attempted, width=10)
         summary = (
             f"Processed: **{attempted}**\n"
-            f"Coverage: `{coverage}`\n"
+            f"In Running State: {coverage}\n"
             f"Started: **{started}**\n"
             f"Already running: **{already_running}**\n"
             f"Failed: **{failed}**"
@@ -2817,10 +2827,10 @@ class BusinessHubView(BusinessBaseView):
                 async with session.begin():
                     snap = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
 
-        coverage = _progress_bar(stopped + already_stopped, max(attempted, 1), width=10)
+        coverage = _coverage_text(stopped + already_stopped, attempted, width=10)
         summary = (
             f"Processed: **{attempted}**\n"
-            f"Coverage: `{coverage}`\n"
+            f"In Stopped State: {coverage}\n"
             f"Stopped: **{stopped}**\n"
             f"Already stopped: **{already_stopped}**\n"
             f"Failed: **{failed}**"
