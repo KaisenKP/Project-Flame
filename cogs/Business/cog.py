@@ -3812,10 +3812,18 @@ class VIPRerollSetupView(discord.ui.View):
             return _worker_matches_kind(candidate, self.kind_key)  # type: ignore[arg-type]
         return _manager_matches_kind(candidate, self.kind_key)  # type: ignore[arg-type]
 
-    async def _process_rerolls(self, interaction: discord.Interaction, *, amount: int, hire_goal: int) -> tuple[int, int, str, str, str, str]:
+    async def _process_rerolls(
+        self,
+        interaction: discord.Interaction,
+        *,
+        amount: int,
+        hire_goal: int,
+    ) -> tuple[int, int, str, str, str, str, Optional[WorkerCandidateSnapshot | ManagerCandidateSnapshot], bool]:
         hires, rerolls_used = 0, 0
         best_hit, latest_hit = "None yet", "None yet"
         best_score = -1
+        best_candidate: Optional[WorkerCandidateSnapshot | ManagerCandidateSnapshot] = None
+        best_candidate_hired = False
         stopped_note = ""
         async with self.parent_view.cog.sessionmaker() as session:
             async with session.begin():
@@ -3840,7 +3848,7 @@ class VIPRerollSetupView(discord.ui.View):
                         if self._is_slots_full_message(roll_err):
                             stopped_note = "Stopped early because all assignment slots are full."
                             break
-                        return hires, rerolls_used, best_hit, latest_hit, stopped_note, roll_err
+                        return hires, rerolls_used, best_hit, latest_hit, stopped_note, roll_err, best_candidate, best_candidate_hired
                     rerolls_used += 1
                     rarity_key = _normalize_rarity_key(getattr(candidate, "rarity", ""))
                     hit_name = _safe_str(getattr(candidate, "worker_name", getattr(candidate, "manager_name", None)), "Candidate")
@@ -3848,7 +3856,10 @@ class VIPRerollSetupView(discord.ui.View):
                     score = _worker_candidate_score(candidate) if self.target_kind == "worker" else _manager_candidate_score(candidate)  # type: ignore[arg-type]
                     if score > best_score:
                         best_hit, best_score = hit_line, score
-                    if not self._candidate_matches_filters(candidate):
+                        best_candidate = candidate
+                        best_candidate_hired = False
+                    matches_filters = self._candidate_matches_filters(candidate)
+                    if not matches_filters:
                         if idx == 0 or (idx + 1) % 25 == 0:
                             progress = discord.Embed(title="VIP Reroll In Progress", description="Filtering and evaluating candidates...", color=discord.Color.gold())
                             progress.add_field(name="Progress", value=f"Rolls: **{_fmt_int(rerolls_used)}/{_fmt_int(amount)}**", inline=False)
@@ -3863,8 +3874,10 @@ class VIPRerollSetupView(discord.ui.View):
                         if self._is_slots_full_message(hire_result.message):
                             stopped_note = "Stopped early because all assignment slots are full."
                             break
-                        return hires, rerolls_used, best_hit, latest_hit, stopped_note, hire_result.message
+                        return hires, rerolls_used, best_hit, latest_hit, stopped_note, hire_result.message, best_candidate, best_candidate_hired
                     hires += 1
+                    if candidate is best_candidate:
+                        best_candidate_hired = True
                     latest_hit = hit_line
                     if hires == 1 or hires % 5 == 0:
                         progress = discord.Embed(title="VIP Reroll In Progress", description="Applying successful hires...", color=discord.Color.gold())
@@ -3874,7 +3887,7 @@ class VIPRerollSetupView(discord.ui.View):
                     if hire_goal > 0 and hires >= hire_goal:
                         stopped_note = f"Stopped after reaching your hire goal ({_fmt_int(hire_goal)})."
                         break
-        return hires, rerolls_used, best_hit, latest_hit, stopped_note, ""
+        return hires, rerolls_used, best_hit, latest_hit, stopped_note, "", best_candidate, best_candidate_hired
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, emoji="✅", row=4)
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -3900,7 +3913,7 @@ class VIPRerollSetupView(discord.ui.View):
             if self.target_kind == "manager" and not _manager_kind_pool_possible(self.kind_key, self._selected_rarity_keys()):
                 await interaction.edit_original_response(content="This kind + rarity combination has an empty result pool.", embed=None, view=self)
                 return
-            hires, rerolls_used, best_hit, latest_hit, stopped_note, err = await self._process_rerolls(interaction, amount=amount, hire_goal=hire_goal)
+            hires, rerolls_used, best_hit, latest_hit, stopped_note, err, best_candidate, best_candidate_hired = await self._process_rerolls(interaction, amount=amount, hire_goal=hire_goal)
             self.parent_view.current_candidate = None
             summary = discord.Embed(title="VIP Reroll Complete", description="Your rerolls have finished.", color=SUCCESS_COLOR if not err else ERROR_COLOR)
             summary.add_field(name="Hires", value=f"**{_fmt_int(hires)}**", inline=True)
@@ -3912,7 +3925,10 @@ class VIPRerollSetupView(discord.ui.View):
                 summary.add_field(name="Auto-stop", value=stopped_note, inline=False)
             if err:
                 summary.add_field(name="Stopped early", value=err, inline=False)
-            await interaction.edit_original_response(embed=summary, view=None)
+            claim_view: Optional[VIPBestPullClaimView] = None
+            if best_candidate is not None and not best_candidate_hired:
+                claim_view = VIPBestPullClaimView(parent_view=self.parent_view, target_kind=self.target_kind, best_candidate=best_candidate)
+            await interaction.edit_original_response(embed=summary, view=claim_view)
             await self.parent_view._show_recruitment_board(interaction, action_message=f"✅ VIP reroll complete: **{_fmt_int(rerolls_used)}** rolls used, **{_fmt_int(hires)}** hires.")
         finally:
             self.processing = False
@@ -3923,6 +3939,89 @@ class VIPRerollSetupView(discord.ui.View):
         for item in self.children:
             item.disabled = True
         await interaction.response.edit_message(content="VIP reroll cancelled.", view=self)
+
+
+class VIPBestPullClaimView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        parent_view: "WorkerAssignmentsView | ManagerAssignmentsView",
+        target_kind: str,
+        best_candidate: WorkerCandidateSnapshot | ManagerCandidateSnapshot,
+    ):
+        super().__init__(timeout=300)
+        self.parent_view = parent_view
+        self.target_kind = target_kind
+        self.best_candidate = best_candidate
+        self.owner_id = int(parent_view.owner_id)
+        self.processing = False
+        self.claimed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if int(interaction.user.id) != self.owner_id:
+            await interaction.response.send_message("This VIP reroll result belongs to someone else.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Grab Best Pull", style=discord.ButtonStyle.primary, emoji="🎁")
+    async def grab_best_pull_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if self.processing:
+            await interaction.response.send_message("Already processing this claim.", ephemeral=True)
+            return
+        if self.claimed:
+            await interaction.response.send_message("Best pull already claimed.", ephemeral=True)
+            return
+
+        self.processing = True
+        await interaction.response.defer(ephemeral=True)
+        try:
+            async with self.parent_view.cog.sessionmaker() as session:
+                async with session.begin():
+                    if self.target_kind == "worker":
+                        candidate = self.best_candidate
+                        result = await hire_worker_manual(
+                            session,
+                            guild_id=self.parent_view.guild_id,
+                            user_id=self.parent_view.owner_id,
+                            business_key=self.parent_view.business_key,
+                            worker_name=str(getattr(candidate, "worker_name", "Worker")),
+                            worker_type=str(getattr(candidate, "worker_type", "efficient")),
+                            rarity=str(getattr(candidate, "rarity", "common")),
+                            flat_profit_bonus=int(getattr(candidate, "flat_profit_bonus", 0) or 0),
+                            percent_profit_bonus_bp=int(getattr(candidate, "percent_profit_bonus_bp", 0) or 0),
+                            charge_silver=False,
+                        )
+                        label = f"{_safe_str(getattr(candidate, 'worker_name', None), 'Worker')} {_worker_rarity_badge(getattr(candidate, 'rarity', None))}"
+                    else:
+                        candidate = self.best_candidate
+                        result = await hire_manager_manual(
+                            session,
+                            guild_id=self.parent_view.guild_id,
+                            user_id=self.parent_view.owner_id,
+                            business_key=self.parent_view.business_key,
+                            manager_name=str(getattr(candidate, "manager_name", "Manager")),
+                            rarity=str(getattr(candidate, "rarity", "common")),
+                            runtime_bonus_hours=int(getattr(candidate, "runtime_bonus_hours", 0) or 0),
+                            profit_bonus_bp=int(getattr(candidate, "profit_bonus_bp", 0) or 0),
+                            auto_restart_charges=int(getattr(candidate, "auto_restart_charges", 0) or 0),
+                            charge_silver=False,
+                        )
+                        label = f"{_safe_str(getattr(candidate, 'manager_name', None), 'Manager')} {_manager_rarity_badge(getattr(candidate, 'rarity', None))}"
+            if not result.ok:
+                await interaction.edit_original_response(content=f"Couldn't grab best pull: {result.message}")
+                return
+
+            self.claimed = True
+            self.parent_view.current_candidate = None
+            button.disabled = True
+            try:
+                await interaction.message.edit(view=self)
+            except Exception:
+                pass
+            await interaction.edit_original_response(content=f"✅ Grabbed best pull: {label}")
+            await self.parent_view._show_recruitment_board(interaction, action_message=f"🎁 Grabbed best pull: {label}")
+        finally:
+            self.processing = False
 
 
 class AutoHireWorkersModal(discord.ui.Modal, title="Auto-Hire Workers"):
