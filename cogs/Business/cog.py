@@ -49,6 +49,7 @@ Must provide:
 """
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -80,6 +81,8 @@ AUTO_HIRE_ALLOWED_RARITIES = {"common", "uncommon", "rare", "epic", "mythic"}
 AUTO_HIRE_PROGRESS_UPDATE_INTERVAL_SECONDS = 1.0
 AUTO_HIRE_PROGRESS_ROLL_CADENCE = 3
 AUTO_HIRE_ROLL_DELAY_SECONDS = 0.45
+REROLL_PREFETCH_TARGET = 12
+REROLL_PREFETCH_IDLE_SECONDS = 0.25
 VIP_REROLL_AMOUNT_OPTIONS = (1, 5, 10, 25, 50, 100)
 VIP_REROLL_TARGET_OPTIONS = (1, 2, 3, 5, 10)
 VIP_REROLL_TIMEOUT_SECONDS = None
@@ -123,6 +126,8 @@ try:
         hire_worker_manual,
         roll_worker_candidate,
         roll_manager_candidate,
+        _generate_worker_roll,
+        _generate_manager_roll,
         WORKER_CANDIDATE_REROLL_COST,
         MANAGER_CANDIDATE_REROLL_COST,
         remove_manager,
@@ -616,6 +621,32 @@ except NameError:
     ) -> BusinessActionResult:
         _ = session, guild_id, user_id, business_key, reroll_cost
         return BusinessActionResult(ok=False, message="Manager candidate services are not wired yet.")
+
+try:
+    _generate_worker_roll
+except NameError:
+    def _generate_worker_roll(*, prestige: int = 0) -> dict[str, int | str]:
+        _ = prestige
+        return {
+            "worker_name": "Worker",
+            "worker_type": "efficient",
+            "rarity": "common",
+            "flat_profit_bonus": 0,
+            "percent_profit_bonus_bp": 0,
+        }
+
+try:
+    _generate_manager_roll
+except NameError:
+    def _generate_manager_roll(*, prestige: int = 0) -> dict[str, int | str]:
+        _ = prestige
+        return {
+            "manager_name": "Manager",
+            "rarity": "common",
+            "runtime_bonus_hours": 0,
+            "profit_bonus_bp": 0,
+            "auto_restart_charges": 0,
+        }
 
 # =========================================================
 # CONSTANTS
@@ -3740,16 +3771,26 @@ class VIPRerollSetupView(discord.ui.View):
             async with session.begin():
                 for idx in range(amount):
                     if self.target_kind == "worker":
-                        roll_result = await roll_worker_candidate(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key, reroll_cost=WORKER_CANDIDATE_REROLL_COST)
-                        candidate = roll_result.worker_candidate
+                        candidate, roll_err = await self.parent_view.cog._draw_prefetched_candidate(
+                            session,
+                            guild_id=self.parent_view.guild_id,
+                            user_id=self.parent_view.owner_id,
+                            business_key=self.parent_view.business_key,
+                            staff_kind="worker",
+                        )
                     else:
-                        roll_result = await roll_manager_candidate(session, guild_id=self.parent_view.guild_id, user_id=self.parent_view.owner_id, business_key=self.parent_view.business_key, reroll_cost=MANAGER_CANDIDATE_REROLL_COST)
-                        candidate = roll_result.manager_candidate
-                    if (not roll_result.ok) or candidate is None:
-                        if self._is_slots_full_message(roll_result.message):
+                        candidate, roll_err = await self.parent_view.cog._draw_prefetched_candidate(
+                            session,
+                            guild_id=self.parent_view.guild_id,
+                            user_id=self.parent_view.owner_id,
+                            business_key=self.parent_view.business_key,
+                            staff_kind="manager",
+                        )
+                    if candidate is None:
+                        if self._is_slots_full_message(roll_err):
                             stopped_note = "Stopped early because all assignment slots are full."
                             break
-                        return hires, rerolls_used, best_hit, latest_hit, stopped_note, roll_result.message
+                        return hires, rerolls_used, best_hit, latest_hit, stopped_note, roll_err
                     rerolls_used += 1
                     rarity_key = _normalize_rarity_key(getattr(candidate, "rarity", ""))
                     hit_name = _safe_str(getattr(candidate, "worker_name", getattr(candidate, "manager_name", None)), "Candidate")
@@ -3758,7 +3799,7 @@ class VIPRerollSetupView(discord.ui.View):
                     if score > best_score:
                         best_hit, best_score = hit_line, score
                     if not self._candidate_matches_filters(candidate):
-                        if idx == 0 or (idx + 1) % 5 == 0:
+                        if idx == 0 or (idx + 1) % 25 == 0:
                             progress = discord.Embed(title="VIP Reroll In Progress", description="Filtering and evaluating candidates...", color=discord.Color.gold())
                             progress.add_field(name="Progress", value=f"Rolls: **{_fmt_int(rerolls_used)}/{_fmt_int(amount)}**", inline=False)
                             progress.add_field(name="Best hit", value=best_hit, inline=False)
@@ -3775,10 +3816,11 @@ class VIPRerollSetupView(discord.ui.View):
                         return hires, rerolls_used, best_hit, latest_hit, stopped_note, hire_result.message
                     hires += 1
                     latest_hit = hit_line
-                    progress = discord.Embed(title="VIP Reroll In Progress", description="Applying successful hires...", color=discord.Color.gold())
-                    progress.add_field(name="Progress", value=f"Hires: **{_fmt_int(hires)}**/{_fmt_int(max(hire_goal, 1))}\nRolls: **{_fmt_int(rerolls_used)}/{_fmt_int(amount)}**", inline=False)
-                    progress.add_field(name="Best hit", value=best_hit, inline=False)
-                    await interaction.edit_original_response(embed=progress, view=None)
+                    if hires == 1 or hires % 5 == 0:
+                        progress = discord.Embed(title="VIP Reroll In Progress", description="Applying successful hires...", color=discord.Color.gold())
+                        progress.add_field(name="Progress", value=f"Hires: **{_fmt_int(hires)}**/{_fmt_int(max(hire_goal, 1))}\nRolls: **{_fmt_int(rerolls_used)}/{_fmt_int(amount)}**", inline=False)
+                        progress.add_field(name="Best hit", value=best_hit, inline=False)
+                        await interaction.edit_original_response(embed=progress, view=None)
                     if hire_goal > 0 and hires >= hire_goal:
                         stopped_note = f"Stopped after reaching your hire goal ({_fmt_int(hire_goal)})."
                         break
@@ -3940,9 +3982,9 @@ class ConfirmWorkerAutoHireView(discord.ui.View):
             await interaction.edit_original_response(content=f"❌ {err}", embed=None, view=None)
             return
         await service.attach_progress_message(job_id=int(job.id), channel_id=int(interaction.channel_id))
-        await interaction.edit_original_response(content=f"✅ Started worker job `{job.job_id}`. Progress is posted in-channel.", embed=None, view=None)
-        await service.run_job(job_id=int(job.id))
-        await self.parent_view._show_recruitment_board(interaction, action_message=f"✅ Worker hiring job `{job.job_id}` finished.")
+        asyncio.create_task(service.run_job(job_id=int(job.id)), name=f"vip_hiring_worker:{job.job_id}")
+        await interaction.edit_original_response(content=f"✅ Started worker job `{job.job_id}`. Progress is posted in-channel and running now.", embed=None, view=None)
+        await self.parent_view._show_recruitment_board(interaction, action_message=f"✅ Worker hiring job `{job.job_id}` started.")
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -3981,9 +4023,9 @@ class ConfirmManagerAutoHireView(discord.ui.View):
             await interaction.edit_original_response(content=f"❌ {err}", embed=None, view=None)
             return
         await service.attach_progress_message(job_id=int(job.id), channel_id=int(interaction.channel_id))
-        await interaction.edit_original_response(content=f"✅ Started manager job `{job.job_id}`. Progress is posted in-channel.", embed=None, view=None)
-        await service.run_job(job_id=int(job.id))
-        await self.parent_view._show_recruitment_board(interaction, action_message=f"✅ Manager hiring job `{job.job_id}` finished.")
+        asyncio.create_task(service.run_job(job_id=int(job.id)), name=f"vip_hiring_manager:{job.job_id}")
+        await interaction.edit_original_response(content=f"✅ Started manager job `{job.job_id}`. Progress is posted in-channel and running now.", embed=None, view=None)
+        await self.parent_view._show_recruitment_board(interaction, action_message=f"✅ Manager hiring job `{job.job_id}` started.")
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -4016,6 +4058,12 @@ class WorkerAssignmentsView(BusinessBaseView):
         self.auto_hire_button.disabled = not self.is_vip
         self.is_processing = False
         self._sync_pagination_buttons(total_slots=0)
+        self.cog._ensure_reroll_prefetch_task(
+            guild_id=self.guild_id,
+            user_id=self.owner_id,
+            business_key=self.business_key,
+            staff_kind="worker",
+        )
 
     def _sync_pagination_buttons(self, *, total_slots: int) -> None:
         total_pages = max(1, (max(int(total_slots), 0) + _ASSIGNMENTS_PAGE_SIZE - 1) // _ASSIGNMENTS_PAGE_SIZE)
@@ -4085,20 +4133,19 @@ class WorkerAssignmentsView(BusinessBaseView):
                     status_line="Searching for a better hire...",
                 )
                 await _safe_edit_panel(interaction, embeds=[rolling, assignments_embed], view=self, message_id=self.panel_message_id)
-                await asyncio.sleep(0.4)
                 async with self.cog.sessionmaker() as session:
                     async with session.begin():
-                        result = await roll_worker_candidate(
+                        candidate, err = await self.cog._draw_prefetched_candidate(
                             session,
                             guild_id=self.guild_id,
                             user_id=self.owner_id,
                             business_key=self.business_key,
-                            reroll_cost=WORKER_CANDIDATE_REROLL_COST,
+                            staff_kind="worker",
                         )
-                if not result.ok or result.worker_candidate is None:
-                    await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
+                if candidate is None:
+                    await self._show_recruitment_board(interaction, action_message="❌ " + err)
                     return
-                self.current_candidate = result.worker_candidate
+                self.current_candidate = candidate
                 await self._show_recruitment_board(interaction, action_message="✨ New candidate found. Hire now for free.")
                 return
 
@@ -4147,32 +4194,29 @@ class WorkerAssignmentsView(BusinessBaseView):
             if payload is None:
                 return
             detail, slots, assignments_embed = payload
-            stages = ("Re-rolling candidate...", "Scanning candidates...", "Rare...", "Revealing final candidate...")
-            for idx, line in enumerate(stages):
-                rolling = _build_worker_candidate_embed(
-                    user=interaction.user,
-                    detail=detail,
-                    candidate=WorkerCandidateSnapshot(worker_name="Recruit Scan", worker_type="efficient", rarity=("common" if idx < 2 else "rare"), flat_profit_bonus=0, percent_profit_bonus_bp=0, reroll_cost=WORKER_CANDIDATE_REROLL_COST),
-                    slots=slots,
-                    current_candidate=previous_candidate,
-                    stage_label="Recruit Spin",
-                    status_line=line,
-                )
-                await _safe_edit_panel(interaction, embeds=[rolling, assignments_embed], view=self, message_id=self.panel_message_id)
-                await asyncio.sleep(0.18)
+            rolling = _build_worker_candidate_embed(
+                user=interaction.user,
+                detail=detail,
+                candidate=WorkerCandidateSnapshot(worker_name="Recruit Scan", worker_type="efficient", rarity="rare", flat_profit_bonus=0, percent_profit_bonus_bp=0, reroll_cost=WORKER_CANDIDATE_REROLL_COST),
+                slots=slots,
+                current_candidate=previous_candidate,
+                stage_label="Recruit Spin",
+                status_line="Searching cached prospects...",
+            )
+            await _safe_edit_panel(interaction, embeds=[rolling, assignments_embed], view=self, message_id=self.panel_message_id)
             async with self.cog.sessionmaker() as session:
                 async with session.begin():
-                    result = await roll_worker_candidate(
+                    candidate, err = await self.cog._draw_prefetched_candidate(
                         session,
                         guild_id=self.guild_id,
                         user_id=self.owner_id,
                         business_key=self.business_key,
-                        reroll_cost=WORKER_CANDIDATE_REROLL_COST,
+                        staff_kind="worker",
                     )
-            if not result.ok or result.worker_candidate is None:
-                await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
+            if candidate is None:
+                await self._show_recruitment_board(interaction, action_message="❌ " + err)
                 return
-            self.current_candidate = result.worker_candidate
+            self.current_candidate = candidate
             await self._show_recruitment_board(interaction, action_message="✨ Recruit reveal complete.")
         finally:
             self.is_processing = False
@@ -4245,6 +4289,12 @@ class ManagerAssignmentsView(BusinessBaseView):
         self.auto_hire_button.disabled = not self.is_vip
         self.is_processing = False
         self._sync_pagination_buttons(total_slots=0)
+        self.cog._ensure_reroll_prefetch_task(
+            guild_id=self.guild_id,
+            user_id=self.owner_id,
+            business_key=self.business_key,
+            staff_kind="manager",
+        )
 
     def _sync_pagination_buttons(self, *, total_slots: int) -> None:
         total_pages = max(1, (max(int(total_slots), 0) + _ASSIGNMENTS_PAGE_SIZE - 1) // _ASSIGNMENTS_PAGE_SIZE)
@@ -4314,20 +4364,19 @@ class ManagerAssignmentsView(BusinessBaseView):
                     status_line="Searching for a better hire...",
                 )
                 await _safe_edit_panel(interaction, embeds=[rolling, assignments_embed], view=self, message_id=self.panel_message_id)
-                await asyncio.sleep(0.4)
                 async with self.cog.sessionmaker() as session:
                     async with session.begin():
-                        result = await roll_manager_candidate(
+                        candidate, err = await self.cog._draw_prefetched_candidate(
                             session,
                             guild_id=self.guild_id,
                             user_id=self.owner_id,
                             business_key=self.business_key,
-                            reroll_cost=MANAGER_CANDIDATE_REROLL_COST,
+                            staff_kind="manager",
                         )
-                if not result.ok or result.manager_candidate is None:
-                    await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
+                if candidate is None:
+                    await self._show_recruitment_board(interaction, action_message="❌ " + err)
                     return
-                self.current_candidate = result.manager_candidate
+                self.current_candidate = candidate
                 await self._show_recruitment_board(interaction, action_message="✨ New candidate found. Hire now for free.")
                 return
 
@@ -4376,32 +4425,29 @@ class ManagerAssignmentsView(BusinessBaseView):
             if payload is None:
                 return
             detail, slots, assignments_embed = payload
-            stages = (("common", "Re-rolling candidate..."), ("rare", "Scanning candidates..."), ("epic", "Epic..."), ("mythical", "Revealing final candidate..."))
-            for rarity, line in stages:
-                rolling = _build_manager_candidate_embed(
-                    user=interaction.user,
-                    detail=detail,
-                    candidate=ManagerCandidateSnapshot(manager_name="Recruit Scan", rarity=rarity, runtime_bonus_hours=0, profit_bonus_bp=0, auto_restart_charges=0, reroll_cost=MANAGER_CANDIDATE_REROLL_COST),
-                    slots=slots,
-                    current_candidate=previous_candidate,
-                    stage_label="Recruit Spin",
-                    status_line=line,
-                )
-                await _safe_edit_panel(interaction, embeds=[rolling, assignments_embed], view=self, message_id=self.panel_message_id)
-                await asyncio.sleep(0.18)
+            rolling = _build_manager_candidate_embed(
+                user=interaction.user,
+                detail=detail,
+                candidate=ManagerCandidateSnapshot(manager_name="Recruit Scan", rarity="epic", runtime_bonus_hours=0, profit_bonus_bp=0, auto_restart_charges=0, reroll_cost=MANAGER_CANDIDATE_REROLL_COST),
+                slots=slots,
+                current_candidate=previous_candidate,
+                stage_label="Recruit Spin",
+                status_line="Searching cached prospects...",
+            )
+            await _safe_edit_panel(interaction, embeds=[rolling, assignments_embed], view=self, message_id=self.panel_message_id)
             async with self.cog.sessionmaker() as session:
                 async with session.begin():
-                    result = await roll_manager_candidate(
+                    candidate, err = await self.cog._draw_prefetched_candidate(
                         session,
                         guild_id=self.guild_id,
                         user_id=self.owner_id,
                         business_key=self.business_key,
-                        reroll_cost=MANAGER_CANDIDATE_REROLL_COST,
+                        staff_kind="manager",
                     )
-            if not result.ok or result.manager_candidate is None:
-                await self._show_recruitment_board(interaction, action_message="❌ " + result.message)
+            if candidate is None:
+                await self._show_recruitment_board(interaction, action_message="❌ " + err)
                 return
-            self.current_candidate = result.manager_candidate
+            self.current_candidate = candidate
             await self._show_recruitment_board(interaction, action_message="✨ Recruit reveal complete.")
         finally:
             self.is_processing = False
@@ -4460,6 +4506,154 @@ class BusinessCog(commands.Cog):
         self.vip_hiring_service = VipHiringService(sessionmaker=self.sessionmaker, bot=bot)
         self.runtime_engine = BusinessRuntimeEngine(on_run_completed=self._notify_business_run_completed)
         self._active_auto_hire_tasks: dict[str, asyncio.Task[None]] = {}
+        self._reroll_prefetch_queues: dict[str, deque[WorkerCandidateSnapshot | ManagerCandidateSnapshot]] = {}
+        self._reroll_prefetch_tasks: dict[str, asyncio.Task[None]] = {}
+
+    def _reroll_prefetch_key(self, *, guild_id: int, user_id: int, business_key: str, staff_kind: str) -> str:
+        return f"{int(guild_id)}:{int(user_id)}:{str(business_key).strip().lower()}:{str(staff_kind).strip().lower()}"
+
+    async def _spend_reroll_cost(
+        self,
+        session,
+        *,
+        guild_id: int,
+        user_id: int,
+        business_key: str,
+        staff_kind: str,
+    ) -> tuple[bool, str]:
+        cost = WORKER_CANDIDATE_REROLL_COST if str(staff_kind) == "worker" else MANAGER_CANDIDATE_REROLL_COST
+        slots = await (
+            get_worker_assignment_slots(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+            if str(staff_kind) == "worker"
+            else get_manager_assignment_slots(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        )
+        if not any(not bool(getattr(slot, "is_active", False)) for slot in slots):
+            return False, f"All {staff_kind} slots are full. Upgrade the business to unlock more slots."
+        wallet = await session.scalar(
+            select(WalletRow).where(
+                WalletRow.guild_id == int(guild_id),
+                WalletRow.user_id == int(user_id),
+            )
+        )
+        if wallet is None:
+            wallet = WalletRow(guild_id=int(guild_id), user_id=int(user_id), silver=0)
+            session.add(wallet)
+            await session.flush()
+        silver = int(getattr(wallet, "silver", 0) or 0)
+        if silver < int(cost):
+            short = int(cost) - silver
+            return False, f"You need **{cost:,} Silver** to reroll. Short by **{short:,} Silver**."
+        wallet.silver = silver - int(cost)
+        if hasattr(wallet, "silver_spent"):
+            wallet.silver_spent = int(getattr(wallet, "silver_spent", 0) or 0) + int(cost)
+        return True, ""
+
+    async def _draw_prefetched_candidate(
+        self,
+        session,
+        *,
+        guild_id: int,
+        user_id: int,
+        business_key: str,
+        staff_kind: str,
+    ) -> tuple[WorkerCandidateSnapshot | ManagerCandidateSnapshot | None, str]:
+        spent_ok, spent_err = await self._spend_reroll_cost(
+            session,
+            guild_id=guild_id,
+            user_id=user_id,
+            business_key=business_key,
+            staff_kind=staff_kind,
+        )
+        if not spent_ok:
+            return None, spent_err
+        key = self._reroll_prefetch_key(guild_id=guild_id, user_id=user_id, business_key=business_key, staff_kind=staff_kind)
+        queue = self._reroll_prefetch_queues.setdefault(key, deque())
+        candidate = queue.popleft() if queue else None
+        if candidate is None:
+            manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+            prestige = int(getattr(manage, "prestige", 0) or 0)
+            if str(staff_kind) == "worker":
+                roll = _generate_worker_roll(prestige=prestige)
+                candidate = WorkerCandidateSnapshot(
+                    worker_name=str(roll["worker_name"]),
+                    worker_type=str(roll["worker_type"]),
+                    rarity=str(roll["rarity"]),
+                    flat_profit_bonus=int(roll["flat_profit_bonus"]),
+                    percent_profit_bonus_bp=int(roll["percent_profit_bonus_bp"]),
+                    reroll_cost=int(WORKER_CANDIDATE_REROLL_COST),
+                )
+            else:
+                roll = _generate_manager_roll(prestige=prestige)
+                candidate = ManagerCandidateSnapshot(
+                    manager_name=str(roll["manager_name"]),
+                    rarity=str(roll["rarity"]),
+                    runtime_bonus_hours=int(roll["runtime_bonus_hours"]),
+                    profit_bonus_bp=int(roll["profit_bonus_bp"]),
+                    auto_restart_charges=int(roll["auto_restart_charges"]),
+                    reroll_cost=int(MANAGER_CANDIDATE_REROLL_COST),
+                )
+        self._ensure_reroll_prefetch_task(
+            guild_id=guild_id,
+            user_id=user_id,
+            business_key=business_key,
+            staff_kind=staff_kind,
+        )
+        return candidate, ""
+
+    def _ensure_reroll_prefetch_task(self, *, guild_id: int, user_id: int, business_key: str, staff_kind: str) -> None:
+        key = self._reroll_prefetch_key(guild_id=guild_id, user_id=user_id, business_key=business_key, staff_kind=staff_kind)
+        task = self._reroll_prefetch_tasks.get(key)
+        if task is not None and not task.done():
+            return
+        self._reroll_prefetch_queues.setdefault(key, deque())
+        self._reroll_prefetch_tasks[key] = asyncio.create_task(
+            self._run_reroll_prefetch(guild_id=guild_id, user_id=user_id, business_key=business_key, staff_kind=staff_kind),
+            name=f"business_reroll_prefetch:{key}",
+        )
+
+    async def _run_reroll_prefetch(self, *, guild_id: int, user_id: int, business_key: str, staff_kind: str) -> None:
+        key = self._reroll_prefetch_key(guild_id=guild_id, user_id=user_id, business_key=business_key, staff_kind=staff_kind)
+        queue = self._reroll_prefetch_queues.setdefault(key, deque())
+        try:
+            while True:
+                if len(queue) >= int(REROLL_PREFETCH_TARGET):
+                    await asyncio.sleep(REROLL_PREFETCH_IDLE_SECONDS)
+                    continue
+                async with self.sessionmaker() as session:
+                    async with session.begin():
+                        manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+                        if manage is None or not bool(getattr(manage, "owned", False)):
+                            return
+                        prestige = int(getattr(manage, "prestige", 0) or 0)
+                while len(queue) < int(REROLL_PREFETCH_TARGET):
+                    if str(staff_kind) == "worker":
+                        roll = _generate_worker_roll(prestige=prestige)
+                        queue.append(
+                            WorkerCandidateSnapshot(
+                                worker_name=str(roll["worker_name"]),
+                                worker_type=str(roll["worker_type"]),
+                                rarity=str(roll["rarity"]),
+                                flat_profit_bonus=int(roll["flat_profit_bonus"]),
+                                percent_profit_bonus_bp=int(roll["percent_profit_bonus_bp"]),
+                                reroll_cost=int(WORKER_CANDIDATE_REROLL_COST),
+                            )
+                        )
+                    else:
+                        roll = _generate_manager_roll(prestige=prestige)
+                        queue.append(
+                            ManagerCandidateSnapshot(
+                                manager_name=str(roll["manager_name"]),
+                                rarity=str(roll["rarity"]),
+                                runtime_bonus_hours=int(roll["runtime_bonus_hours"]),
+                                profit_bonus_bp=int(roll["profit_bonus_bp"]),
+                                auto_restart_charges=int(roll["auto_restart_charges"]),
+                                reroll_cost=int(MANAGER_CANDIDATE_REROLL_COST),
+                            )
+                        )
+                    if len(queue) % 4 == 0:
+                        await asyncio.sleep(0)
+        finally:
+            self._reroll_prefetch_tasks.pop(key, None)
 
     async def _ensure_business_ownership_worker_columns(self) -> None:
         target_columns: dict[str, str] = {
@@ -5074,6 +5268,10 @@ class BusinessCog(commands.Cog):
         for task in list(self._active_auto_hire_tasks.values()):
             task.cancel()
         self._active_auto_hire_tasks.clear()
+        for task in list(self._reroll_prefetch_tasks.values()):
+            task.cancel()
+        self._reroll_prefetch_tasks.clear()
+        self._reroll_prefetch_queues.clear()
         log.info(
             "Business runtime stop requested | cog=%s running=%s",
             self.__class__.__name__,
