@@ -1084,41 +1084,34 @@ def _prestige_luck_bonus_bp(prestige: int, *, staff_kind: str) -> int:
 
 
 def _roll_worker_rarity(*, prestige: int) -> str:
+    return _weighted_pick(worker_rarity_weights(prestige=prestige))
+
+
+def worker_rarity_weights(*, prestige: int) -> list[tuple[str, int]]:
     luck = _prestige_luck_bonus_bp(prestige, staff_kind="worker")
-    common = max(3600 - int(luck * 0.70), 900)
-    uncommon = max(2600 - int(luck * 0.25), 700)
-    rare = min(2200 + int(luck * 0.55), 3200)
-    epic = min(1200 + int(luck * 0.30), 1900)
-    legendary = min(320 + int(luck * 0.09), 650)
-    mythic = min(80 + int(luck * 0.03), 160)
-    return _weighted_pick(
-        [
-            ("common", common),
-            ("uncommon", uncommon),
-            ("rare", rare),
-            ("epic", epic),
-            ("legendary", legendary),
-            ("mythic", mythic),
-        ]
-    )
+    return [
+        ("common", max(3600 - int(luck * 0.70), 900)),
+        ("uncommon", max(2600 - int(luck * 0.25), 700)),
+        ("rare", min(2200 + int(luck * 0.55), 3200)),
+        ("epic", min(1200 + int(luck * 0.30), 1900)),
+        ("legendary", min(320 + int(luck * 0.09), 650)),
+        ("mythic", min(80 + int(luck * 0.03), 160)),
+    ]
 
 
 def _roll_manager_rarity(*, prestige: int) -> str:
+    return _weighted_pick(manager_rarity_weights(prestige=prestige))
+
+
+def manager_rarity_weights(*, prestige: int) -> list[tuple[str, int]]:
     luck = _prestige_luck_bonus_bp(prestige, staff_kind="manager")
-    common = max(5000 - int(luck * 0.85), 1800)
-    rare = min(2800 + int(luck * 0.60), 4300)
-    epic = min(1400 + int(luck * 0.33), 2200)
-    legendary = min(620 + int(luck * 0.11), 980)
-    mythical = min(180 + int(luck * 0.04), 260)
-    return _weighted_pick(
-        [
-            ("common", common),
-            ("rare", rare),
-            ("epic", epic),
-            ("legendary", legendary),
-            ("mythical", mythical),
-        ]
-    )
+    return [
+        ("common", max(5000 - int(luck * 0.85), 1800)),
+        ("rare", min(2800 + int(luck * 0.60), 4300)),
+        ("epic", min(1400 + int(luck * 0.33), 2200)),
+        ("legendary", min(620 + int(luck * 0.11), 980)),
+        ("mythical", min(180 + int(luck * 0.04), 260)),
+    ]
 
 
 def _generate_worker_name(*, worker_type: str, rarity: str) -> str:
