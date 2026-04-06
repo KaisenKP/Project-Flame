@@ -60,7 +60,7 @@ from typing import Dict, List, Optional, Sequence
 import discord
 from discord import app_commands
 from discord.ext import commands
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from db.models import AdminAuditLogRow, BusinessAutoHireSessionRow, BusinessManagerAssignmentRow, BusinessOwnershipRow, BusinessRunRow, BusinessWorkerAssignmentRow, BusinessWorkerMigrationStateRow, WalletRow
 from services.db import sessions
@@ -4450,6 +4450,34 @@ class BusinessCog(commands.Cog):
         self.runtime_engine = BusinessRuntimeEngine(on_run_completed=self._notify_business_run_completed)
         self._active_auto_hire_tasks: dict[str, asyncio.Task[None]] = {}
 
+    async def _ensure_business_ownership_worker_columns(self) -> None:
+        target_columns: dict[str, str] = {
+            "worker_slot_legacy_floor": "ALTER TABLE business_ownership ADD COLUMN worker_slot_legacy_floor INT NOT NULL DEFAULT 0",
+            "worker_system_generation": "ALTER TABLE business_ownership ADD COLUMN worker_system_generation INT NOT NULL DEFAULT 1",
+            "worker_migration_version": "ALTER TABLE business_ownership ADD COLUMN worker_migration_version INT NOT NULL DEFAULT 0",
+            "worker_migration_summary_json": "ALTER TABLE business_ownership ADD COLUMN worker_migration_summary_json JSON NULL",
+            "worker_migration_summary_seen": "ALTER TABLE business_ownership ADD COLUMN worker_migration_summary_seen TINYINT(1) NOT NULL DEFAULT 0",
+        }
+
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                present_rows = await session.execute(
+                    text(
+                        """
+                        SELECT COLUMN_NAME
+                        FROM information_schema.COLUMNS
+                        WHERE TABLE_SCHEMA = DATABASE()
+                          AND TABLE_NAME = 'business_ownership'
+                        """
+                    )
+                )
+                present = {str(row[0]).strip().lower() for row in present_rows if row and row[0]}
+                for column_name, ddl in target_columns.items():
+                    if column_name in present:
+                        continue
+                    await session.execute(text(ddl))
+                    log.warning("Patched missing column on business_ownership: %s", column_name)
+
     def _auto_hire_task_key(self, *, guild_id: int, user_id: int, business_key: str, staff_kind: str) -> str:
         return f"{int(guild_id)}:{int(user_id)}:{str(business_key)}:{str(staff_kind)}"
 
@@ -4902,6 +4930,7 @@ class BusinessCog(commands.Cog):
         log.info("Business prestige system merge flag written.")
 
     async def cog_load(self) -> None:
+        await self._ensure_business_ownership_worker_columns()
         await self._ensure_business_prestige_merge()
         await self._run_one_time_upgrade_refund()
         async with self.sessionmaker() as session:
