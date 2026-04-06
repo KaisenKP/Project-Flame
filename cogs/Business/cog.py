@@ -4484,6 +4484,74 @@ class BusinessCog(commands.Cog):
                 await autocommit_conn.execute(text(ddl))
                 log.warning("Patched missing column on business_ownership: %s", column_name)
 
+    async def _run_startup_phase(self, *, phase: str, owner: str, op) -> object:
+        log.info(
+            "Business startup phase begin | phase=%s owner=%s tx_active=%s",
+            phase,
+            owner,
+            False,
+        )
+        try:
+            result = await op()
+        except Exception:
+            log.exception(
+                "Business startup phase failed | phase=%s owner=%s tx_active=%s rollback=%s",
+                phase,
+                owner,
+                False,
+                False,
+            )
+            raise
+        log.info(
+            "Business startup phase done | phase=%s owner=%s tx_active=%s rollback=%s",
+            phase,
+            owner,
+            False,
+            False,
+        )
+        return result
+
+    async def _run_startup_db_phase(self, *, phase: str, owner: str, op) -> object:
+        rollback_occurred = False
+        log.info(
+            "Business startup DB phase begin | phase=%s owner=%s",
+            phase,
+            owner,
+        )
+        try:
+            async with self.sessionmaker() as session:
+                log.info(
+                    "Business startup DB phase session opened | phase=%s owner=%s tx_active=%s nested_active=%s",
+                    phase,
+                    owner,
+                    bool(session.in_transaction()),
+                    bool(session.in_nested_transaction()),
+                )
+                async with session.begin():
+                    log.info(
+                        "Business startup DB phase transaction entered | phase=%s owner=%s tx_active=%s nested_active=%s",
+                        phase,
+                        owner,
+                        bool(session.in_transaction()),
+                        bool(session.in_nested_transaction()),
+                    )
+                    result = await op(session)
+        except Exception:
+            rollback_occurred = True
+            log.exception(
+                "Business startup DB phase failed | phase=%s owner=%s rollback=%s",
+                phase,
+                owner,
+                rollback_occurred,
+            )
+            raise
+        log.info(
+            "Business startup DB phase done | phase=%s owner=%s rollback=%s",
+            phase,
+            owner,
+            rollback_occurred,
+        )
+        return result
     def _auto_hire_task_key(self, *, guild_id: int, user_id: int, business_key: str, staff_kind: str) -> str:
         return f"{int(guild_id)}:{int(user_id)}:{str(business_key)}:{str(staff_kind)}"
 
@@ -4936,12 +5004,26 @@ class BusinessCog(commands.Cog):
         log.info("Business prestige system merge flag written.")
 
     async def cog_load(self) -> None:
-        await self._ensure_business_ownership_worker_columns()
-        await self._ensure_business_prestige_merge()
-        await self._run_one_time_upgrade_refund()
-        async with self.sessionmaker() as session:
-            async with session.begin():
-                migration_result = await migrate_worker_system_for_all_users(session)
+        await self._run_startup_phase(
+            phase="schema_columns_patch",
+            owner="_ensure_business_ownership_worker_columns",
+            op=self._ensure_business_ownership_worker_columns,
+        )
+        await self._run_startup_phase(
+            phase="prestige_merge_flag",
+            owner="_ensure_business_prestige_merge",
+            op=self._ensure_business_prestige_merge,
+        )
+        await self._run_startup_phase(
+            phase="upgrade_refund_migration",
+            owner="_run_one_time_upgrade_refund",
+            op=self._run_one_time_upgrade_refund,
+        )
+        migration_result = await self._run_startup_db_phase(
+            phase="worker_system_migration",
+            owner="migrate_worker_system_for_all_users",
+            op=lambda session: migrate_worker_system_for_all_users(session),
+        )
         log.info(
             "worker_system_migration_v%s done | migrated=%s skipped=%s failed=%s",
             WORKER_MIGRATION_VERSION,
@@ -4949,18 +5031,33 @@ class BusinessCog(commands.Cog):
             migration_result.get("skipped"),
             migration_result.get("failed"),
         )
-        await reconcile_incomplete_jobs(service=self.vip_hiring_service)
-        await self._resume_active_auto_hire_sessions()
-        log.info(
-            "Business runtime start requested | cog=%s running=%s",
-            self.__class__.__name__,
-            self.runtime_engine.running,
+        await self._run_startup_phase(
+            phase="vip_hiring_recovery",
+            owner="reconcile_incomplete_jobs",
+            op=lambda: reconcile_incomplete_jobs(service=self.vip_hiring_service),
         )
-        await self.runtime_engine.start_loop()
-        log.info(
-            "Business runtime started | cog=%s running=%s",
-            self.__class__.__name__,
-            self.runtime_engine.running,
+        await self._run_startup_phase(
+            phase="auto_hire_resume",
+            owner="_resume_active_auto_hire_sessions",
+            op=self._resume_active_auto_hire_sessions,
+        )
+        async def _start_runtime() -> None:
+            log.info(
+                "Business runtime start requested | cog=%s running=%s",
+                self.__class__.__name__,
+                self.runtime_engine.running,
+            )
+            await self.runtime_engine.start_loop()
+            log.info(
+                "Business runtime started | cog=%s running=%s",
+                self.__class__.__name__,
+                self.runtime_engine.running,
+            )
+
+        await self._run_startup_phase(
+            phase="runtime_start",
+            owner="BusinessRuntimeEngine.start_loop",
+            op=_start_runtime,
         )
 
     async def cog_unload(self) -> None:
