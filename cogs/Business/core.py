@@ -1491,6 +1491,76 @@ async def migrate_worker_system_for_all_users(session) -> dict[str, int]:
     return {"migrated": migrated, "skipped": skipped, "failed": failed}
 
 
+async def preview_worker_migration_for_ownership(
+    session,
+    *,
+    ownership_id: int,
+) -> dict:
+    ownership = await session.scalar(select(BusinessOwnershipRow).where(BusinessOwnershipRow.id == int(ownership_id)))
+    if ownership is None:
+        return {"ok": False, "error": "Ownership not found."}
+    worker_rows = await _get_active_worker_rows_for_ownership(session, ownership_id=int(ownership.id))
+    grouped: dict[tuple[str, str], list[BusinessWorkerAssignmentRow]] = {}
+    for row in worker_rows:
+        key = (_normalize_worker_type(str(row.worker_type)), _normalize_worker_rarity(str(row.rarity)))
+        grouped.setdefault(key, []).append(row)
+
+    old_total = len(worker_rows)
+    old_flat_total = sum(max(int(r.flat_profit_bonus or 0), 0) for r in worker_rows)
+    old_bp_total = sum(max(int(r.percent_profit_bonus_bp or 0), 0) for r in worker_rows)
+    projected_new_count = 0
+    projected_new_flat_total = 0
+    projected_new_bp_total = 0
+    merge_lines: list[str] = []
+    for (worker_type, rarity), rows in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0])):
+        count_old = len(rows)
+        if count_old <= 0:
+            continue
+        merge_requirement = _merge_requirement_for_rarity(rarity)
+        count_new = max(1, _ceil_div(count_old, merge_requirement))
+        avg_flat = max(_safe_avg([int(r.flat_profit_bonus or 0) for r in rows]), 1)
+        avg_bp = max(_safe_avg([int(r.percent_profit_bonus_bp or 0) for r in rows]), 1)
+        scaled_flat = _clamp_int(avg_flat * WORKER_POWER_MULTIPLIER, 0, 10_000_000)
+        scaled_bp = _clamp_int(avg_bp * WORKER_POWER_MULTIPLIER, 0, 250_000)
+        projected_new_count += count_new
+        projected_new_flat_total += (scaled_flat * count_new)
+        projected_new_bp_total += (scaled_bp * count_new)
+        merge_lines.append(
+            f"{worker_type.title()} {rarity.title()} x{count_old} -> {count_new} {_worker_generation_label(rarity)} (req {merge_requirement})"
+        )
+    level, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
+    current_slots = _worker_slots_for_business_key_and_level(
+        str(ownership.business_key),
+        level,
+        prestige=prestige,
+        legacy_floor=int(getattr(ownership, "worker_slot_legacy_floor", 0) or 0),
+    )
+    required_slot_floor = max(int(getattr(ownership, "worker_slot_legacy_floor", 0) or 0), projected_new_count)
+    estimated_before_power = old_flat_total + old_bp_total
+    estimated_after_power = projected_new_flat_total + projected_new_bp_total
+    estimated_delta_pct = 0.0
+    if estimated_before_power > 0:
+        estimated_delta_pct = ((estimated_after_power - estimated_before_power) / estimated_before_power) * 100.0
+    return {
+        "ok": True,
+        "ownership_id": int(ownership.id),
+        "guild_id": int(ownership.guild_id),
+        "user_id": int(ownership.user_id),
+        "business_key": str(ownership.business_key),
+        "worker_migration_version": int(getattr(ownership, "worker_migration_version", 0) or 0),
+        "old_worker_count": old_total,
+        "projected_new_worker_count": projected_new_count,
+        "current_worker_slots": current_slots,
+        "projected_required_slot_floor": required_slot_floor,
+        "old_total_flat_bonus": old_flat_total,
+        "old_total_percent_bp": old_bp_total,
+        "projected_new_total_flat_bonus": projected_new_flat_total,
+        "projected_new_total_percent_bp": projected_new_bp_total,
+        "estimated_power_delta_pct": round(float(estimated_delta_pct), 2),
+        "merge_lines": merge_lines,
+    }
+
+
 async def migrate_worker_system_for_ownership(session, *, ownership_id: int) -> bool:
     ownership = await session.scalar(select(BusinessOwnershipRow).where(BusinessOwnershipRow.id == int(ownership_id)))
     if ownership is None:

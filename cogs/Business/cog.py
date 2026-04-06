@@ -62,7 +62,7 @@ from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import select
 
-from db.models import AdminAuditLogRow, BusinessAutoHireSessionRow, BusinessManagerAssignmentRow, BusinessOwnershipRow, BusinessRunRow, BusinessWorkerAssignmentRow, WalletRow
+from db.models import AdminAuditLogRow, BusinessAutoHireSessionRow, BusinessManagerAssignmentRow, BusinessOwnershipRow, BusinessRunRow, BusinessWorkerAssignmentRow, BusinessWorkerMigrationStateRow, WalletRow
 from services.db import sessions
 from services.achievements import check_and_grant_achievements, queue_achievement_announcements
 from services.users import ensure_user_rows
@@ -133,6 +133,7 @@ try:
         get_business_def_by_key,
         get_staff_grant_catalog,
         migrate_worker_system_for_all_users,
+        preview_worker_migration_for_ownership,
         restore_archived_workers_for_business,
         start_all_business_runs,
         stop_all_business_runs,
@@ -315,6 +316,10 @@ except Exception:
     async def migrate_worker_system_for_all_users(session) -> dict[str, int]:
         _ = session
         return {"migrated": 0, "skipped": 0, "failed": 0}
+
+    async def preview_worker_migration_for_ownership(session, *, ownership_id: int) -> dict:
+        _ = (session, ownership_id)
+        return {"ok": False, "error": "Preview is unavailable because core imports failed."}
 
     async def restore_archived_workers_for_business(session, *, guild_id: int, user_id: int, business_key: str, migration_version: int = 0) -> tuple[bool, str]:
         _ = (session, guild_id, user_id, business_key, migration_version)
@@ -1494,6 +1499,47 @@ def _build_worker_migration_embed(*, summary: dict) -> discord.Embed:
     )
     embed.set_footer(text="You were upgraded — your roster is now cleaner and stronger.")
     return embed
+
+
+def _build_worker_migration_dry_run_embed(*, report: dict) -> discord.Embed:
+    if not bool(report.get("ok", False)):
+        return discord.Embed(
+            title="Worker Migration Dry-Run",
+            description=str(report.get("error", "Unable to build dry-run report.")),
+            color=ERROR_COLOR,
+        )
+    e = discord.Embed(
+        title="Worker Migration Dry-Run",
+        description=(
+            f"Ownership **#{_fmt_int(int(report.get('ownership_id', 0)))}** • "
+            f"`{_safe_str(report.get('business_key', 'unknown')).replace('_', ' ')}`"
+        ),
+        color=INFO_COLOR,
+    )
+    e.add_field(
+        name="Counts",
+        value=(
+            f"Old workers: **{_fmt_int(int(report.get('old_worker_count', 0) or 0))}**\n"
+            f"Projected new workers: **{_fmt_int(int(report.get('projected_new_worker_count', 0) or 0))}**\n"
+            f"Current slots: **{_fmt_int(int(report.get('current_worker_slots', 0) or 0))}**\n"
+            f"Required slot floor: **{_fmt_int(int(report.get('projected_required_slot_floor', 0) or 0))}**"
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="Power Snapshot (Estimated)",
+        value=(
+            f"Old flat/bp: **{_fmt_int(int(report.get('old_total_flat_bonus', 0) or 0))} / {_fmt_int(int(report.get('old_total_percent_bp', 0) or 0))}**\n"
+            f"Projected flat/bp: **{_fmt_int(int(report.get('projected_new_total_flat_bonus', 0) or 0))} / {_fmt_int(int(report.get('projected_new_total_percent_bp', 0) or 0))}**\n"
+            f"Estimated delta: **{float(report.get('estimated_power_delta_pct', 0.0) or 0.0):+.2f}%**"
+        ),
+        inline=False,
+    )
+    lines = list(report.get("merge_lines", []) or [])
+    if lines:
+        e.add_field(name="Merge Preview", value="\n".join(f"• {line}" for line in lines[:10]), inline=False)
+    e.set_footer(text="Dry-run only: no changes were written.")
+    return e
 
 
 def _build_run_menu_embed(
@@ -5053,6 +5099,79 @@ class BusinessCog(commands.Cog):
                 )
         color = SUCCESS_COLOR if ok else ERROR_COLOR
         await interaction.followup.send(embed=discord.Embed(title="Worker Archive Restore", description=message, color=color), ephemeral=True)
+
+    @app_commands.command(name="admin_worker_migration_dryrun", description="Admin: preview worker migration for one business ownership.")
+    async def admin_worker_migration_dryrun_cmd(self, interaction: discord.Interaction, user: discord.Member, business_key: str) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("This only works in a server.", ephemeral=True)
+            return
+        if not await self._business_admin_authorized(interaction):
+            await interaction.response.send_message(_ACCESS_DENIED, ephemeral=True)
+            return
+        await _safe_defer(interaction, thinking=True, ephemeral=True)
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                ownership = await session.scalar(
+                    select(BusinessOwnershipRow).where(
+                        BusinessOwnershipRow.guild_id == int(interaction.guild.id),
+                        BusinessOwnershipRow.user_id == int(user.id),
+                        BusinessOwnershipRow.business_key == str(business_key).strip().lower(),
+                    )
+                )
+                if ownership is None:
+                    await interaction.followup.send(
+                        embed=discord.Embed(
+                            title="Worker Migration Dry-Run",
+                            description="Ownership not found for that business.",
+                            color=ERROR_COLOR,
+                        ),
+                        ephemeral=True,
+                    )
+                    return
+                report = await preview_worker_migration_for_ownership(session, ownership_id=int(ownership.id))
+        await interaction.followup.send(embed=_build_worker_migration_dry_run_embed(report=report), ephemeral=True)
+
+    @app_commands.command(name="admin_worker_migration_report", description="Admin: show recent worker migration state rows.")
+    async def admin_worker_migration_report_cmd(self, interaction: discord.Interaction, target_user_id: Optional[str] = None, limit: app_commands.Range[int, 1, 25] = 10) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("This only works in a server.", ephemeral=True)
+            return
+        if not await self._business_admin_authorized(interaction):
+            await interaction.response.send_message(_ACCESS_DENIED, ephemeral=True)
+            return
+        await _safe_defer(interaction, thinking=True, ephemeral=True)
+        parsed_user_id = 0
+        try:
+            parsed_user_id = int(str(target_user_id or "0").strip())
+        except Exception:
+            parsed_user_id = 0
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                stmt = select(BusinessWorkerMigrationStateRow).where(
+                    BusinessWorkerMigrationStateRow.migration_version == int(WORKER_MIGRATION_VERSION)
+                ).order_by(BusinessWorkerMigrationStateRow.updated_at.desc())
+                if parsed_user_id > 0:
+                    stmt = stmt.where(BusinessWorkerMigrationStateRow.user_id == int(parsed_user_id))
+                rows = list((await session.scalars(stmt.limit(int(limit)))).all())
+        if not rows:
+            await interaction.followup.send(
+                embed=discord.Embed(title="Worker Migration Report", description="No migration rows found for the selected filter.", color=INFO_COLOR),
+                ephemeral=True,
+            )
+            return
+        lines: list[str] = []
+        for row in rows:
+            lines.append(
+                f"• ownership #{int(row.ownership_id)} • <@{int(row.user_id)}> • `{str(row.business_key)}`\n"
+                f"  status `{str(row.status)}` • old `{int(row.old_worker_count)}` → new `{int(row.new_worker_count)}`"
+            )
+        embed = discord.Embed(
+            title=f"Worker Migration Report (v{WORKER_MIGRATION_VERSION})",
+            description="\n".join(lines[:10]),
+            color=INFO_COLOR,
+        )
+        embed.set_footer(text=f"Showing {min(len(rows), 10)} of {len(rows)} rows")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 
