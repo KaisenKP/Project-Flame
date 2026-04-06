@@ -24,6 +24,7 @@ DEFAULT_PANEL_MESSAGE_ID = 1481820566015971500
 
 DEFAULT_STAFF_ROLE_ID = 1476620136114028544
 DEFAULT_HEAD_MOD_ROLE_ID = 1467394498878373979
+CLOSED_TICKET_TRANSCRIPTS_CHANNEL_ID = 1490729352072269975
 
 DEFAULT_PANEL_TITLE = "Support Center"
 DEFAULT_PANEL_DESCRIPTION = (
@@ -372,9 +373,9 @@ class TicketChannelView(discord.ui.View):
                 custom_id="ticket_reopen_closed",
             )
             transcript_btn = discord.ui.Button(
-                label="Transcript",
+                label="Save Transcript",
                 style=discord.ButtonStyle.secondary,
-                custom_id="ticket_transcript_closed",
+                custom_id="ticket_save_transcript_closed",
             )
 
             reopen_btn.callback = self._reopen_callback
@@ -391,6 +392,24 @@ class TicketChannelView(discord.ui.View):
 
     async def _reopen_callback(self, interaction: discord.Interaction) -> None:
         await self.cog.handle_reopen(interaction)
+
+    async def _transcript_callback(self, interaction: discord.Interaction) -> None:
+        await self.cog.handle_transcript(interaction)
+
+
+class LegacyClosedTranscriptView(discord.ui.View):
+    """Compatibility view for already-sent closed-ticket messages."""
+
+    def __init__(self, cog: "TicketsCog"):
+        super().__init__(timeout=None)
+        self.cog = cog
+        transcript_btn = discord.ui.Button(
+            label="Transcript",
+            style=discord.ButtonStyle.secondary,
+            custom_id="ticket_transcript_closed",
+        )
+        transcript_btn.callback = self._transcript_callback
+        self.add_item(transcript_btn)
 
     async def _transcript_callback(self, interaction: discord.Interaction) -> None:
         await self.cog.handle_transcript(interaction)
@@ -430,6 +449,7 @@ class TicketsCog(commands.Cog):
         await self._ensure_new_columns()
         self.bot.add_view(TicketChannelView(self, is_closed=False))
         self.bot.add_view(TicketChannelView(self, is_closed=True))
+        self.bot.add_view(LegacyClosedTranscriptView(self))
         await self._restore_panel_views()
 
     @commands.Cog.listener("on_ready")
@@ -441,6 +461,7 @@ class TicketsCog(commands.Cog):
         await self._ensure_new_columns()
         self.bot.add_view(TicketChannelView(self, is_closed=False))
         self.bot.add_view(TicketChannelView(self, is_closed=True))
+        self.bot.add_view(LegacyClosedTranscriptView(self))
         await self._auto_seed_defaults_for_all_guilds()
         await self._restore_panel_views()
         await self._ensure_default_panel_messages()
@@ -1560,6 +1581,19 @@ class TicketsCog(commands.Cog):
             return None
         return None
 
+    async def _resolve_closed_transcript_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
+        channel_id = int(CLOSED_TICKET_TRANSCRIPTS_CHANNEL_ID)
+        ch = guild.get_channel(channel_id)
+        if isinstance(ch, discord.TextChannel):
+            return ch
+        try:
+            fetched = await self.bot.fetch_channel(channel_id)
+            if isinstance(fetched, discord.TextChannel) and fetched.guild.id == guild.id:
+                return fetched
+        except Exception:
+            return None
+        return None
+
     async def _send_log(self, guild: discord.Guild, cfg: TicketConfig, *, embed: discord.Embed, file: discord.File | None = None) -> None:
         ch = await self._resolve_log_channel(guild, cfg)
         if ch is None:
@@ -2289,37 +2323,75 @@ a {{
                 await interaction.response.send_message("This is not a text channel.", ephemeral=True)
             return
 
-        ticket = await self.fetch_ticket_by_channel(interaction.channel.id)
-        if ticket is None:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("This channel is not a tracked ticket.", ephemeral=True)
-            return
-
-        if ticket.status != "closed":
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Transcript is only available after the ticket is closed.", ephemeral=True)
-            return
-
-        cfg = await self.fetch_config(interaction.guild.id)
-        ttype = await self.fetch_ticket_type(interaction.guild.id, ticket.type_key)
-        if cfg is None:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Ticket config is missing.", ephemeral=True)
-            return
-
-        if not self._can_manage_ticket(interaction.user, cfg, ttype, ticket):
-            if not interaction.response.is_done():
-                await interaction.response.send_message("You can't export this transcript.", ephemeral=True)
-            return
-
         await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            file = await self._build_transcript_file(interaction.channel, ticket)
-        except Exception:
-            await interaction.followup.send("Transcript generation failed.", ephemeral=True)
-            return
 
-        await interaction.followup.send("Here you go.", file=file, ephemeral=True)
+        async with self._lock:
+            ticket = await self.fetch_ticket_by_channel(interaction.channel.id)
+            if ticket is None:
+                await interaction.followup.send("This channel is not a tracked ticket.", ephemeral=True)
+                return
+
+            if ticket.status != "closed":
+                await interaction.followup.send("Transcript can only be saved after the ticket is closed.", ephemeral=True)
+                return
+
+            cfg = await self.fetch_config(interaction.guild.id)
+            ttype = await self.fetch_ticket_type(interaction.guild.id, ticket.type_key)
+            if cfg is None:
+                await interaction.followup.send("Ticket config is missing.", ephemeral=True)
+                return
+
+            if not self._can_manage_ticket(interaction.user, cfg, ttype, ticket):
+                await interaction.followup.send("You can't save this transcript.", ephemeral=True)
+                return
+
+            transcript_channel = await self._resolve_closed_transcript_channel(interaction.guild)
+            if transcript_channel is None:
+                await interaction.followup.send(
+                    f"Closed transcript channel <#{CLOSED_TICKET_TRANSCRIPTS_CHANNEL_ID}> is missing or inaccessible.",
+                    ephemeral=True,
+                )
+                return
+
+            try:
+                file = await self._build_transcript_file(interaction.channel, ticket)
+            except Exception:
+                await interaction.followup.send("Transcript generation failed.", ephemeral=True)
+                return
+
+            actor_mention = interaction.user.mention
+            embed = discord.Embed(
+                title=f"Closed Ticket Transcript #{ticket.id}",
+                color=discord.Color.dark_grey(),
+                timestamp=_utc_now(),
+            )
+            embed.add_field(name="Ticket", value=f"`#{ticket.id}` • {ticket.type_label}", inline=False)
+            embed.add_field(name="Opened By", value=f"<@{ticket.creator_id}>", inline=True)
+            embed.add_field(name="Saved By", value=actor_mention, inline=True)
+            embed.add_field(name="Closed At", value=_fmt_dt(ticket.closed_at), inline=True)
+            embed.add_field(name="Reason", value=(ticket.close_reason or "No reason provided")[:1024], inline=False)
+
+            try:
+                await transcript_channel.send(embed=embed, file=file)
+            except Exception:
+                await interaction.followup.send(
+                    f"Could not send transcript to <#{CLOSED_TICKET_TRANSCRIPTS_CHANNEL_ID}>.",
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.followup.send(
+                f"✅ Transcript saved in {transcript_channel.mention}. Deleting this closed ticket channel...",
+                ephemeral=True,
+            )
+
+            try:
+                await interaction.channel.delete(reason=f"Ticket #{ticket.id} transcript saved by {interaction.user.id}")
+            except Exception:
+                await interaction.followup.send(
+                    "Transcript was saved, but I couldn't delete this ticket channel. Please delete it manually.",
+                    ephemeral=True,
+                )
 
     tickets = app_commands.Group(name="tickets", description="Ticket system commands.")
 
