@@ -56,7 +56,7 @@ import json
 import logging
 from pathlib import Path
 import time
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import discord
 from discord import app_commands
@@ -83,6 +83,8 @@ AUTO_HIRE_PROGRESS_ROLL_CADENCE = 3
 AUTO_HIRE_ROLL_DELAY_SECONDS = 0.45
 REROLL_PREFETCH_TARGET = 12
 REROLL_PREFETCH_IDLE_SECONDS = 0.25
+BUSINESS_PANEL_CACHE_TTL_SECONDS = 12.0
+BUSINESS_PANEL_PREFETCH_MAX_OWNED = 25
 VIP_REROLL_AMOUNT_OPTIONS = (1, 5, 10, 25, 50, 100)
 VIP_REROLL_TARGET_OPTIONS = (1, 2, 3, 5, 10)
 VIP_REROLL_TIMEOUT_SECONDS = None
@@ -2607,7 +2609,12 @@ class HubBusinessSelect(discord.ui.Select):
         self.hub_view.selected_business_key = picked
         async with self.hub_view.cog.sessionmaker() as session:
             async with session.begin():
-                snap = await get_business_hub_snapshot(session, guild_id=self.hub_view.guild_id, user_id=self.hub_view.owner_id)
+                snap = await self.hub_view.cog._get_hub_snapshot_cached(
+                    session,
+                    guild_id=self.hub_view.guild_id,
+                    user_id=self.hub_view.owner_id,
+                    prefer_cache=True,
+                )
         embed = _build_hub_embed(user=interaction.user, snap=snap, selected_business_key=picked)
         view = BusinessHubView(
             cog=self.hub_view.cog,
@@ -2633,6 +2640,12 @@ class BusinessHubView(BusinessBaseView):
         self.hub_snapshot = hub_snapshot
         owned_cards = [c for c in hub_snapshot.cards if c.owned]
         self.selected_business_key = selected_business_key or (owned_cards[0].key if owned_cards else None)
+        self.cog.schedule_business_panel_prefetch(
+            guild_id=self.guild_id,
+            user_id=self.owner_id,
+            hub_snapshot=self.hub_snapshot,
+            selected_business_key=self.selected_business_key,
+        )
         self.add_item(HubBusinessSelect(view=self))
         self._configure_buttons()
 
@@ -2659,11 +2672,12 @@ class BusinessHubView(BusinessBaseView):
             return None
         async with self.cog.sessionmaker() as session:
             async with session.begin():
-                return await get_business_manage_snapshot(
+                return await self.cog._get_manage_snapshot_cached(
                     session,
                     guild_id=self.guild_id,
                     user_id=self.owner_id,
                     business_key=self.selected_business_key,
+                    prefer_cache=True,
                 )
 
     def _set_bulk_action_loading_state(self, *, loading: bool) -> None:
@@ -3202,15 +3216,22 @@ class BusinessDetailView(BusinessBaseView):
             self.run_safe_button.label = labels[1]
             self.run_aggressive_button.label = labels[2]
             self.run_aggressive_button.disabled = self.run_button.disabled
+        if detail is not None:
+            self.cog.schedule_business_detail_prefetch(
+                guild_id=self.guild_id,
+                user_id=self.owner_id,
+                detail=detail,
+            )
 
     async def _reload_detail(self):
         async with self.cog.sessionmaker() as session:
             async with session.begin():
-                return await get_business_manage_snapshot(
+                return await self.cog._get_manage_snapshot_cached(
                     session,
                     guild_id=self.guild_id,
                     user_id=self.owner_id,
                     business_key=self.business_key,
+                    prefer_cache=True,
                 )
 
     @discord.ui.button(label="Run Business", style=discord.ButtonStyle.success, emoji="▶️", row=0)
@@ -3412,8 +3433,20 @@ class BusinessDetailView(BusinessBaseView):
         await _safe_defer(interaction)
         async with self.cog.sessionmaker() as session:
             async with session.begin():
-                detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
-                slots = await get_worker_assignment_slots(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+                detail = await self.cog._get_manage_snapshot_cached(
+                    session,
+                    guild_id=self.guild_id,
+                    user_id=self.owner_id,
+                    business_key=self.business_key,
+                    prefer_cache=True,
+                )
+                slots = await self.cog._get_worker_slots_cached(
+                    session,
+                    guild_id=self.guild_id,
+                    user_id=self.owner_id,
+                    business_key=self.business_key,
+                    prefer_cache=True,
+                )
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
@@ -3432,8 +3465,20 @@ class BusinessDetailView(BusinessBaseView):
         await _safe_defer(interaction)
         async with self.cog.sessionmaker() as session:
             async with session.begin():
-                detail = await get_business_manage_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
-                slots = await get_manager_assignment_slots(session, guild_id=self.guild_id, user_id=self.owner_id, business_key=self.business_key)
+                detail = await self.cog._get_manage_snapshot_cached(
+                    session,
+                    guild_id=self.guild_id,
+                    user_id=self.owner_id,
+                    business_key=self.business_key,
+                    prefer_cache=True,
+                )
+                slots = await self.cog._get_manager_slots_cached(
+                    session,
+                    guild_id=self.guild_id,
+                    user_id=self.owner_id,
+                    business_key=self.business_key,
+                    prefer_cache=True,
+                )
         if detail is None:
             await interaction.followup.send("That business could not be found.", ephemeral=True)
             return
@@ -3452,7 +3497,12 @@ class BusinessDetailView(BusinessBaseView):
         await _safe_defer(interaction)
         async with self.cog.sessionmaker() as session:
             async with session.begin():
-                hub = await get_business_hub_snapshot(session, guild_id=self.guild_id, user_id=self.owner_id)
+                hub = await self.cog._get_hub_snapshot_cached(
+                    session,
+                    guild_id=self.guild_id,
+                    user_id=self.owner_id,
+                    prefer_cache=True,
+                )
         embed = _build_hub_embed(user=interaction.user, snap=hub, selected_business_key=self.business_key)
         view = BusinessHubView(cog=self.cog, owner_id=self.owner_id, guild_id=self.guild_id, hub_snapshot=hub, selected_business_key=self.business_key)
         await _safe_edit_panel(interaction, embed=embed, view=view)
@@ -4508,6 +4558,212 @@ class BusinessCog(commands.Cog):
         self._active_auto_hire_tasks: dict[str, asyncio.Task[None]] = {}
         self._reroll_prefetch_queues: dict[str, deque[WorkerCandidateSnapshot | ManagerCandidateSnapshot]] = {}
         self._reroll_prefetch_tasks: dict[str, asyncio.Task[None]] = {}
+        self._panel_data_cache: dict[str, tuple[float, Any]] = {}
+        self._panel_prefetch_tasks: dict[str, asyncio.Task[None]] = {}
+
+    def _panel_cache_key(
+        self,
+        *,
+        scope: str,
+        guild_id: int,
+        user_id: int,
+        business_key: Optional[str] = None,
+    ) -> str:
+        business_part = str(business_key or "__").strip().lower()
+        return f"{scope}:{int(guild_id)}:{int(user_id)}:{business_part}"
+
+    def _panel_cache_get(self, key: str) -> Any | None:
+        entry = self._panel_data_cache.get(str(key))
+        if not entry:
+            return None
+        expires_at, value = entry
+        if float(expires_at) <= time.monotonic():
+            self._panel_data_cache.pop(str(key), None)
+            return None
+        return value
+
+    def _panel_cache_set(self, key: str, value: Any, *, ttl_seconds: float = BUSINESS_PANEL_CACHE_TTL_SECONDS) -> None:
+        self._panel_data_cache[str(key)] = (time.monotonic() + max(float(ttl_seconds), 0.1), value)
+
+    def prime_hub_cache(self, *, guild_id: int, user_id: int, snapshot: BusinessHubSnapshot) -> None:
+        key = self._panel_cache_key(scope="hub", guild_id=guild_id, user_id=user_id)
+        self._panel_cache_set(key, snapshot)
+
+    def prime_manage_cache(self, *, guild_id: int, user_id: int, business_key: str, snapshot: BusinessManageSnapshot) -> None:
+        key = self._panel_cache_key(scope="manage", guild_id=guild_id, user_id=user_id, business_key=business_key)
+        self._panel_cache_set(key, snapshot)
+
+    async def _get_hub_snapshot_cached(self, session, *, guild_id: int, user_id: int, prefer_cache: bool = True) -> BusinessHubSnapshot:
+        key = self._panel_cache_key(scope="hub", guild_id=guild_id, user_id=user_id)
+        if prefer_cache:
+            cached = self._panel_cache_get(key)
+            if isinstance(cached, BusinessHubSnapshot):
+                return cached
+        snap = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
+        self._panel_cache_set(key, snap)
+        return snap
+
+    async def _get_manage_snapshot_cached(
+        self,
+        session,
+        *,
+        guild_id: int,
+        user_id: int,
+        business_key: str,
+        prefer_cache: bool = True,
+    ) -> BusinessManageSnapshot | None:
+        key = self._panel_cache_key(scope="manage", guild_id=guild_id, user_id=user_id, business_key=business_key)
+        if prefer_cache:
+            cached = self._panel_cache_get(key)
+            if isinstance(cached, BusinessManageSnapshot):
+                return cached
+        detail = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        if detail is not None:
+            self._panel_cache_set(key, detail)
+        return detail
+
+    async def _get_worker_slots_cached(
+        self,
+        session,
+        *,
+        guild_id: int,
+        user_id: int,
+        business_key: str,
+        prefer_cache: bool = True,
+    ) -> list[WorkerAssignmentSlotSnapshot]:
+        key = self._panel_cache_key(scope="worker_slots", guild_id=guild_id, user_id=user_id, business_key=business_key)
+        if prefer_cache:
+            cached = self._panel_cache_get(key)
+            if isinstance(cached, list):
+                return list(cached)
+        slots = await get_worker_assignment_slots(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        self._panel_cache_set(key, list(slots))
+        return list(slots)
+
+    async def _get_manager_slots_cached(
+        self,
+        session,
+        *,
+        guild_id: int,
+        user_id: int,
+        business_key: str,
+        prefer_cache: bool = True,
+    ) -> list[ManagerAssignmentSlotSnapshot]:
+        key = self._panel_cache_key(scope="manager_slots", guild_id=guild_id, user_id=user_id, business_key=business_key)
+        if prefer_cache:
+            cached = self._panel_cache_get(key)
+            if isinstance(cached, list):
+                return list(cached)
+        slots = await get_manager_assignment_slots(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+        self._panel_cache_set(key, list(slots))
+        return list(slots)
+
+    def schedule_business_panel_prefetch(self, *, guild_id: int, user_id: int, hub_snapshot: BusinessHubSnapshot, selected_business_key: Optional[str]) -> None:
+        self.prime_hub_cache(guild_id=guild_id, user_id=user_id, snapshot=hub_snapshot)
+        owned_keys = [str(card.key) for card in hub_snapshot.cards if bool(getattr(card, "owned", False))]
+        task_key = f"{int(guild_id)}:{int(user_id)}:{str(selected_business_key or '__').strip().lower()}:{','.join(sorted(owned_keys[:BUSINESS_PANEL_PREFETCH_MAX_OWNED]))}"
+        task = self._panel_prefetch_tasks.get(task_key)
+        if task is not None and not task.done():
+            return
+        self._panel_prefetch_tasks[task_key] = asyncio.create_task(
+            self._run_business_panel_prefetch(
+                guild_id=guild_id,
+                user_id=user_id,
+                selected_business_key=selected_business_key,
+                owned_keys=owned_keys[:BUSINESS_PANEL_PREFETCH_MAX_OWNED],
+            ),
+            name=f"business_panel_prefetch:{task_key}",
+        )
+
+    def schedule_business_detail_prefetch(self, *, guild_id: int, user_id: int, detail: BusinessManageSnapshot) -> None:
+        business_key = str(getattr(detail, "key", "") or "").strip()
+        if not business_key:
+            return
+        self.prime_manage_cache(guild_id=guild_id, user_id=user_id, business_key=business_key, snapshot=detail)
+        task_key = f"detail:{int(guild_id)}:{int(user_id)}:{business_key.lower()}"
+        task = self._panel_prefetch_tasks.get(task_key)
+        if task is not None and not task.done():
+            return
+        self._panel_prefetch_tasks[task_key] = asyncio.create_task(
+            self._run_business_detail_prefetch(guild_id=guild_id, user_id=user_id, business_key=business_key),
+            name=f"business_detail_prefetch:{task_key}",
+        )
+
+    async def _run_business_panel_prefetch(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        selected_business_key: Optional[str],
+        owned_keys: list[str],
+    ) -> None:
+        task_keys = {str(k).strip() for k in owned_keys if str(k).strip()}
+        picked = str(selected_business_key or "").strip()
+        if picked:
+            task_keys.add(picked)
+        try:
+            async with self.sessionmaker() as session:
+                async with session.begin():
+                    await self._get_hub_snapshot_cached(session, guild_id=guild_id, user_id=user_id, prefer_cache=False)
+                    for business_key in task_keys:
+                        detail = await self._get_manage_snapshot_cached(
+                            session,
+                            guild_id=guild_id,
+                            user_id=user_id,
+                            business_key=business_key,
+                            prefer_cache=False,
+                        )
+                        if detail is None:
+                            continue
+                        if business_key == picked:
+                            await self._get_worker_slots_cached(
+                                session,
+                                guild_id=guild_id,
+                                user_id=user_id,
+                                business_key=business_key,
+                                prefer_cache=False,
+                            )
+                            await self._get_manager_slots_cached(
+                                session,
+                                guild_id=guild_id,
+                                user_id=user_id,
+                                business_key=business_key,
+                                prefer_cache=False,
+                            )
+        finally:
+            done_keys = [k for k, task in self._panel_prefetch_tasks.items() if task.done()]
+            for key in done_keys:
+                self._panel_prefetch_tasks.pop(key, None)
+
+    async def _run_business_detail_prefetch(self, *, guild_id: int, user_id: int, business_key: str) -> None:
+        try:
+            async with self.sessionmaker() as session:
+                async with session.begin():
+                    await self._get_manage_snapshot_cached(
+                        session,
+                        guild_id=guild_id,
+                        user_id=user_id,
+                        business_key=business_key,
+                        prefer_cache=False,
+                    )
+                    await self._get_worker_slots_cached(
+                        session,
+                        guild_id=guild_id,
+                        user_id=user_id,
+                        business_key=business_key,
+                        prefer_cache=False,
+                    )
+                    await self._get_manager_slots_cached(
+                        session,
+                        guild_id=guild_id,
+                        user_id=user_id,
+                        business_key=business_key,
+                        prefer_cache=False,
+                    )
+        finally:
+            done_keys = [k for k, task in self._panel_prefetch_tasks.items() if task.done()]
+            for key in done_keys:
+                self._panel_prefetch_tasks.pop(key, None)
 
     def _reroll_prefetch_key(self, *, guild_id: int, user_id: int, business_key: str, staff_kind: str) -> str:
         return f"{int(guild_id)}:{int(user_id)}:{str(business_key).strip().lower()}:{str(staff_kind).strip().lower()}"
@@ -5272,6 +5528,10 @@ class BusinessCog(commands.Cog):
             task.cancel()
         self._reroll_prefetch_tasks.clear()
         self._reroll_prefetch_queues.clear()
+        for task in list(self._panel_prefetch_tasks.values()):
+            task.cancel()
+        self._panel_prefetch_tasks.clear()
+        self._panel_data_cache.clear()
         log.info(
             "Business runtime stop requested | cog=%s running=%s",
             self.__class__.__name__,
@@ -5293,10 +5553,11 @@ class BusinessCog(commands.Cog):
         async with self.sessionmaker() as session:
             async with session.begin():
                 await ensure_user_rows(session, guild_id=guild_id, user_id=user_id)
-                snap = await get_business_hub_snapshot(
+                snap = await self._get_hub_snapshot_cached(
                     session,
                     guild_id=guild_id,
                     user_id=user_id,
+                    prefer_cache=False,
                 )
         return snap
 
@@ -5394,6 +5655,12 @@ class BusinessCog(commands.Cog):
             owner_id=user_id,
             guild_id=guild_id,
             hub_snapshot=snap,
+        )
+        self.schedule_business_panel_prefetch(
+            guild_id=guild_id,
+            user_id=user_id,
+            hub_snapshot=snap,
+            selected_business_key=view.selected_business_key,
         )
         await interaction.followup.send(embed=embed, view=view)
         migration_summary = await self._consume_worker_migration_summary(guild_id=guild_id, user_id=user_id)
