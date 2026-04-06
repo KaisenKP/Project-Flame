@@ -760,10 +760,20 @@ def _worker_slots_for_business_key_and_level(
     prestige: int = 0,
     legacy_floor: int = 0,
 ) -> int:
-    _ = (business_key, level)
-    base = BASE_WORKER_SLOTS
-    from_prestige = base + max(int(prestige), 0)
-    return max(from_prestige, max(int(legacy_floor), 0))
+    _ = business_key
+    normalized_level = max(int(level), 0)
+    normalized_prestige = max(int(prestige), 0)
+
+    # Worker capacity should materially outpace manager capacity so players
+    # can keep hiring workers as they upgrade businesses.
+    #
+    # - Baseline worker slots: BASE_WORKER_SLOTS
+    # - +1 slot every 2 levels (higher growth than manager slots)
+    # - +1 slot per prestige tier
+    #
+    # Keep legacy floor protection so no existing assignments become invalid.
+    from_progression = BASE_WORKER_SLOTS + (normalized_level // 2) + normalized_prestige
+    return max(from_progression, max(int(legacy_floor), 0))
 
 
 def _manager_slots_for_level(level: int) -> int:
