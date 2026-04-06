@@ -1080,6 +1080,11 @@ class BusinessOwnershipRow(Base):
 
     level: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     prestige: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    worker_slot_legacy_floor: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    worker_system_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    worker_migration_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    worker_migration_summary_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    worker_migration_summary_seen: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     total_earned: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_spent: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -1197,6 +1202,60 @@ class BusinessWorkerAssignmentRow(Base):
         onupdate=NOW,
         nullable=False,
     )
+
+
+class BusinessWorkerArchiveRow(Base):
+    __tablename__ = "business_worker_archives"
+    __table_args__ = (
+        Index("ix_business_worker_archives_migration", "migration_version", "archived_at"),
+        Index("ix_business_worker_archives_user", "guild_id", "user_id", "archived_at"),
+        Index("ix_business_worker_archives_ownership", "ownership_id", "migration_version"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    migration_version: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    migration_run_id: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    ownership_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    assignment_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    business_key: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    slot_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    worker_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    worker_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    rarity: Mapped[str] = mapped_column(String(16), nullable=False)
+    flat_profit_bonus: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    percent_profit_bonus_bp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    assignment_state_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    archived_at: Mapped[datetime] = mapped_column(TS, server_default=NOW, nullable=False)
+
+
+class BusinessWorkerMigrationStateRow(Base):
+    __tablename__ = "business_worker_migration_states"
+    __table_args__ = (
+        UniqueConstraint("migration_version", "ownership_id", name="uq_business_worker_migration_state"),
+        Index("ix_business_worker_migration_states_status", "migration_version", "status", "updated_at"),
+        Index("ix_business_worker_migration_states_user", "guild_id", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    migration_version: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    migration_run_id: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    ownership_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    business_key: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="started", index=True)
+    old_worker_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    new_worker_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    old_total_flat_bonus: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    old_total_percent_bp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    new_total_flat_bonus: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    new_total_percent_bp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    details_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    error_text: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=NOW, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(TS, server_default=NOW, onupdate=NOW, nullable=False)
 
 
 class BusinessManagerAssignmentRow(Base):

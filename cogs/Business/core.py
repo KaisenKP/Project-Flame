@@ -91,7 +91,9 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
 
 from db.models import (
+    BusinessWorkerArchiveRow,
     BusinessManagerAssignmentRow,
+    BusinessWorkerMigrationStateRow,
     BusinessOwnershipRow,
     BusinessRunRow,
     BusinessWorkerAssignmentRow,
@@ -487,16 +489,36 @@ _BUSINESS_DEF_MAP: Dict[str, BusinessDef] = {b.key: b for b in _BUSINESS_DEFS}
 BASE_RUNTIME_HOURS_DEFAULT = 4
 BASE_RUNTIME_HOURS_SHIPPING = 8
 MAX_RUNTIME_HOURS = 48
-# Live rebalance hotfix: keep staff buff active but reduce the previously
-# overpowered multiplier to the intended x3 target for both managers/employees.
-STAFF_POWER_BUFF_MULTIPLIER = 3
+WORKER_GENERATION_VERSION = 2
+WORKER_MIGRATION_VERSION = 2
+WORKER_POWER_MULTIPLIER = 25
+WORKER_MIGRATION_RUN_ID = "worker_redesign_v2"
+STAFF_POWER_BUFF_MULTIPLIER = 1
 STAFF_BONUS_SOFT_CAP_BP = 250_000
 FINAL_PROFIT_SOFT_CAP_START = 25_000_000
 FINAL_PROFIT_SOFT_CAP_SLOPE_BP = 2500
 
-BASE_WORKER_SLOTS = 2
+BASE_WORKER_SLOTS = 3
 BASE_MANAGER_SLOTS = 1
-HOTEL_STARTING_WORKER_SLOTS = 4
+HOTEL_STARTING_WORKER_SLOTS = 3
+
+RARITY_MERGE_REQUIREMENTS: dict[str, int] = {
+    "common": 25,
+    "uncommon": 25,
+    "rare": 25,
+    "epic": 5,
+    "legendary": 3,
+    "mythic": 2,
+}
+
+WORKER_GENERATION_LABELS: dict[str, str] = {
+    "common": "Refined Common",
+    "uncommon": "Tempered Uncommon",
+    "rare": "Elite Rare",
+    "epic": "Ascended Epic",
+    "legendary": "Sovereign Legendary",
+    "mythic": "Divine Mythic",
+}
 
 BASE_WORKER_HIRE_COST = 10_000
 BASE_MANAGER_HIRE_COST = 35_000
@@ -692,10 +714,17 @@ def _base_runtime_hours_for_key(business_key: str) -> int:
     return BASE_RUNTIME_HOURS_DEFAULT
 
 
-def _worker_slots_for_business_key_and_level(business_key: str, level: int) -> int:
-    base = HOTEL_STARTING_WORKER_SLOTS if business_key == "hotel" else BASE_WORKER_SLOTS
-    extra = max(int(level), 0) // 2
-    return base + extra
+def _worker_slots_for_business_key_and_level(
+    business_key: str,
+    level: int,
+    *,
+    prestige: int = 0,
+    legacy_floor: int = 0,
+) -> int:
+    _ = (business_key, level)
+    base = BASE_WORKER_SLOTS
+    from_prestige = base + max(int(prestige), 0)
+    return max(from_prestige, max(int(legacy_floor), 0))
 
 
 def _manager_slots_for_level(level: int) -> int:
@@ -734,19 +763,7 @@ async def _resolve_effective_business_progress(session, *, ownership: BusinessOw
         level=int(ownership.level or 0),
         prestige=int(ownership.prestige or 0),
     )
-    active_worker_count = await _count_active_workers_for_ownership(session, ownership_id=int(ownership.id))
-    inferred_level = _minimum_level_for_worker_count(str(ownership.business_key), active_worker_count)
-    if inferred_level <= normalized_level:
-        return normalized_level, normalized_prestige
-
-    repaired_level, repaired_prestige = _normalize_business_progress(
-        level=inferred_level,
-        prestige=normalized_prestige,
-    )
-    ownership.level = repaired_level
-    ownership.prestige = repaired_prestige
-    await session.flush()
-    return repaired_level, repaired_prestige
+    return normalized_level, normalized_prestige
 
 
 def _effective_base_income(defn: BusinessDef, *, level: int, prestige: int) -> int:
@@ -825,11 +842,12 @@ class StaffCatalogEntry:
 
 
 _WORKER_PREFIX_POOL: dict[str, tuple[str, ...]] = {
-    "common": ("Rookie", "Steady", "Local", "Budget"),
-    "uncommon": ("Skilled", "Trusted", "Prime", "Swift"),
-    "rare": ("Skilled", "Trusted", "Prime", "Swift"),
-    "epic": ("Elite", "Veteran", "Master", "Ace"),
-    "mythic": ("Celestial", "Eternal", "Godspeed", "Arcane"),
+    "common": ("Refined", "Steady", "Focused", "Tempered"),
+    "uncommon": ("Tempered", "Sharp", "Trusted", "Prime"),
+    "rare": ("Elite", "Prime", "Apex", "Master"),
+    "epic": ("Ascended", "Apex", "Paragon", "Master"),
+    "legendary": ("Sovereign", "Imperial", "Eternal", "Crowned"),
+    "mythic": ("Divine", "Astral", "Eternal", "Mythic"),
 }
 _WORKER_ROLE_POOL: dict[str, tuple[str, ...]] = {
     "fast": ("Runner", "Courier", "Sprinter", "Dash"),
@@ -844,18 +862,20 @@ _MANAGER_PREFIX_POOL: dict[str, tuple[str, ...]] = {
     "mythical": ("Sovereign", "Ascendant", "Epoch"),
 }
 _WORKER_RARITY_FLAT_RANGE: dict[str, tuple[int, int]] = {
-    "common": (50, 120),
-    "uncommon": (120, 220),
-    "rare": (120, 260),
-    "epic": (260, 420),
-    "mythic": (750, 1200),
+    "common": (1200, 2500),
+    "uncommon": (2500, 4200),
+    "rare": (4200, 7000),
+    "epic": (7000, 12000),
+    "legendary": (12000, 18000),
+    "mythic": (18000, 28000),
 }
 _WORKER_RARITY_BP_RANGE: dict[str, tuple[int, int]] = {
-    "common": (10, 60),
-    "uncommon": (45, 100),
-    "rare": (60, 140),
-    "epic": (140, 260),
-    "mythic": (420, 650),
+    "common": (250, 900),
+    "uncommon": (700, 1500),
+    "rare": (1300, 2300),
+    "epic": (2200, 3600),
+    "legendary": (3200, 5200),
+    "mythic": (4500, 7000),
 }
 
 
@@ -876,8 +896,16 @@ def _manager_runtime_bonus_hours_from_rarity(rarity: str) -> int:
 
 def _manager_profit_bonus_bp_from_rarity(rarity: str) -> int:
     key = str(rarity).strip().lower()
+    if key == "legendary":
+        return 1800
+    if key == "epic":
+        return 900
+    if key == "rare":
+        return 350
+    if key == "common":
+        return 120
     if key == "mythical":
-        return 10_000
+        return 3200
     return 0
 
 
@@ -891,11 +919,9 @@ def _normalize_rarity(rarity: str) -> str:
 
 def _normalize_worker_rarity(rarity: str) -> str:
     key = str(rarity).strip().lower()
-    if key == "legendary":
-        key = "epic"
     if key == "mythical":
         key = "mythic"
-    allowed = {"common", "uncommon", "rare", "epic", "mythic"}
+    allowed = {"common", "uncommon", "rare", "epic", "legendary", "mythic"}
     return key if key in allowed else "common"
 
 
@@ -907,6 +933,11 @@ def _normalize_worker_type(worker_type: str) -> str:
 
 def _worker_display_rarity(rarity: str) -> str:
     return "mythical" if str(rarity).strip().lower() == "mythic" else str(rarity).strip().lower()
+
+
+def _worker_generation_label(rarity: str) -> str:
+    key = _normalize_worker_rarity(rarity)
+    return WORKER_GENERATION_LABELS.get(key, key.title())
 
 
 def _worker_midpoint_stats(*, worker_type: str, rarity: str) -> tuple[int, int]:
@@ -993,17 +1024,62 @@ def get_staff_grant_catalog(*, staff_kind: str, business_key: Optional[str] = No
     return entries
 
 
-def _roll_weighted_rarity() -> str:
-    roll = random.random()
-    if roll < 0.60:
-        return "common"
-    if roll < 0.85:
-        return "rare"
-    if roll < 0.95:
-        return "epic"
-    if roll < 0.99:
-        return "legendary"
-    return "mythical"
+def _weighted_pick(options: list[tuple[str, int]]) -> str:
+    total = sum(max(int(weight), 0) for _, weight in options)
+    if total <= 0:
+        return options[0][0]
+    cursor = random.randint(1, total)
+    running = 0
+    for value, weight in options:
+        running += max(int(weight), 0)
+        if cursor <= running:
+            return value
+    return options[-1][0]
+
+
+def _prestige_luck_bonus_bp(prestige: int, *, staff_kind: str) -> int:
+    p = clamp_prestige(int(prestige))
+    cap = 6500 if staff_kind == "worker" else 5000
+    per_tier = 175 if staff_kind == "worker" else 150
+    return min(p * per_tier, cap)
+
+
+def _roll_worker_rarity(*, prestige: int) -> str:
+    luck = _prestige_luck_bonus_bp(prestige, staff_kind="worker")
+    common = max(3600 - int(luck * 0.70), 900)
+    uncommon = max(2600 - int(luck * 0.25), 700)
+    rare = min(2200 + int(luck * 0.55), 3200)
+    epic = min(1200 + int(luck * 0.30), 1900)
+    legendary = min(320 + int(luck * 0.09), 650)
+    mythic = min(80 + int(luck * 0.03), 160)
+    return _weighted_pick(
+        [
+            ("common", common),
+            ("uncommon", uncommon),
+            ("rare", rare),
+            ("epic", epic),
+            ("legendary", legendary),
+            ("mythic", mythic),
+        ]
+    )
+
+
+def _roll_manager_rarity(*, prestige: int) -> str:
+    luck = _prestige_luck_bonus_bp(prestige, staff_kind="manager")
+    common = max(5000 - int(luck * 0.85), 1800)
+    rare = min(2800 + int(luck * 0.60), 4300)
+    epic = min(1400 + int(luck * 0.33), 2200)
+    legendary = min(620 + int(luck * 0.11), 980)
+    mythical = min(180 + int(luck * 0.04), 260)
+    return _weighted_pick(
+        [
+            ("common", common),
+            ("rare", rare),
+            ("epic", epic),
+            ("legendary", legendary),
+            ("mythical", mythical),
+        ]
+    )
 
 
 def _generate_worker_name(*, worker_type: str, rarity: str) -> str:
@@ -1015,19 +1091,9 @@ def _generate_worker_name(*, worker_type: str, rarity: str) -> str:
     return f"{prefix} {role} {badge}"
 
 
-def _generate_worker_roll() -> dict[str, int | str]:
+def _generate_worker_roll(*, prestige: int = 0) -> dict[str, int | str]:
     worker_type = random.choice(("fast", "efficient", "kind"))
-    rarity_roll = random.random()
-    if rarity_roll < 0.60:
-        rarity = "common"
-    elif rarity_roll < 0.85:
-        rarity = "uncommon"
-    elif rarity_roll < 0.95:
-        rarity = "rare"
-    elif rarity_roll < 0.99:
-        rarity = "epic"
-    else:
-        rarity = "mythic"
+    rarity = _roll_worker_rarity(prestige=int(prestige))
     flat_low, flat_high = _WORKER_RARITY_FLAT_RANGE[rarity]
     bp_low, bp_high = _WORKER_RARITY_BP_RANGE[rarity]
     flat_bonus = random.randint(flat_low, flat_high)
@@ -1054,21 +1120,21 @@ def _generate_manager_name(*, rarity: str) -> str:
     return f"{prefix} Manager {random.randint(10, 99)}"
 
 
-def _generate_manager_roll() -> dict[str, int | str]:
-    rarity = _roll_weighted_rarity()
+def _generate_manager_roll(*, prestige: int = 0) -> dict[str, int | str]:
+    rarity = _roll_manager_rarity(prestige=int(prestige))
     runtime_range = {
-        "common": (0, 2),
-        "rare": (2, 6),
-        "epic": (6, 10),
-        "legendary": (10, 16),
-        "mythical": (16, 24),
+        "common": (1, 4),
+        "rare": (4, 8),
+        "epic": (8, 14),
+        "legendary": (14, 22),
+        "mythical": (20, 30),
     }
     bp_range = {
-        "common": (0, 50),
-        "rare": (50, 130),
-        "epic": (130, 260),
-        "legendary": (260, 500),
-        "mythical": (500, 800),
+        "common": (80, 280),
+        "rare": (220, 560),
+        "epic": (520, 1050),
+        "legendary": (980, 1800),
+        "mythical": (1600, 2800),
     }
     auto_range = {
         "common": (0, 0),
@@ -1092,10 +1158,11 @@ def _generate_manager_roll() -> dict[str, int | str]:
 def _worker_hire_cost(*, rarity: str, flat_profit_bonus: int, percent_profit_bonus_bp: int) -> int:
     rarity_multi = {
         "common": 1.00,
-        "uncommon": 1.20,
-        "rare": 1.35,
-        "epic": 1.85,
-        "mythic": 4.00,
+        "uncommon": 1.10,
+        "rare": 1.25,
+        "epic": 1.55,
+        "legendary": 2.20,
+        "mythic": 3.20,
     }
     r = _normalize_worker_rarity(rarity)
     flat = max(int(flat_profit_bonus), 0)
@@ -1377,6 +1444,346 @@ async def _get_active_manager_rows_for_ownership(session, *, ownership_id: int) 
     return list(rows)
 
 
+def _merge_requirement_for_rarity(rarity: str) -> int:
+    key = _normalize_worker_rarity(rarity)
+    return int(RARITY_MERGE_REQUIREMENTS.get(key, 25))
+
+
+def _ceil_div(a: int, b: int) -> int:
+    if b <= 0:
+        return max(int(a), 0)
+    return (max(int(a), 0) + b - 1) // b
+
+
+def _safe_avg(values: list[int]) -> int:
+    if not values:
+        return 0
+    return int(round(sum(values) / max(len(values), 1)))
+
+
+def _new_worker_name(*, worker_type: str, rarity: str) -> str:
+    base = _generate_worker_name(worker_type=worker_type, rarity=rarity)
+    generation = _worker_generation_label(rarity)
+    return _trim_text(f"{generation} {base}", 64)
+
+
+async def migrate_worker_system_for_all_users(session) -> dict[str, int]:
+    ownership_rows = list((await session.scalars(select(BusinessOwnershipRow).order_by(BusinessOwnershipRow.id.asc()))).all())
+    migrated = 0
+    skipped = 0
+    failed = 0
+    for ownership in ownership_rows:
+        try:
+            changed = await migrate_worker_system_for_ownership(session, ownership_id=int(ownership.id))
+            if changed:
+                migrated += 1
+            else:
+                skipped += 1
+        except Exception:
+            failed += 1
+            log.exception(
+                "worker system migration failed | ownership_id=%s guild_id=%s user_id=%s business=%s",
+                getattr(ownership, "id", None),
+                getattr(ownership, "guild_id", None),
+                getattr(ownership, "user_id", None),
+                getattr(ownership, "business_key", None),
+            )
+    return {"migrated": migrated, "skipped": skipped, "failed": failed}
+
+
+async def preview_worker_migration_for_ownership(
+    session,
+    *,
+    ownership_id: int,
+) -> dict:
+    ownership = await session.scalar(select(BusinessOwnershipRow).where(BusinessOwnershipRow.id == int(ownership_id)))
+    if ownership is None:
+        return {"ok": False, "error": "Ownership not found."}
+    worker_rows = await _get_active_worker_rows_for_ownership(session, ownership_id=int(ownership.id))
+    grouped: dict[tuple[str, str], list[BusinessWorkerAssignmentRow]] = {}
+    for row in worker_rows:
+        key = (_normalize_worker_type(str(row.worker_type)), _normalize_worker_rarity(str(row.rarity)))
+        grouped.setdefault(key, []).append(row)
+
+    old_total = len(worker_rows)
+    old_flat_total = sum(max(int(r.flat_profit_bonus or 0), 0) for r in worker_rows)
+    old_bp_total = sum(max(int(r.percent_profit_bonus_bp or 0), 0) for r in worker_rows)
+    projected_new_count = 0
+    projected_new_flat_total = 0
+    projected_new_bp_total = 0
+    merge_lines: list[str] = []
+    for (worker_type, rarity), rows in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0])):
+        count_old = len(rows)
+        if count_old <= 0:
+            continue
+        merge_requirement = _merge_requirement_for_rarity(rarity)
+        count_new = max(1, _ceil_div(count_old, merge_requirement))
+        avg_flat = max(_safe_avg([int(r.flat_profit_bonus or 0) for r in rows]), 1)
+        avg_bp = max(_safe_avg([int(r.percent_profit_bonus_bp or 0) for r in rows]), 1)
+        scaled_flat = _clamp_int(avg_flat * WORKER_POWER_MULTIPLIER, 0, 10_000_000)
+        scaled_bp = _clamp_int(avg_bp * WORKER_POWER_MULTIPLIER, 0, 250_000)
+        projected_new_count += count_new
+        projected_new_flat_total += (scaled_flat * count_new)
+        projected_new_bp_total += (scaled_bp * count_new)
+        merge_lines.append(
+            f"{worker_type.title()} {rarity.title()} x{count_old} -> {count_new} {_worker_generation_label(rarity)} (req {merge_requirement})"
+        )
+    level, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
+    current_slots = _worker_slots_for_business_key_and_level(
+        str(ownership.business_key),
+        level,
+        prestige=prestige,
+        legacy_floor=int(getattr(ownership, "worker_slot_legacy_floor", 0) or 0),
+    )
+    required_slot_floor = max(int(getattr(ownership, "worker_slot_legacy_floor", 0) or 0), projected_new_count)
+    estimated_before_power = old_flat_total + old_bp_total
+    estimated_after_power = projected_new_flat_total + projected_new_bp_total
+    estimated_delta_pct = 0.0
+    if estimated_before_power > 0:
+        estimated_delta_pct = ((estimated_after_power - estimated_before_power) / estimated_before_power) * 100.0
+    return {
+        "ok": True,
+        "ownership_id": int(ownership.id),
+        "guild_id": int(ownership.guild_id),
+        "user_id": int(ownership.user_id),
+        "business_key": str(ownership.business_key),
+        "worker_migration_version": int(getattr(ownership, "worker_migration_version", 0) or 0),
+        "old_worker_count": old_total,
+        "projected_new_worker_count": projected_new_count,
+        "current_worker_slots": current_slots,
+        "projected_required_slot_floor": required_slot_floor,
+        "old_total_flat_bonus": old_flat_total,
+        "old_total_percent_bp": old_bp_total,
+        "projected_new_total_flat_bonus": projected_new_flat_total,
+        "projected_new_total_percent_bp": projected_new_bp_total,
+        "estimated_power_delta_pct": round(float(estimated_delta_pct), 2),
+        "merge_lines": merge_lines,
+    }
+
+
+async def migrate_worker_system_for_ownership(session, *, ownership_id: int) -> bool:
+    ownership = await session.scalar(select(BusinessOwnershipRow).where(BusinessOwnershipRow.id == int(ownership_id)))
+    if ownership is None:
+        return False
+    if int(getattr(ownership, "worker_migration_version", 0) or 0) >= WORKER_MIGRATION_VERSION:
+        return False
+
+    worker_rows = await _get_active_worker_rows_for_ownership(session, ownership_id=int(ownership.id))
+    grouped: dict[tuple[str, str], list[BusinessWorkerAssignmentRow]] = {}
+    for row in worker_rows:
+        key = (_normalize_worker_type(str(row.worker_type)), _normalize_worker_rarity(str(row.rarity)))
+        grouped.setdefault(key, []).append(row)
+
+    old_total = len(worker_rows)
+    old_flat_total = sum(max(int(r.flat_profit_bonus or 0), 0) for r in worker_rows)
+    old_bp_total = sum(max(int(r.percent_profit_bonus_bp or 0), 0) for r in worker_rows)
+
+    migration_state = await session.scalar(
+        select(BusinessWorkerMigrationStateRow).where(
+            BusinessWorkerMigrationStateRow.migration_version == WORKER_MIGRATION_VERSION,
+            BusinessWorkerMigrationStateRow.ownership_id == int(ownership.id),
+        )
+    )
+    if migration_state is None:
+        migration_state = BusinessWorkerMigrationStateRow(
+            migration_version=WORKER_MIGRATION_VERSION,
+            migration_run_id=WORKER_MIGRATION_RUN_ID,
+            ownership_id=int(ownership.id),
+            guild_id=int(ownership.guild_id),
+            user_id=int(ownership.user_id),
+            business_key=str(ownership.business_key),
+            status="started",
+        )
+        session.add(migration_state)
+        await session.flush()
+    elif str(migration_state.status) == "completed":
+        ownership.worker_migration_version = WORKER_MIGRATION_VERSION
+        ownership.worker_system_generation = WORKER_GENERATION_VERSION
+        return False
+
+    existing_archives = await session.scalars(
+        select(BusinessWorkerArchiveRow).where(
+            BusinessWorkerArchiveRow.migration_version == WORKER_MIGRATION_VERSION,
+            BusinessWorkerArchiveRow.ownership_id == int(ownership.id),
+        )
+    )
+    for archived in list(existing_archives):
+        await session.delete(archived)
+    for row in worker_rows:
+        session.add(
+            BusinessWorkerArchiveRow(
+                migration_version=WORKER_MIGRATION_VERSION,
+                migration_run_id=WORKER_MIGRATION_RUN_ID,
+                ownership_id=int(ownership.id),
+                assignment_id=int(row.id),
+                guild_id=int(row.guild_id),
+                user_id=int(row.user_id),
+                business_key=str(row.business_key),
+                slot_index=int(row.slot_index or 0),
+                worker_name=str(row.worker_name),
+                worker_type=str(row.worker_type),
+                rarity=str(row.rarity),
+                flat_profit_bonus=int(row.flat_profit_bonus or 0),
+                percent_profit_bonus_bp=int(row.percent_profit_bonus_bp or 0),
+                assignment_state_json={
+                    "is_active": bool(row.is_active),
+                    "special_json": dict(row.special_json or {}),
+                    "hired_at_iso": row.hired_at.isoformat() if getattr(row, "hired_at", None) else None,
+                    "updated_at_iso": row.updated_at.isoformat() if getattr(row, "updated_at", None) else None,
+                },
+            )
+        )
+
+    for row in worker_rows:
+        await session.delete(row)
+
+    new_rows: list[BusinessWorkerAssignmentRow] = []
+    merge_summaries: list[str] = []
+    slot_index = 1
+    for (worker_type, rarity), rows in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0])):
+        count_old = len(rows)
+        if count_old <= 0:
+            continue
+        merge_requirement = _merge_requirement_for_rarity(rarity)
+        count_new = max(1, _ceil_div(count_old, merge_requirement))
+        avg_flat = max(_safe_avg([int(r.flat_profit_bonus or 0) for r in rows]), 1)
+        avg_bp = max(_safe_avg([int(r.percent_profit_bonus_bp or 0) for r in rows]), 1)
+        scaled_flat = _clamp_int(avg_flat * WORKER_POWER_MULTIPLIER, 0, 10_000_000)
+        scaled_bp = _clamp_int(avg_bp * WORKER_POWER_MULTIPLIER, 0, 250_000)
+        for _ in range(count_new):
+            new_rows.append(
+                BusinessWorkerAssignmentRow(
+                    ownership_id=int(ownership.id),
+                    guild_id=int(ownership.guild_id),
+                    user_id=int(ownership.user_id),
+                    business_key=str(ownership.business_key),
+                    slot_index=slot_index,
+                    worker_name=_new_worker_name(worker_type=worker_type, rarity=rarity),
+                    worker_type=worker_type,
+                    rarity=rarity,
+                    flat_profit_bonus=scaled_flat,
+                    percent_profit_bonus_bp=scaled_bp,
+                    special_json={
+                        "generation": WORKER_GENERATION_VERSION,
+                        "generation_label": _worker_generation_label(rarity),
+                        "migration_version": WORKER_MIGRATION_VERSION,
+                        "merge_requirement": merge_requirement,
+                    },
+                    is_active=True,
+                )
+            )
+            slot_index += 1
+        merge_summaries.append(
+            f"{worker_type.title()} {rarity.title()} x{count_old} -> {count_new} {_worker_generation_label(rarity)}"
+        )
+
+    for row in new_rows:
+        session.add(row)
+
+    level, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
+    new_worker_count = len(new_rows)
+    required_slots = _worker_slots_for_business_key_and_level(
+        str(ownership.business_key),
+        level,
+        prestige=prestige,
+        legacy_floor=int(getattr(ownership, "worker_slot_legacy_floor", 0) or 0),
+    )
+    if new_worker_count > required_slots:
+        ownership.worker_slot_legacy_floor = int(new_worker_count)
+
+    new_flat_total = sum(int(r.flat_profit_bonus or 0) for r in new_rows)
+    new_bp_total = sum(int(r.percent_profit_bonus_bp or 0) for r in new_rows)
+    estimated_before_power = old_flat_total + old_bp_total
+    estimated_after_power = new_flat_total + new_bp_total
+    estimated_delta_pct = 0.0
+    if estimated_before_power > 0:
+        estimated_delta_pct = ((estimated_after_power - estimated_before_power) / estimated_before_power) * 100.0
+
+    summary = {
+        "migration_version": WORKER_MIGRATION_VERSION,
+        "generation": WORKER_GENERATION_VERSION,
+        "old_worker_count": old_total,
+        "new_worker_count": new_worker_count,
+        "old_total_flat_bonus": old_flat_total,
+        "old_total_percent_bp": old_bp_total,
+        "new_total_flat_bonus": new_flat_total,
+        "new_total_percent_bp": new_bp_total,
+        "estimated_power_delta_pct": round(float(estimated_delta_pct), 2),
+        "merge_summary_lines": merge_summaries[:25],
+        "slot_floor_after": int(getattr(ownership, "worker_slot_legacy_floor", 0) or 0),
+        "prestige": int(getattr(ownership, "prestige", 0) or 0),
+        "apology": "Sorry for the sudden change. We rebuilt the worker system to make it cleaner, stronger, and less grindy going forward.",
+    }
+
+    ownership.worker_system_generation = WORKER_GENERATION_VERSION
+    ownership.worker_migration_version = WORKER_MIGRATION_VERSION
+    ownership.worker_migration_summary_json = summary
+    ownership.worker_migration_summary_seen = False
+
+    migration_state.status = "completed"
+    migration_state.old_worker_count = old_total
+    migration_state.new_worker_count = new_worker_count
+    migration_state.old_total_flat_bonus = old_flat_total
+    migration_state.old_total_percent_bp = old_bp_total
+    migration_state.new_total_flat_bonus = new_flat_total
+    migration_state.new_total_percent_bp = new_bp_total
+    migration_state.details_json = summary
+    migration_state.error_text = None
+    return True
+
+
+async def restore_archived_workers_for_business(
+    session,
+    *,
+    guild_id: int,
+    user_id: int,
+    business_key: str,
+    migration_version: int = WORKER_MIGRATION_VERSION,
+) -> tuple[bool, str]:
+    ownership = await _get_ownership_row(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
+    if ownership is None:
+        return False, "Ownership not found."
+    archives = list(
+        (
+            await session.scalars(
+                select(BusinessWorkerArchiveRow).where(
+                    BusinessWorkerArchiveRow.guild_id == int(guild_id),
+                    BusinessWorkerArchiveRow.user_id == int(user_id),
+                    BusinessWorkerArchiveRow.business_key == str(business_key),
+                    BusinessWorkerArchiveRow.migration_version == int(migration_version),
+                ).order_by(BusinessWorkerArchiveRow.slot_index.asc(), BusinessWorkerArchiveRow.id.asc())
+            )
+        ).all()
+    )
+    if not archives:
+        return False, "No archived workers found for that migration version."
+    live_rows = await _get_active_worker_rows_for_ownership(session, ownership_id=int(ownership.id))
+    for row in live_rows:
+        await session.delete(row)
+    slot = 1
+    for archived in archives:
+        session.add(
+            BusinessWorkerAssignmentRow(
+                ownership_id=int(ownership.id),
+                guild_id=int(guild_id),
+                user_id=int(user_id),
+                business_key=str(business_key),
+                slot_index=slot,
+                worker_name=str(archived.worker_name),
+                worker_type=_normalize_worker_type(str(archived.worker_type)),
+                rarity=_normalize_worker_rarity(str(archived.rarity)),
+                flat_profit_bonus=max(int(archived.flat_profit_bonus or 0), 0),
+                percent_profit_bonus_bp=max(int(archived.percent_profit_bonus_bp or 0), 0),
+                special_json={"restored_from_archive": True, "migration_version": int(migration_version)},
+                is_active=True,
+            )
+        )
+        slot += 1
+    ownership.worker_slot_legacy_floor = max(int(getattr(ownership, "worker_slot_legacy_floor", 0) or 0), len(archives))
+    ownership.worker_migration_summary_seen = True
+    return True, f"Restored {len(archives)} archived workers."
+
+
 def _format_percent_bp(bp: int) -> str:
     value = int(bp) / 100
     if float(value).is_integer():
@@ -1651,7 +2058,7 @@ async def _build_business_card_for_user(
             hourly_profit=int(defn.base_hourly_income),
             runtime_remaining_hours=0,
             worker_slots_used=0,
-            worker_slots_total=_worker_slots_for_business_key_and_level(defn.key, 0),
+            worker_slots_total=_worker_slots_for_business_key_and_level(defn.key, 0, prestige=0, legacy_floor=0),
             manager_slots_used=0,
             manager_slots_total=_manager_slots_for_level(0),
             purchase_cost=int(defn.cost_silver),
@@ -1695,7 +2102,12 @@ async def _build_business_card_for_user(
         hourly_profit=hourly_profit,
         runtime_remaining_hours=runtime_remaining_hours,
         worker_slots_used=worker_used,
-        worker_slots_total=_worker_slots_for_business_key_and_level(defn.key, level),
+        worker_slots_total=_worker_slots_for_business_key_and_level(
+            defn.key,
+            level,
+            prestige=prestige,
+            legacy_floor=int(getattr(owned_row, "worker_slot_legacy_floor", 0) or 0),
+        ),
         manager_slots_used=manager_used,
         manager_slots_total=_manager_slots_for_level(level),
         projected_payout=int(hourly_profit * runtime_total),
@@ -1785,7 +2197,7 @@ async def get_business_manage_snapshot(
             prestige_multiplier=prestige_multiplier_display(prestige), bulk_upgrade_1_unlocked=True,
             bulk_upgrade_5_unlocked=bulk_option_for(prestige, 5).unlocked, bulk_upgrade_10_unlocked=bulk_option_for(prestige, 10).unlocked,
             runtime_remaining_hours=0, total_runtime_hours=runtime_total, worker_slots_used=0,
-            worker_slots_total=_worker_slots_for_business_key_and_level(defn.key, level), manager_slots_used=0,
+            worker_slots_total=_worker_slots_for_business_key_and_level(defn.key, level, prestige=prestige, legacy_floor=0), manager_slots_used=0,
             manager_slots_total=_manager_slots_for_level(level), projected_payout=int(defn.base_hourly_income * runtime_total),
             worker_bonus_bp=0, worker_summary="No workers assigned", manager_summary="No managers assigned",
             active_event_summary="No active events", active_event_lines=[], synergy_bonus_bp=0, synergy_summary="No synergy active",
@@ -1849,7 +2261,12 @@ async def get_business_manage_snapshot(
         prestige_multiplier=prestige_multiplier_display(prestige), bulk_upgrade_1_unlocked=True,
         bulk_upgrade_5_unlocked=bulk_option_for(prestige, 5).unlocked, bulk_upgrade_10_unlocked=bulk_option_for(prestige, 10).unlocked,
         runtime_remaining_hours=runtime_remaining, total_runtime_hours=runtime_total, worker_slots_used=worker_used,
-        worker_slots_total=_worker_slots_for_business_key_and_level(defn.key, level), manager_slots_used=manager_used,
+        worker_slots_total=_worker_slots_for_business_key_and_level(
+            defn.key,
+            level,
+            prestige=prestige,
+            legacy_floor=int(getattr(ownership, "worker_slot_legacy_floor", 0) or 0),
+        ), manager_slots_used=manager_used,
         manager_slots_total=_manager_slots_for_level(level), projected_payout=int(hourly_profit * runtime_total),
         worker_bonus_bp=int(state['worker_bp']), worker_summary=str(state['worker_summary']), manager_summary=str(state['manager_summary']),
         active_event_summary=str(state['active_event_summary']), active_event_lines=list(state['active_event_lines']),
@@ -2617,10 +3034,12 @@ async def get_worker_assignment_slots(
     if ownership is None:
         return []
 
-    level, _ = await _resolve_effective_business_progress(session, ownership=ownership)
+    level, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
     total_slots = _worker_slots_for_business_key_and_level(
         str(business_key),
         level,
+        prestige=prestige,
+        legacy_floor=int(getattr(ownership, "worker_slot_legacy_floor", 0) or 0),
     )
     rows = await session.scalars(
         select(BusinessWorkerAssignmentRow)
@@ -2738,7 +3157,8 @@ async def hire_worker(
             manage_snapshot=manage,
         )
 
-    roll = _generate_worker_roll()
+    _, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
+    roll = _generate_worker_roll(prestige=prestige)
     worker_name = str(roll["worker_name"])
     norm_type = str(roll["worker_type"])
     norm_rarity = str(roll["rarity"])
@@ -2776,7 +3196,7 @@ async def hire_worker(
             rarity=norm_rarity,
             flat_profit_bonus=flat_bonus,
             percent_profit_bonus_bp=bp_bonus,
-            special_json={},
+            special_json={"generation": WORKER_GENERATION_VERSION, "generation_label": _worker_generation_label(norm_rarity)},
             is_active=True,
         )
         conflict = False
@@ -2805,7 +3225,7 @@ async def hire_worker(
         row.rarity = norm_rarity
         row.flat_profit_bonus = flat_bonus
         row.percent_profit_bonus_bp = bp_bonus
-        row.special_json = {}
+        row.special_json = {"generation": WORKER_GENERATION_VERSION, "generation_label": _worker_generation_label(norm_rarity)}
         row.is_active = True
         await session.flush()
 
@@ -2885,7 +3305,7 @@ async def hire_worker_manual(
         row = BusinessWorkerAssignmentRow(
             ownership_id=int(ownership.id), guild_id=int(guild_id), user_id=int(user_id), business_key=str(business_key),
             slot_index=int(free_slot), worker_name=(str(worker_name).strip() or "Worker")[:64], worker_type=norm_type,
-            rarity=norm_rarity, flat_profit_bonus=flat_bonus, percent_profit_bonus_bp=bp_bonus, special_json={}, is_active=True,
+            rarity=norm_rarity, flat_profit_bonus=flat_bonus, percent_profit_bonus_bp=bp_bonus, special_json={"generation": WORKER_GENERATION_VERSION, "generation_label": _worker_generation_label(norm_rarity)}, is_active=True,
         )
         try:
             async with session.begin_nested():
@@ -2904,7 +3324,7 @@ async def hire_worker_manual(
         row.rarity = norm_rarity
         row.flat_profit_bonus = flat_bonus
         row.percent_profit_bonus_bp = bp_bonus
-        row.special_json = {}
+        row.special_json = {"generation": WORKER_GENERATION_VERSION, "generation_label": _worker_generation_label(norm_rarity)}
         row.is_active = True
         await session.flush()
 
@@ -2963,7 +3383,8 @@ async def roll_worker_candidate(
     if hasattr(wallet, "silver_spent"):
         wallet.silver_spent += safe_cost
 
-    roll = _generate_worker_roll()
+    _, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
+    roll = _generate_worker_roll(prestige=prestige)
     candidate = WorkerCandidateSnapshot(
         worker_name=str(roll["worker_name"]),
         worker_type=str(roll["worker_type"]),
@@ -3006,8 +3427,13 @@ async def remove_worker(
         return BusinessActionResult(ok=False, message=f"You do not own **{defn.name}** yet.", snapshot=hub)
 
     normalized_slot = _normalize_slot_index(slot_index)
-    level, _ = await _resolve_effective_business_progress(session, ownership=ownership)
-    max_slot = _worker_slots_for_business_key_and_level(str(business_key), level)
+    level, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
+    max_slot = _worker_slots_for_business_key_and_level(
+        str(business_key),
+        level,
+        prestige=prestige,
+        legacy_floor=int(getattr(ownership, "worker_slot_legacy_floor", 0) or 0),
+    )
     if normalized_slot <= 0 or normalized_slot > max_slot:
         hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
         manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
@@ -3086,7 +3512,8 @@ async def hire_manager(
             manage_snapshot=manage,
         )
 
-    roll = _generate_manager_roll()
+    _, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
+    roll = _generate_manager_roll(prestige=prestige)
     manager_name = str(roll["manager_name"])
     norm_rarity = str(roll["rarity"])
     runtime_bonus = _clamp_int(int(roll["runtime_bonus_hours"]), 0, 48)
@@ -3222,7 +3649,8 @@ async def roll_manager_candidate(
     if hasattr(wallet, "silver_spent"):
         wallet.silver_spent += safe_cost
 
-    roll = _generate_manager_roll()
+    _, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
+    roll = _generate_manager_roll(prestige=prestige)
     candidate = ManagerCandidateSnapshot(
         manager_name=str(roll["manager_name"]),
         rarity=str(roll["rarity"]),
