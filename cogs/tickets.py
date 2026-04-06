@@ -170,6 +170,7 @@ class TicketRow:
     created_at: datetime | None
     closed_at: datetime | None
     close_reason: str | None
+    intake_answers_json: str | None
 
 
 class TicketOpenModal(discord.ui.Modal, title="Open Ticket"):
@@ -427,6 +428,7 @@ class TicketsCog(commands.Cog):
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             closed_at TIMESTAMP NULL DEFAULT NULL,
             close_reason TEXT NULL,
+            intake_answers_json LONGTEXT NULL,
             panel_message_id BIGINT NULL,
             initial_message_id BIGINT NULL,
             PRIMARY KEY (id),
@@ -459,6 +461,7 @@ class TicketsCog(commands.Cog):
         statements = [
             f"ALTER TABLE {self.TABLE_CONFIG} ADD COLUMN head_mod_role_id BIGINT NULL",
             f"ALTER TABLE {self.TABLE_CONFIG} ADD COLUMN panel_image_url TEXT NULL",
+            f"ALTER TABLE {self.TABLE_TICKETS} ADD COLUMN intake_answers_json LONGTEXT NULL",
         ]
         async with self.sessionmaker() as session:
             async with session.begin():
@@ -1030,7 +1033,8 @@ class TicketsCog(commands.Cog):
                             status,
                             created_at,
                             closed_at,
-                            close_reason
+                            close_reason,
+                            intake_answers_json
                         FROM {self.TABLE_TICKETS}
                         WHERE channel_id=:cid
                         LIMIT 1
@@ -1055,6 +1059,7 @@ class TicketsCog(commands.Cog):
             created_at=row[8],
             closed_at=row[9],
             close_reason=str(row[10]) if row[10] is not None else None,
+            intake_answers_json=str(row[11]) if row[11] is not None else None,
         )
 
     async def fetch_ticket_by_id(self, ticket_id: int) -> TicketRow | None:
@@ -1074,7 +1079,8 @@ class TicketsCog(commands.Cog):
                             status,
                             created_at,
                             closed_at,
-                            close_reason
+                            close_reason,
+                            intake_answers_json
                         FROM {self.TABLE_TICKETS}
                         WHERE id=:tid
                         LIMIT 1
@@ -1099,6 +1105,7 @@ class TicketsCog(commands.Cog):
             created_at=row[8],
             closed_at=row[9],
             close_reason=str(row[10]) if row[10] is not None else None,
+            intake_answers_json=str(row[11]) if row[11] is not None else None,
         )
 
     async def count_open_tickets_for_user(self, guild_id: int, user_id: int) -> int:
@@ -1126,7 +1133,21 @@ class TicketsCog(commands.Cog):
         creator_id: int,
         type_key: str,
         type_label: str,
+        intake_answers: list[dict[str, str]] | None = None,
     ) -> int:
+        intake_answers_json: str | None = None
+        if intake_answers:
+            normalized_answers = [
+                {
+                    "label": str(item.get("label") or "Question")[:256],
+                    "value": str(item.get("value") or "No response")[:4000],
+                }
+                for item in intake_answers[:5]
+                if isinstance(item, dict)
+            ]
+            if normalized_answers:
+                intake_answers_json = json.dumps(normalized_answers)
+
         async with self.sessionmaker() as session:
             async with session.begin():
                 await session.execute(
@@ -1138,7 +1159,8 @@ class TicketsCog(commands.Cog):
                             creator_id,
                             type_key,
                             type_label,
-                            status
+                            status,
+                            intake_answers_json
                         )
                         VALUES (
                             :gid,
@@ -1146,7 +1168,8 @@ class TicketsCog(commands.Cog):
                             :uid,
                             :type_key,
                             :type_label,
-                            'open'
+                            'open',
+                            :intake_answers_json
                         )
                         """
                     ),
@@ -1156,6 +1179,7 @@ class TicketsCog(commands.Cog):
                         "uid": int(creator_id),
                         "type_key": str(type_key),
                         "type_label": str(type_label),
+                        "intake_answers_json": intake_answers_json,
                     },
                 )
                 row = (await session.execute(text("SELECT LAST_INSERT_ID()"))).first()
@@ -1389,6 +1413,15 @@ class TicketsCog(commands.Cog):
                 label = str(pair.get("label") or "Question")[:256]
                 value = str(pair.get("value") or "No response")[:1024]
                 e.add_field(name=label, value=value, inline=False)
+        elif ticket.intake_answers_json:
+            stored_answers = _safe_json_load(ticket.intake_answers_json, [])
+            if isinstance(stored_answers, list):
+                for pair in stored_answers[:5]:
+                    if not isinstance(pair, dict):
+                        continue
+                    label = str(pair.get("label") or "Question")[:256]
+                    value = str(pair.get("value") or "No response")[:1024]
+                    e.add_field(name=label, value=value, inline=False)
 
         if ticket.close_reason:
             e.add_field(name="Close Reason", value=ticket.close_reason[:1024], inline=False)
@@ -1715,6 +1748,7 @@ class TicketsCog(commands.Cog):
                 interaction.user.id,
                 ticket_type.type_key,
                 ticket_type.label,
+                intake_answers=answers,
             )
 
             ticket = await self.fetch_ticket_by_id(ticket_id)
