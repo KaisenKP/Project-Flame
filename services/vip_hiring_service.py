@@ -56,7 +56,7 @@ class VipHiringService:
                         mode=mode_key,
                         requested_count=requested_count,
                         filters_json={"allowed_rarities": sorted(allowed_rarities), "disallow_duplicates": True},
-                        batch_settings_json={"chunk_size": 10},
+                        batch_settings_json={"chunk_size": 100},
                     ),
                 )
                 row.status = "running"
@@ -73,7 +73,6 @@ class VipHiringService:
                 await upsert_progress_message(bot=self.bot, job=job)
 
     async def run_job(self, *, job_id: int) -> VipHiringJobRow | None:
-        chunk_size = 10
         while True:
             async with self.sessionmaker() as session:
                 async with session.begin():
@@ -107,6 +106,7 @@ class VipHiringService:
                         await upsert_progress_message(bot=self.bot, job=job)
                         return job
 
+                    chunk_size = max(1, int((job.batch_settings_json or {}).get("chunk_size", 100) or 100))
                     iterations = min(chunk_size, int(job.requested_count or 0) - int(job.processed_count or 0))
                     for _ in range(iterations):
                         candidate = random.choice(pool.candidates)
