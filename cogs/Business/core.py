@@ -1474,7 +1474,11 @@ async def migrate_worker_system_for_all_users(session) -> dict[str, int]:
     failed = 0
     for ownership in ownership_rows:
         try:
-            changed = await migrate_worker_system_for_ownership(session, ownership_id=int(ownership.id))
+            # Run each ownership migration inside its own SAVEPOINT so one bad
+            # row cannot poison the parent transaction and break subsequent
+            # iterations with "closed transaction inside context manager".
+            async with session.begin_nested():
+                changed = await migrate_worker_system_for_ownership(session, ownership_id=int(ownership.id))
             if changed:
                 migrated += 1
             else:
