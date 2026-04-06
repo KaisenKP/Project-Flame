@@ -347,6 +347,11 @@ class TicketChannelView(discord.ui.View):
                 style=discord.ButtonStyle.primary,
                 custom_id="ticket_claim_open",
             )
+            unclaim_btn = discord.ui.Button(
+                label="Unclaim",
+                style=discord.ButtonStyle.secondary,
+                custom_id="ticket_unclaim_open",
+            )
             close_btn = discord.ui.Button(
                 label="Close",
                 style=discord.ButtonStyle.danger,
@@ -360,10 +365,12 @@ class TicketChannelView(discord.ui.View):
             )
 
             claim_btn.callback = self._claim_callback
+            unclaim_btn.callback = self._unclaim_callback
             close_btn.callback = self._close_callback
             reopen_btn.callback = self._reopen_callback
 
             self.add_item(claim_btn)
+            self.add_item(unclaim_btn)
             self.add_item(close_btn)
             self.add_item(reopen_btn)
         else:
@@ -389,6 +396,9 @@ class TicketChannelView(discord.ui.View):
 
     async def _close_callback(self, interaction: discord.Interaction) -> None:
         await self.cog.handle_close(interaction)
+
+    async def _unclaim_callback(self, interaction: discord.Interaction) -> None:
+        await self.cog.handle_unclaim(interaction)
 
     async def _reopen_callback(self, interaction: discord.Interaction) -> None:
         await self.cog.handle_reopen(interaction)
@@ -1202,6 +1212,103 @@ class TicketsCog(commands.Cog):
             intake_answers_json=str(row[11]) if row[11] is not None else None,
         )
 
+    async def fetch_open_tickets_for_user(self, guild_id: int, user_id: int, *, limit: int = 10) -> list[TicketRow]:
+        async with self.sessionmaker() as session:
+            rows = (
+                await session.execute(
+                    text(
+                        f"""
+                        SELECT
+                            id,
+                            guild_id,
+                            channel_id,
+                            creator_id,
+                            claimed_by_id,
+                            type_key,
+                            type_label,
+                            status,
+                            created_at,
+                            closed_at,
+                            close_reason,
+                            intake_answers_json
+                        FROM {self.TABLE_TICKETS}
+                        WHERE guild_id=:gid
+                          AND creator_id=:uid
+                          AND status='open'
+                        ORDER BY created_at ASC
+                        LIMIT :row_limit
+                        """
+                    ),
+                    {"gid": int(guild_id), "uid": int(user_id), "row_limit": int(limit)},
+                )
+            ).all()
+
+        return [
+            TicketRow(
+                id=int(r[0]),
+                guild_id=int(r[1]),
+                channel_id=int(r[2]),
+                creator_id=int(r[3]),
+                claimed_by_id=int(r[4]) if r[4] is not None else None,
+                type_key=str(r[5]),
+                type_label=str(r[6]),
+                status=str(r[7]),
+                created_at=r[8],
+                closed_at=r[9],
+                close_reason=str(r[10]) if r[10] is not None else None,
+                intake_answers_json=str(r[11]) if r[11] is not None else None,
+            )
+            for r in rows
+        ]
+
+    async def fetch_open_tickets_for_guild(self, guild_id: int, *, limit: int = 25) -> list[TicketRow]:
+        async with self.sessionmaker() as session:
+            rows = (
+                await session.execute(
+                    text(
+                        f"""
+                        SELECT
+                            id,
+                            guild_id,
+                            channel_id,
+                            creator_id,
+                            claimed_by_id,
+                            type_key,
+                            type_label,
+                            status,
+                            created_at,
+                            closed_at,
+                            close_reason,
+                            intake_answers_json
+                        FROM {self.TABLE_TICKETS}
+                        WHERE guild_id=:gid
+                          AND status='open'
+                        ORDER BY created_at ASC
+                        LIMIT :row_limit
+                        """
+                    ),
+                    {"gid": int(guild_id), "row_limit": int(limit)},
+                )
+            ).all()
+
+        return [
+            TicketRow(
+                id=int(r[0]),
+                guild_id=int(r[1]),
+                channel_id=int(r[2]),
+                creator_id=int(r[3]),
+                claimed_by_id=int(r[4]) if r[4] is not None else None,
+                type_key=str(r[5]),
+                type_label=str(r[6]),
+                status=str(r[7]),
+                created_at=r[8],
+                closed_at=r[9],
+                close_reason=str(r[10]) if r[10] is not None else None,
+                intake_answers_json=str(r[11]) if r[11] is not None else None,
+            )
+            for r in rows
+        ]
+
     async def count_open_tickets_for_user(self, guild_id: int, user_id: int) -> int:
         async with self.sessionmaker() as session:
             row = (
@@ -1753,6 +1860,22 @@ class TicketsCog(commands.Cog):
                 reason="Claim lock cleared",
             )
 
+    async def _clear_user_ticket_override(
+        self,
+        channel: discord.TextChannel,
+        user_id: int,
+        *,
+        reason: str,
+    ) -> None:
+        try:
+            await channel.set_permissions(
+                discord.Object(id=int(user_id)),
+                overwrite=None,
+                reason=reason,
+            )
+        except discord.HTTPException:
+            pass
+
     async def create_ticket_from_modal(
         self,
         interaction: discord.Interaction,
@@ -2087,14 +2210,11 @@ a {{
                 return
 
             if previous_claimer_id:
-                try:
-                    await interaction.channel.set_permissions(
-                        discord.Object(id=previous_claimer_id),
-                        overwrite=None,
-                        reason=f"Ticket claim overridden by {interaction.user.id}",
-                    )
-                except discord.HTTPException:
-                    pass
+                await self._clear_user_ticket_override(
+                    interaction.channel,
+                    previous_claimer_id,
+                    reason=f"Ticket claim overridden by {interaction.user.id}",
+                )
 
             await self.set_ticket_claim(ticket.id, interaction.user.id)
             await self._apply_claim_lock(interaction.guild, interaction.channel, cfg, ttype, interaction.user.id)
@@ -2106,6 +2226,72 @@ a {{
             if not interaction.response.is_done():
                 await interaction.response.send_message(
                     PUBLIC_TICKET_CLAIM_MESSAGE.format(user_mention=interaction.user.mention),
+                    ephemeral=False,
+                )
+
+    async def handle_unclaim(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or interaction.channel is None or not isinstance(interaction.user, discord.Member):
+            if not interaction.response.is_done():
+                await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+        if not isinstance(interaction.channel, discord.TextChannel):
+            if not interaction.response.is_done():
+                await interaction.response.send_message("This is not a text channel.", ephemeral=True)
+            return
+
+        async with self._lock:
+            ticket = await self.fetch_ticket_by_channel(interaction.channel.id)
+            if ticket is None:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("This channel is not a tracked ticket.", ephemeral=True)
+                return
+
+            cfg = await self.fetch_config(interaction.guild.id)
+            ttype = await self.fetch_ticket_type(interaction.guild.id, ticket.type_key)
+            if cfg is None:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("Ticket config is missing.", ephemeral=True)
+                return
+
+            if ticket.status != "open":
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("Only open tickets can be unclaimed.", ephemeral=True)
+                return
+
+            if ticket.claimed_by_id is None:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("This ticket is not currently claimed.", ephemeral=True)
+                return
+
+            can_force_unclaim = (
+                interaction.user.guild_permissions.administrator
+                or interaction.user.guild_permissions.manage_guild
+                or self._is_head_mod(interaction.user, cfg)
+            )
+            if int(ticket.claimed_by_id) != interaction.user.id and not can_force_unclaim:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        "Only the current claimer or Head Mod+ can unclaim this ticket.",
+                        ephemeral=True,
+                    )
+                return
+
+            previous_claimer_id = int(ticket.claimed_by_id)
+            await self.set_ticket_claim(ticket.id, None)
+            await self._clear_user_ticket_override(
+                interaction.channel,
+                previous_claimer_id,
+                reason=f"Ticket unclaimed by {interaction.user.id}",
+            )
+            await self._clear_claim_lock(interaction.guild, interaction.channel, cfg, ttype)
+
+            fresh = await self.fetch_ticket_by_id(ticket.id)
+            if fresh:
+                await self._regen_ticket_header(interaction.guild, interaction.channel, fresh)
+
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"✅ Ticket unclaimed by {interaction.user.mention}.",
                     ephemeral=False,
                 )
 
@@ -2795,6 +2981,10 @@ a {{
     async def tickets_claim(self, interaction: discord.Interaction) -> None:
         await self.handle_claim(interaction)
 
+    @tickets.command(name="unclaim", description="Unclaim the current ticket.")
+    async def tickets_unclaim(self, interaction: discord.Interaction) -> None:
+        await self.handle_unclaim(interaction)
+
     @tickets.command(name="transcript", description="Export the current ticket transcript.")
     async def tickets_transcript(self, interaction: discord.Interaction) -> None:
         await self.handle_transcript(interaction)
@@ -2941,6 +3131,77 @@ a {{
         e.add_field(name="Created", value=_fmt_dt(ticket.created_at), inline=True)
         e.add_field(name="Closed", value=_fmt_dt(ticket.closed_at) if ticket.closed_at else "Not closed", inline=True)
         e.add_field(name="Channel", value=interaction.channel.mention, inline=True)
+
+        await interaction.response.send_message(embed=e, ephemeral=True)
+
+    @tickets.command(name="my_open", description="List your currently open tickets.")
+    async def tickets_my_open(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+
+        rows = await self.fetch_open_tickets_for_user(interaction.guild.id, interaction.user.id, limit=10)
+        if not rows:
+            await interaction.response.send_message("You have no open tickets right now.", ephemeral=True)
+            return
+
+        e = discord.Embed(
+            title="Your Open Tickets",
+            color=discord.Color(DEFAULT_BLUE),
+            timestamp=_utc_now(),
+        )
+        lines: list[str] = []
+        for t in rows:
+            channel = interaction.guild.get_channel(t.channel_id)
+            channel_ref = channel.mention if isinstance(channel, discord.TextChannel) else f"`deleted-channel:{t.channel_id}`"
+            claimed = f"<@{t.claimed_by_id}>" if t.claimed_by_id else "Unclaimed"
+            lines.append(
+                f"• `#{t.id}` {channel_ref} • **{t.type_label}** • {claimed} • Opened {_fmt_dt(t.created_at)}"
+            )
+
+        for idx, chunk in enumerate(_chunk_lines(lines, 900), start=1):
+            e.add_field(name="Tickets" if idx == 1 else f"Tickets {idx}", value=chunk, inline=False)
+
+        await interaction.response.send_message(embed=e, ephemeral=True)
+
+    @tickets.command(name="queue", description="Show currently open tickets for staff triage.")
+    async def tickets_queue(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+
+        cfg = await self.fetch_config(interaction.guild.id)
+        if cfg is None:
+            await interaction.response.send_message("Ticket system is not configured.", ephemeral=True)
+            return
+
+        if not self._is_staff(interaction.user, cfg, None):
+            await interaction.response.send_message("Only staff can view the queue.", ephemeral=True)
+            return
+
+        rows = await self.fetch_open_tickets_for_guild(interaction.guild.id, limit=25)
+        if not rows:
+            await interaction.response.send_message("No open tickets in queue.", ephemeral=True)
+            return
+
+        e = discord.Embed(
+            title="Open Ticket Queue",
+            color=discord.Color.orange(),
+            timestamp=_utc_now(),
+            description="Oldest tickets are listed first.",
+        )
+
+        lines: list[str] = []
+        for t in rows:
+            channel = interaction.guild.get_channel(t.channel_id)
+            channel_ref = channel.mention if isinstance(channel, discord.TextChannel) else f"`deleted-channel:{t.channel_id}`"
+            claimer = f"<@{t.claimed_by_id}>" if t.claimed_by_id else "**Unclaimed**"
+            lines.append(
+                f"• `#{t.id}` {channel_ref} • {claimer} • Opened {_fmt_dt(t.created_at)} • by <@{t.creator_id}> • `{t.type_key}`"
+            )
+
+        for idx, chunk in enumerate(_chunk_lines(lines, 900), start=1):
+            e.add_field(name="Queue" if idx == 1 else f"Queue {idx}", value=chunk, inline=False)
 
         await interaction.response.send_message(embed=e, ephemeral=True)
 
