@@ -17,6 +17,9 @@ class BanDraft:
     target_display: str = "Not selected"
     reason: str = "No reason provided"
     delete_days: int = 0
+    dm_enabled: bool = True
+    dm_message: str = "You have been banned from Licka Sto."
+    appeal_url: str = ""
 
 
 class BanReasonModal(discord.ui.Modal, title="Set ban reason"):
@@ -62,6 +65,93 @@ class BanDeleteDaysModal(discord.ui.Modal, title="Set message delete window"):
         await self.view.refresh_message(interaction)
 
 
+class BanDmMessageModal(discord.ui.Modal, title="Set DM message"):
+    message = discord.ui.TextInput(
+        label="DM Message",
+        placeholder="You have been banned from Licka Sto.",
+        required=True,
+        max_length=500,
+        style=discord.TextStyle.paragraph,
+    )
+
+    def __init__(self, view: "BanControlsView"):
+        super().__init__()
+        self.view = view
+        self.message.default = view.draft.dm_message
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        value = str(self.message.value).strip()
+        if not value:
+            await interaction.response.send_message("DM message cannot be empty.", ephemeral=True)
+            return
+        self.view.draft.dm_message = value
+        await self.view.refresh_message(interaction)
+
+
+class BanAppealModal(discord.ui.Modal, title="Set appeal URL"):
+    appeal_url = discord.ui.TextInput(
+        label="Appeal URL (optional)",
+        placeholder="https://example.com/appeal",
+        required=False,
+        max_length=200,
+    )
+
+    def __init__(self, view: "BanControlsView"):
+        super().__init__()
+        self.view = view
+        self.appeal_url.default = view.draft.appeal_url
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        value = str(self.appeal_url.value).strip()
+        if value and not (value.startswith("https://") or value.startswith("http://")):
+            await interaction.response.send_message("Appeal URL must start with http:// or https://", ephemeral=True)
+            return
+        self.view.draft.appeal_url = value
+        await self.view.refresh_message(interaction)
+
+
+class BanTargetIdModal(discord.ui.Modal, title="Set target by user ID"):
+    user_id = discord.ui.TextInput(
+        label="User ID",
+        placeholder="123456789012345678",
+        required=True,
+        max_length=20,
+    )
+
+    def __init__(self, view: "BanControlsView"):
+        super().__init__()
+        self.view = view
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = str(self.user_id.value).strip()
+        if not raw.isdigit():
+            await interaction.response.send_message("Please enter a valid numeric Discord user ID.", ephemeral=True)
+            return
+        target_id = int(raw)
+        self.view.draft.target_id = target_id
+        self.view.draft.target_display = f"<@{target_id}> (`{target_id}`)"
+        await self.view.refresh_message(interaction)
+
+
+class BanConfirmModal(discord.ui.Modal, title="Confirm ban"):
+    confirmation = discord.ui.TextInput(
+        label="Type BAN to confirm",
+        placeholder="BAN",
+        required=True,
+        max_length=3,
+    )
+
+    def __init__(self, view: "BanControlsView"):
+        super().__init__()
+        self.view = view
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if str(self.confirmation.value).strip().upper() != "BAN":
+            await interaction.response.send_message("Ban confirmation failed. Type exactly `BAN`.", ephemeral=True)
+            return
+        await self.view.execute_ban(interaction)
+
+
 class BanTargetSelect(discord.ui.UserSelect):
     def __init__(self, owner_id: int):
         super().__init__(
@@ -103,8 +193,9 @@ class BanTargetPickerView(discord.ui.View):
 
 
 class BanControlsView(discord.ui.View):
-    def __init__(self, *, moderator_id: int):
+    def __init__(self, *, moderator_id: int, bot: commands.Bot):
         super().__init__(timeout=300)
+        self.bot = bot
         self.draft = BanDraft(moderator_id=moderator_id)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -122,6 +213,10 @@ class BanControlsView(discord.ui.View):
         embed.add_field(name="Target", value=self.draft.target_display, inline=False)
         embed.add_field(name="Reason", value=self.draft.reason, inline=False)
         embed.add_field(name="Delete Messages", value=f"{self.draft.delete_days} day(s)", inline=True)
+        embed.add_field(name="DM User", value="Enabled ✅" if self.draft.dm_enabled else "Disabled ❌", inline=True)
+        appeal_value = self.draft.appeal_url if self.draft.appeal_url else "Not set"
+        embed.add_field(name="Appeal URL", value=appeal_value, inline=False)
+        embed.add_field(name="DM Message Preview", value=self.draft.dm_message, inline=False)
         embed.set_footer(text="Only the staff member who opened this panel can interact.")
         return embed
 
@@ -161,16 +256,36 @@ class BanControlsView(discord.ui.View):
     async def set_delete_days(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.send_modal(BanDeleteDaysModal(self))
 
-    @discord.ui.button(label="Preview", style=discord.ButtonStyle.secondary, emoji="🔄", row=1)
+    @discord.ui.button(label="Set User ID", style=discord.ButtonStyle.secondary, emoji="🆔", row=1)
+    async def set_user_id(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.send_modal(BanTargetIdModal(self))
+
+    @discord.ui.button(label="DM Toggle", style=discord.ButtonStyle.secondary, emoji="📩", row=1)
+    async def toggle_dm(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.draft.dm_enabled = not self.draft.dm_enabled
+        await self.refresh_message(interaction)
+
+    @discord.ui.button(label="Set DM", style=discord.ButtonStyle.secondary, emoji="💬", row=1)
+    async def set_dm_message(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.send_modal(BanDmMessageModal(self))
+
+    @discord.ui.button(label="Set Appeal", style=discord.ButtonStyle.secondary, emoji="🪪", row=2)
+    async def set_appeal(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.send_modal(BanAppealModal(self))
+
+    @discord.ui.button(label="Preview", style=discord.ButtonStyle.secondary, emoji="🔄", row=2)
     async def preview(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.refresh_message(interaction)
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️", row=1)
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️", row=2)
     async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.disable_all(interaction, note="Ban cancelled.")
 
-    @discord.ui.button(label="Confirm Ban", style=discord.ButtonStyle.danger, emoji="⛔", row=1)
+    @discord.ui.button(label="Confirm Ban", style=discord.ButtonStyle.danger, emoji="⛔", row=2)
     async def confirm_ban(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.send_modal(BanConfirmModal(self))
+
+    async def execute_ban(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or interaction.user is None:
             await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
             return
@@ -182,7 +297,7 @@ class BanControlsView(discord.ui.View):
         guild = interaction.guild
         moderator = guild.get_member(interaction.user.id)
         target_member = guild.get_member(self.draft.target_id)
-        target_user: discord.abc.Snowflake = target_member or discord.Object(id=self.draft.target_id)
+        target_user: discord.abc.User | discord.Object | None = target_member
 
         if self.draft.target_id == interaction.user.id:
             await interaction.response.send_message("You cannot ban yourself.", ephemeral=True)
@@ -206,8 +321,36 @@ class BanControlsView(discord.ui.View):
             await interaction.response.send_message("I cannot ban that user due to role hierarchy.", ephemeral=True)
             return
 
+        if target_user is None:
+            target_user = self.bot.get_user(self.draft.target_id)
+
+        if target_user is None:
+            try:
+                target_user = await self.bot.fetch_user(self.draft.target_id)
+            except discord.NotFound:
+                await interaction.response.send_message("That user ID does not exist.", ephemeral=True)
+                return
+            except discord.HTTPException:
+                target_user = discord.Object(id=self.draft.target_id)
+
         delete_seconds = self.draft.delete_days * 24 * 60 * 60
         reason = f"{self.draft.reason} | by {interaction.user} ({interaction.user.id})"
+        dm_status = "Skipped"
+
+        if self.draft.dm_enabled:
+            dm_text = self.draft.dm_message
+            if self.draft.appeal_url:
+                dm_text = f"{dm_text}\nAppeal: {self.draft.appeal_url}"
+            try:
+                if isinstance(target_user, discord.User) or isinstance(target_user, discord.Member):
+                    await target_user.send(dm_text)
+                    dm_status = "Sent ✅"
+                else:
+                    dm_status = "Skipped (user object unavailable)"
+            except discord.Forbidden:
+                dm_status = "Failed (DMs closed)"
+            except discord.HTTPException:
+                dm_status = "Failed (HTTP error)"
 
         try:
             await guild.ban(target_user, reason=reason, delete_message_seconds=delete_seconds)
@@ -218,7 +361,7 @@ class BanControlsView(discord.ui.View):
             await interaction.response.send_message(f"Ban failed: {exc}", ephemeral=True)
             return
 
-        await self.disable_all(interaction, note=f"✅ Banned <@{self.draft.target_id}>.")
+        await self.disable_all(interaction, note=f"✅ Banned <@{self.draft.target_id}>. DM: {dm_status}")
 
 
 class BanCog(commands.Cog):
@@ -229,7 +372,7 @@ class BanCog(commands.Cog):
     @app_commands.checks.has_permissions(ban_members=True)
     @app_commands.guild_only()
     async def ban(self, interaction: discord.Interaction) -> None:
-        view = BanControlsView(moderator_id=interaction.user.id)
+        view = BanControlsView(moderator_id=interaction.user.id, bot=self.bot)
         await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
 
     @ban.error
