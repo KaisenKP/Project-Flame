@@ -63,6 +63,7 @@ from discord.ext import commands
 from sqlalchemy import select, text
 
 from db.models import AdminAuditLogRow, BusinessAutoHireSessionRow, BusinessManagerAssignmentRow, BusinessOwnershipRow, BusinessRunRow, BusinessWorkerAssignmentRow, BusinessWorkerMigrationStateRow, WalletRow
+from db.engine import get_engine
 from services.db import sessions
 from services.achievements import check_and_grant_achievements, queue_achievement_announcements
 from services.users import ensure_user_rows
@@ -4459,14 +4460,14 @@ class BusinessCog(commands.Cog):
             "worker_migration_summary_seen": "ALTER TABLE business_ownership ADD COLUMN worker_migration_summary_seen TINYINT(1) NOT NULL DEFAULT 0",
         }
 
-        async with self.sessionmaker() as session:
-            # NOTE:
-            #   MySQL/MariaDB DDL (ALTER TABLE) performs implicit commits.
-            #   Wrapping these statements in `session.begin()` can close the active
-            #   transaction mid-context, and SQLAlchemy then raises:
-            #   "Can't operate on closed transaction inside context manager".
-            #   Keep this migration path outside an explicit transaction.
-            present_rows = await session.execute(
+        # NOTE:
+        #   MySQL/MariaDB DDL (ALTER TABLE) performs implicit commits.
+        #   Keep schema probing + ALTER statements on an autocommit connection,
+        #   never inside AsyncSession transaction contexts.
+        engine = get_engine()
+        async with engine.connect() as conn:
+            autocommit_conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
+            present_rows = await autocommit_conn.execute(
                 text(
                     """
                     SELECT COLUMN_NAME
@@ -4480,7 +4481,7 @@ class BusinessCog(commands.Cog):
             for column_name, ddl in target_columns.items():
                 if column_name in present:
                     continue
-                await session.execute(text(ddl))
+                await autocommit_conn.execute(text(ddl))
                 log.warning("Patched missing column on business_ownership: %s", column_name)
 
     def _auto_hire_task_key(self, *, guild_id: int, user_id: int, business_key: str, staff_kind: str) -> str:
