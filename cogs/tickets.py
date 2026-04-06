@@ -174,11 +174,22 @@ class TicketRow:
 
 
 class TicketOpenModal(discord.ui.Modal, title="Open Ticket"):
-    def __init__(self, cog: "TicketsCog", ticket_type: TicketTypeRow):
+    def __init__(
+        self,
+        cog: "TicketsCog",
+        ticket_type: TicketTypeRow,
+        *,
+        prefilled_answers: list[dict[str, str]] | None = None,
+        skip_first_question: bool = False,
+        allow_empty_form: bool = False,
+    ):
         super().__init__(timeout=300)
         self.cog = cog
         self.ticket_type = ticket_type
+        self.prefilled_answers = list(prefilled_answers or [])
         self.qdefs = _safe_json_load(ticket_type.questions_json, [])
+        if skip_first_question and self.qdefs:
+            self.qdefs = self.qdefs[1:]
 
         normalized: list[dict[str, Any]] = []
         for q in self.qdefs[:5]:
@@ -194,7 +205,7 @@ class TicketOpenModal(discord.ui.Modal, title="Open Ticket"):
                 }
             )
 
-        if not normalized:
+        if not normalized and not allow_empty_form:
             normalized = [
                 {
                     "label": "What do you need help with?",
@@ -218,12 +229,59 @@ class TicketOpenModal(discord.ui.Modal, title="Open Ticket"):
             self.add_item(ti)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        answers = [{"label": ti.label, "value": ti.value} for ti in self._inputs]
+        answers = list(self.prefilled_answers)
+        answers.extend({"label": ti.label, "value": ti.value} for ti in self._inputs)
         await self.cog.create_ticket_from_modal(
             interaction=interaction,
             ticket_type=self.ticket_type,
             answers=answers,
         )
+
+
+class ReportUserSelectView(discord.ui.View):
+    def __init__(self, cog: "TicketsCog", opener_id: int, ticket_type: TicketTypeRow):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.opener_id = int(opener_id)
+        self.ticket_type = ticket_type
+
+        user_select = discord.ui.UserSelect(
+            placeholder="Pick the user you want to report",
+            min_values=1,
+            max_values=1,
+        )
+
+        async def user_select_callback(interaction: discord.Interaction) -> None:
+            if interaction.user is None or int(interaction.user.id) != self.opener_id:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("Only the user opening this report can select a target.", ephemeral=True)
+                return
+
+            selected = user_select.values[0]
+            if int(selected.id) == self.opener_id:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("You can only report another user.", ephemeral=True)
+                return
+
+            prefilled_answers = [
+                {
+                    "label": "Who are you reporting?",
+                    "value": f"{selected.mention} (`{selected.id}`)",
+                }
+            ]
+            await interaction.response.send_modal(
+                TicketOpenModal(
+                    self.cog,
+                    self.ticket_type,
+                    prefilled_answers=prefilled_answers,
+                    skip_first_question=True,
+                    allow_empty_form=True,
+                )
+            )
+            self.stop()
+
+        user_select.callback = user_select_callback
+        self.add_item(user_select)
 
 
 class TicketPanelView(discord.ui.View):
@@ -254,6 +312,21 @@ class TicketPanelView(discord.ui.View):
             if current is None or not current.enabled:
                 if not interaction.response.is_done():
                     await interaction.response.send_message("That ticket option is disabled right now.", ephemeral=True)
+                return
+
+            if current.type_key == "report":
+                embed = discord.Embed(
+                    title="Report Ticket",
+                    description="Pick the user you want to report using the selector below.",
+                    color=discord.Color.red(),
+                    timestamp=_utc_now(),
+                )
+                embed.set_footer(text="After selecting a user, you'll fill out the report details.")
+                await interaction.response.send_message(
+                    embed=embed,
+                    view=ReportUserSelectView(self.cog, interaction.user.id, current),
+                    ephemeral=True,
+                )
                 return
 
             await interaction.response.send_modal(TicketOpenModal(self.cog, current))
