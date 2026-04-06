@@ -130,6 +130,8 @@ try:
         roll_manager_candidate,
         _generate_worker_roll,
         _generate_manager_roll,
+        worker_rarity_weights,
+        manager_rarity_weights,
         WORKER_CANDIDATE_REROLL_COST,
         MANAGER_CANDIDATE_REROLL_COST,
         remove_manager,
@@ -650,6 +652,33 @@ except NameError:
             "auto_restart_charges": 0,
         }
 
+try:
+    worker_rarity_weights
+except NameError:
+    def worker_rarity_weights(*, prestige: int) -> list[tuple[str, int]]:
+        _ = prestige
+        return [
+            ("common", 3600),
+            ("uncommon", 2600),
+            ("rare", 2200),
+            ("epic", 1200),
+            ("legendary", 320),
+            ("mythic", 80),
+        ]
+
+try:
+    manager_rarity_weights
+except NameError:
+    def manager_rarity_weights(*, prestige: int) -> list[tuple[str, int]]:
+        _ = prestige
+        return [
+            ("common", 5000),
+            ("rare", 2800),
+            ("epic", 1400),
+            ("legendary", 620),
+            ("mythical", 180),
+        ]
+
 # =========================================================
 # CONSTANTS
 # =========================================================
@@ -1055,9 +1084,16 @@ def _worker_special_line(candidate: object) -> str | None:
     return mapping.get(worker_type)
 
 
-def _worker_odds_lines() -> tuple[str, None]:
-    odds = (("common", 0.58), ("uncommon", 0.24), ("rare", 0.12), ("epic", 0.05), ("mythical", 0.01))
-    base = " • ".join(f"{_worker_rarity_badge(name)} {int(chance * 100)}%" for name, chance in odds)
+def _weight_to_percent(weight: int, total_weight: int) -> str:
+    total = max(int(total_weight), 1)
+    value = max(int(weight), 0) * 100 / total
+    return f"{int(value)}%" if float(value).is_integer() else f"{value:.1f}%"
+
+
+def _worker_odds_lines(*, prestige: int = 0) -> tuple[str, None]:
+    weights = worker_rarity_weights(prestige=int(prestige))
+    total_weight = sum(max(int(weight), 0) for _, weight in weights)
+    base = " • ".join(f"{_worker_rarity_badge(name)} {_weight_to_percent(weight, total_weight)}" for name, weight in weights)
     return f"Base Odds: {base}", None
 
 
@@ -1197,9 +1233,10 @@ def _manager_embed_color(detail: BusinessManageSnapshot, slots: Sequence[Manager
     return _hub_color_for_business_key(getattr(detail, "key", None))
 
 
-def _manager_odds_lines() -> tuple[str, Optional[str]]:
-    odds = (("common", 0.60), ("rare", 0.25), ("epic", 0.10), ("legendary", 0.04), ("mythical", 0.01))
-    base = " • ".join(f"{_manager_rarity_badge(name)} {int(chance * 100)}%" for name, chance in odds)
+def _manager_odds_lines(*, prestige: int = 0) -> tuple[str, Optional[str]]:
+    weights = manager_rarity_weights(prestige=int(prestige))
+    total_weight = sum(max(int(weight), 0) for _, weight in weights)
+    base = " • ".join(f"{_manager_rarity_badge(name)} {_weight_to_percent(weight, total_weight)}" for name, weight in weights)
     return f"Base Odds: {base}", None
 
 
@@ -1852,7 +1889,7 @@ def _build_worker_assignments_embed(
     start = current_page * _ASSIGNMENTS_PAGE_SIZE
     visible_slots = all_slots[start:start + _ASSIGNMENTS_PAGE_SIZE]
     summary_line, special_line, slot_fill = _build_worker_summary_lines(all_slots)
-    odds_line, adjusted_odds_line = _worker_odds_lines()
+    odds_line, adjusted_odds_line = _worker_odds_lines(prestige=int(getattr(detail, "prestige", 0) or 0))
     color = _worker_embed_color(detail, all_slots)
     title = f"Worker Roster • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}"
     description = f"{slot_fill}\nHire, organize, and manage your workforce. (Base 3 slots +1 per prestige)"
@@ -1922,7 +1959,7 @@ def _build_manager_assignments_embed(
     start = current_page * _ASSIGNMENTS_PAGE_SIZE
     visible_slots = all_slots[start:start + _ASSIGNMENTS_PAGE_SIZE]
     summary_line, special_line, slot_fill = _build_manager_summary_lines(all_slots)
-    odds_line, adjusted_odds_line = _manager_odds_lines()
+    odds_line, adjusted_odds_line = _manager_odds_lines(prestige=int(getattr(detail, "prestige", 0) or 0))
     color = _manager_embed_color(detail, all_slots)
     title = f"Manager Roster • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}"
     description = f"{slot_fill}\nHire, reroll, and manage staff for this business. (Base 3 slots +1 per prestige)"
@@ -2161,7 +2198,7 @@ def _build_worker_candidate_embed(
 ) -> discord.Embed:
     tags = _worker_compare_tags(candidate, current_candidate=current_candidate, slots=slots)
     rarity_badge = _worker_rarity_badge(candidate.rarity)
-    odds_line, adjusted_odds_line = _worker_odds_lines()
+    odds_line, adjusted_odds_line = _worker_odds_lines(prestige=int(getattr(detail, "prestige", 0) or 0))
     e = _base_embed(
         title=f"{stage_label} • {_safe_str(getattr(detail, 'emoji', None), '🏢')} {_safe_str(getattr(detail, 'name', None), 'Business')}",
         description=status_line or "A new recruit is ready to join your workforce.",
@@ -2199,7 +2236,7 @@ def _build_manager_candidate_embed(
     stage_label: str = "New Candidate Found",
     status_line: str | None = None,
 ) -> discord.Embed:
-    odds_line, adjusted_odds_line = _manager_odds_lines()
+    odds_line, adjusted_odds_line = _manager_odds_lines(prestige=int(getattr(detail, "prestige", 0) or 0))
     color = _manager_embed_color(detail, list(slots or []), candidate)
     rarity_badge = _manager_rarity_badge(candidate.rarity)
     power = int(getattr(candidate, 'profit_bonus_bp', 0) or 0)
