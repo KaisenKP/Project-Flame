@@ -4460,23 +4460,28 @@ class BusinessCog(commands.Cog):
         }
 
         async with self.sessionmaker() as session:
-            async with session.begin():
-                present_rows = await session.execute(
-                    text(
-                        """
-                        SELECT COLUMN_NAME
-                        FROM information_schema.COLUMNS
-                        WHERE TABLE_SCHEMA = DATABASE()
-                          AND TABLE_NAME = 'business_ownership'
-                        """
-                    )
+            # NOTE:
+            #   MySQL/MariaDB DDL (ALTER TABLE) performs implicit commits.
+            #   Wrapping these statements in `session.begin()` can close the active
+            #   transaction mid-context, and SQLAlchemy then raises:
+            #   "Can't operate on closed transaction inside context manager".
+            #   Keep this migration path outside an explicit transaction.
+            present_rows = await session.execute(
+                text(
+                    """
+                    SELECT COLUMN_NAME
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = 'business_ownership'
+                    """
                 )
-                present = {str(row[0]).strip().lower() for row in present_rows if row and row[0]}
-                for column_name, ddl in target_columns.items():
-                    if column_name in present:
-                        continue
-                    await session.execute(text(ddl))
-                    log.warning("Patched missing column on business_ownership: %s", column_name)
+            )
+            present = {str(row[0]).strip().lower() for row in present_rows if row and row[0]}
+            for column_name, ddl in target_columns.items():
+                if column_name in present:
+                    continue
+                await session.execute(text(ddl))
+                log.warning("Patched missing column on business_ownership: %s", column_name)
 
     def _auto_hire_task_key(self, *, guild_id: int, user_id: int, business_key: str, staff_kind: str) -> str:
         return f"{int(guild_id)}:{int(user_id)}:{str(business_key)}:{str(staff_kind)}"
