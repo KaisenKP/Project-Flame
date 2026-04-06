@@ -60,6 +60,7 @@ Design choices in this version:
 """
 
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 import random
 from dataclasses import dataclass
@@ -207,6 +208,47 @@ def _is_retryable_operational_error(exc: Exception) -> bool:
         if args:
             code = args[0]
     return code in {1205, 1213}
+
+
+@asynccontextmanager
+async def _run_processing_scope(session, *, owner: str, phase: str):
+    """
+    Isolate per-run failures so one bad run never poisons the outer startup/runtime transaction.
+    """
+    rollback_occurred = False
+    tx_active_before = bool(session.in_transaction())
+    nested_before = bool(session.in_nested_transaction())
+    log.debug(
+        "Business transaction scope enter | owner=%s phase=%s tx_active=%s nested_active=%s",
+        owner,
+        phase,
+        tx_active_before,
+        nested_before,
+    )
+    try:
+        cm = session.begin_nested() if tx_active_before else session.begin()
+        async with cm:
+            yield
+    except Exception:
+        rollback_occurred = True
+        log.exception(
+            "Business transaction scope failed | owner=%s phase=%s rollback=%s tx_active_after=%s nested_active_after=%s",
+            owner,
+            phase,
+            rollback_occurred,
+            bool(session.in_transaction()),
+            bool(session.in_nested_transaction()),
+        )
+        raise
+    finally:
+        log.debug(
+            "Business transaction scope exit | owner=%s phase=%s rollback=%s tx_active=%s nested_active=%s",
+            owner,
+            phase,
+            rollback_occurred,
+            bool(session.in_transaction()),
+            bool(session.in_nested_transaction()),
+        )
 
 
 # =========================================================
@@ -592,8 +634,10 @@ async def tick_active_runs_in_session(
     completed_notices: list[CompletedRunNotice] = []
 
     for run in runs:
+        phase = f"run:{getattr(run, 'id', '?')}"
         try:
-            result = await process_single_run(session, run=run, now=now)
+            async with _run_processing_scope(session, owner="tick_active_runs_in_session", phase=phase):
+                result = await process_single_run(session, run=run, now=now)
             if not result.skipped:
                 processed_runs += 1
             if result.completed:
@@ -628,11 +672,15 @@ async def tick_active_runs_in_session(
         except Exception:
             errored_runs += 1
             log.exception(
-                "Failed processing business run id=%s guild=%s user=%s business=%s",
+                "Failed processing business run id=%s guild=%s user=%s business=%s owner=%s phase=%s tx_active=%s nested_active=%s",
                 getattr(run, "id", "?"),
                 getattr(run, "guild_id", "?"),
                 getattr(run, "user_id", "?"),
                 getattr(run, "business_key", "?"),
+                "tick_active_runs_in_session",
+                phase,
+                bool(session.in_transaction()),
+                bool(session.in_nested_transaction()),
             )
 
     return RuntimeTickResult(

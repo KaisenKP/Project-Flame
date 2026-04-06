@@ -45,6 +45,7 @@ How this file is intended to be used:
   matching the rest of your economy architecture
 """
 
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -101,6 +102,44 @@ from db.models import (
 )
 
 log = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _migration_scope(session, *, owner: str, phase: str):
+    rollback_occurred = False
+    tx_active_before = bool(session.in_transaction())
+    nested_before = bool(session.in_nested_transaction())
+    log.debug(
+        "Business migration scope enter | owner=%s phase=%s tx_active=%s nested_active=%s",
+        owner,
+        phase,
+        tx_active_before,
+        nested_before,
+    )
+    try:
+        cm = session.begin_nested() if tx_active_before else session.begin()
+        async with cm:
+            yield
+    except Exception:
+        rollback_occurred = True
+        log.exception(
+            "Business migration scope failed | owner=%s phase=%s rollback=%s tx_active_after=%s nested_active_after=%s",
+            owner,
+            phase,
+            rollback_occurred,
+            bool(session.in_transaction()),
+            bool(session.in_nested_transaction()),
+        )
+        raise
+    finally:
+        log.debug(
+            "Business migration scope exit | owner=%s phase=%s rollback=%s tx_active=%s nested_active=%s",
+            owner,
+            phase,
+            rollback_occurred,
+            bool(session.in_transaction()),
+            bool(session.in_nested_transaction()),
+        )
 
 # =========================================================
 # DATACLASSES CONSUMED BY cog.py
@@ -1473,11 +1512,11 @@ async def migrate_worker_system_for_all_users(session) -> dict[str, int]:
     skipped = 0
     failed = 0
     for ownership in ownership_rows:
+        phase = f"ownership:{getattr(ownership, 'id', '?')}"
         try:
-            # Run each ownership migration inside its own SAVEPOINT so one bad
-            # row cannot poison the parent transaction and break subsequent
-            # iterations with "closed transaction inside context manager".
-            async with session.begin_nested():
+            # Run each ownership migration in an isolated scope so one bad row
+            # cannot poison the parent transaction/session lifecycle.
+            async with _migration_scope(session, owner="migrate_worker_system_for_all_users", phase=phase):
                 changed = await migrate_worker_system_for_ownership(session, ownership_id=int(ownership.id))
             if changed:
                 migrated += 1
@@ -1486,11 +1525,15 @@ async def migrate_worker_system_for_all_users(session) -> dict[str, int]:
         except Exception:
             failed += 1
             log.exception(
-                "worker system migration failed | ownership_id=%s guild_id=%s user_id=%s business=%s",
+                "worker system migration failed | ownership_id=%s guild_id=%s user_id=%s business=%s owner=%s phase=%s tx_active=%s nested_active=%s",
                 getattr(ownership, "id", None),
                 getattr(ownership, "guild_id", None),
                 getattr(ownership, "user_id", None),
                 getattr(ownership, "business_key", None),
+                "migrate_worker_system_for_all_users",
+                phase,
+                bool(session.in_transaction()),
+                bool(session.in_nested_transaction()),
             )
     return {"migrated": migrated, "skipped": skipped, "failed": failed}
 
