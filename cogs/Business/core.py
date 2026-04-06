@@ -1512,12 +1512,16 @@ async def migrate_worker_system_for_all_users(session) -> dict[str, int]:
     skipped = 0
     failed = 0
     for ownership in ownership_rows:
-        phase = f"ownership:{getattr(ownership, 'id', '?')}"
+        ownership_id = int(getattr(ownership, "id", 0) or 0)
+        guild_id = int(getattr(ownership, "guild_id", 0) or 0)
+        user_id = int(getattr(ownership, "user_id", 0) or 0)
+        business_key = str(getattr(ownership, "business_key", "") or "")
+        phase = f"ownership:{ownership_id or '?'}"
         try:
             # Run each ownership migration in an isolated scope so one bad row
             # cannot poison the parent transaction/session lifecycle.
             async with _migration_scope(session, owner="migrate_worker_system_for_all_users", phase=phase):
-                changed = await migrate_worker_system_for_ownership(session, ownership_id=int(ownership.id))
+                changed = await migrate_worker_system_for_ownership(session, ownership_id=ownership_id)
             if changed:
                 migrated += 1
             else:
@@ -1526,10 +1530,10 @@ async def migrate_worker_system_for_all_users(session) -> dict[str, int]:
             failed += 1
             log.exception(
                 "worker system migration failed | ownership_id=%s guild_id=%s user_id=%s business=%s owner=%s phase=%s tx_active=%s nested_active=%s",
-                getattr(ownership, "id", None),
-                getattr(ownership, "guild_id", None),
-                getattr(ownership, "user_id", None),
-                getattr(ownership, "business_key", None),
+                ownership_id,
+                guild_id,
+                user_id,
+                business_key,
                 "migrate_worker_system_for_all_users",
                 phase,
                 bool(session.in_transaction()),
@@ -1644,9 +1648,18 @@ async def migrate_worker_system_for_ownership(session, *, ownership_id: int) -> 
         session.add(migration_state)
         await session.flush()
     elif str(migration_state.status) == "completed":
-        ownership.worker_migration_version = WORKER_MIGRATION_VERSION
-        ownership.worker_system_generation = WORKER_GENERATION_VERSION
-        return False
+        existing_assignment_count = int(
+            await session.scalar(
+                select(func.count(BusinessWorkerAssignmentRow.id)).where(
+                    BusinessWorkerAssignmentRow.ownership_id == int(ownership.id),
+                )
+            )
+            or 0
+        )
+        if existing_assignment_count > 0:
+            ownership.worker_migration_version = WORKER_MIGRATION_VERSION
+            ownership.worker_system_generation = WORKER_GENERATION_VERSION
+            return False
 
     existing_archives = await session.scalars(
         select(BusinessWorkerArchiveRow).where(
@@ -1681,8 +1694,19 @@ async def migrate_worker_system_for_ownership(session, *, ownership_id: int) -> 
             )
         )
 
-    for row in worker_rows:
+    existing_assignment_rows = list(
+        (
+            await session.scalars(
+                select(BusinessWorkerAssignmentRow).where(
+                    BusinessWorkerAssignmentRow.ownership_id == int(ownership.id),
+                )
+            )
+        ).all()
+    )
+    for row in existing_assignment_rows:
         await session.delete(row)
+    # Ensure slot rows are physically removed before rebuilding assignment slots.
+    await session.flush()
 
     new_rows: list[BusinessWorkerAssignmentRow] = []
     merge_summaries: list[str] = []
