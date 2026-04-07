@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import discord
 from discord import app_commands
@@ -13,7 +14,15 @@ from services.db import sessions
 
 log = logging.getLogger(__name__)
 
-DEFAULT_WELCOME_MESSAGE = "Welcome {user_mention} to **{server_name}**!"
+DEFAULT_WELCOME_MESSAGE = (
+    "Welcome to Blaze and Silver’s Discord server! "
+    "Make sure to check out and read the #rules of the server. "
+    "Have fun and chat with us!"
+)
+DEFAULT_WELCOME_IMAGE_URL = (
+    "https://cdn.discordapp.com/attachments/1474117946954616947/1491106635999875103/"
+    "VRChat_2026-03-22_20-45-59.630_1920x1080.png"
+)
 
 
 def _safe_json_load(raw: str | None, fallback: list[int]) -> list[int]:
@@ -236,6 +245,26 @@ class CommunityToolsCog(commands.Cog):
         await self.upsert_config(cfg)
         return cfg
 
+    def _render_welcome_message(self, template: str, member: discord.Member) -> str:
+        return (
+            (template or DEFAULT_WELCOME_MESSAGE)
+            .replace("{user_mention}", member.mention)
+            .replace("{user_name}", member.display_name)
+            .replace("{server_name}", member.guild.name)
+        )
+
+    def _build_welcome_embed(self, member: discord.Member, *, template: str) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"✨ Welcome to {member.guild.name}!",
+            description=self._render_welcome_message(template, member),
+            color=discord.Color.from_rgb(255, 129, 217),
+            timestamp=datetime.now(tz=UTC),
+        )
+        embed.set_image(url=DEFAULT_WELCOME_IMAGE_URL)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text="We’re glad you’re here 💖")
+        return embed
+
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
         if member.guild is None or member.bot:
@@ -269,15 +298,9 @@ class CommunityToolsCog(commands.Cog):
         if cfg.welcome_channel_id:
             channel = member.guild.get_channel(cfg.welcome_channel_id)
             if isinstance(channel, discord.TextChannel):
-                message = cfg.welcome_message or DEFAULT_WELCOME_MESSAGE
-                rendered = (
-                    message
-                    .replace("{user_mention}", member.mention)
-                    .replace("{user_name}", member.display_name)
-                    .replace("{server_name}", member.guild.name)
-                )
+                embed = self._build_welcome_embed(member, template=cfg.welcome_message)
                 try:
-                    await channel.send(rendered)
+                    await channel.send(content=member.mention, embed=embed)
                 except discord.HTTPException:
                     log.warning("Welcome message failed in guild %s", member.guild.id)
 
@@ -318,13 +341,8 @@ class CommunityToolsCog(commands.Cog):
             await interaction.response.send_message("Welcome channel is missing. Set it again.", ephemeral=True)
             return
 
-        rendered = (
-            cfg.welcome_message
-            .replace("{user_mention}", interaction.user.mention)
-            .replace("{user_name}", interaction.user.display_name)
-            .replace("{server_name}", interaction.guild.name)
-        )
-        await channel.send(rendered)
+        embed = self._build_welcome_embed(interaction.user, template=cfg.welcome_message)
+        await channel.send(content=interaction.user.mention, embed=embed)
         await interaction.response.send_message(f"✅ Sent a welcome preview in {channel.mention}.", ephemeral=True)
 
     @community.command(name="autorole_set", description="Set roles that should be auto-assigned when users join.")
