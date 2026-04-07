@@ -7,7 +7,9 @@ import logging
 import os
 import signal
 import sys
+import traceback
 from pathlib import Path
+from typing import Any
 
 import discord
 
@@ -138,6 +140,15 @@ async def _maybe_create_tables() -> None:
 
 
 async def shutdown(bot: discord.Client, sig: str) -> None:
+    if hasattr(bot, "note_shutdown"):
+        try:
+            bot.note_shutdown(  # type: ignore[attr-defined]
+                reason=f"signal:{sig}",
+                intentional=False,
+                source="main.shutdown",
+            )
+        except Exception:
+            log.exception("Failed to mark shutdown reason for signal=%s", sig)
     log.warning("Shutdown requested (%s)", sig)
     try:
         await bot.close()
@@ -173,36 +184,87 @@ async def main() -> None:
 
     await diagnostics.run_stage("logging_init", setup_logging, summary_on_pass="Rich logging initialized")
     await diagnostics.run_stage("boot_banner", print_boot_banner, summary_on_pass="Boot banner rendered")
+    diagnostics.logger.info("phase=startup status=PASS subsystem=entrypoint source=main.main detail='entering main runtime path'")
 
     bot: discord.Client | None = None
+    start_completed = False
+    exit_code = 0
+    exit_path = "natural_return"
     try:
         log.info("Booting FlameBot")
+        diagnostics.logger.info("phase=startup status=PASS subsystem=config source=main.main detail='config load started'")
         token = (os.getenv("BOT_TOKEN") or "").strip()
         if not token:
             raise RuntimeError("BOT_TOKEN is missing")
         await diagnostics.run_stage("environment_or_config_load", lambda: None, summary_on_pass="Environment and config loaded")
+        diagnostics.logger.info("phase=startup status=PASS subsystem=config source=main.main detail='config load completed'")
 
+        diagnostics.logger.info("phase=startup status=PASS subsystem=database source=main.main detail='db init started'")
         await diagnostics.run_stage("database_engine_or_session_init", _maybe_create_tables, summary_on_pass="Optional table bootstrap completed")
+        diagnostics.logger.info("phase=startup status=PASS subsystem=database source=main.main detail='db init completed'")
+
+        diagnostics.logger.info("phase=startup status=PASS subsystem=bot source=main.main detail='bot object creation started'")
         bot = await diagnostics.run_stage(
             "bot_build",
             lambda: importlib.import_module("bot").build_bot_from_env(startup_diagnostics=diagnostics),
             fatal=True,
             summary_on_pass="Bot instance constructed",
         )
+        diagnostics.logger.info("phase=startup status=PASS subsystem=bot source=main.main detail='bot object created'")
         assert bot is not None
 
         loop = asyncio.get_running_loop()
         diagnostics.install_global_exception_hooks(loop)
         install_signal_handlers(loop, bot)
 
+        diagnostics.logger.info("phase=startup status=PASS subsystem=discord source=main.main detail='login/connect start'")
         await diagnostics.run_stage("bot_login_and_start", lambda: bot.start(token), fatal=True, summary_on_pass="bot.start completed")
+        start_completed = True
+        shutdown_reason = getattr(bot, "shutdown_reason", None)
+        shutdown_intentional = bool(getattr(bot, "shutdown_intentional", False))
+        shutdown_source = getattr(bot, "shutdown_source", "unknown")
+
+        diagnostics.logger.error(
+            "phase=runtime status=FAIL subsystem=process source=main.main "
+            "detail='bot.start returned' shutdown_intentional=%s shutdown_reason=%s shutdown_source=%s",
+            shutdown_intentional,
+            shutdown_reason,
+            shutdown_source,
+        )
+        if not shutdown_intentional:
+            raise RuntimeError(
+                "Process ended without explicit shutdown request: "
+                f"reason={shutdown_reason or 'unknown'} source={shutdown_source}"
+            )
+        exit_path = "intentional_shutdown"
     except discord.LoginFailure as exc:
+        exit_code = 1
+        exit_path = "discord_login_failure"
         diagnostics.capture_exception(exc, phase="startup", fatal=True, category="discord", subsystem="startup", source="bot_login_and_start", summary="Discord rejected BOT_TOKEN")
         diagnostics.logger.error("Invalid BOT_TOKEN (Discord rejected it).")
+        raise
+    except SystemExit as exc:
+        exit_code = exc.code if isinstance(exc.code, int) else 1
+        exit_path = "system_exit"
+        diagnostics.logger.error("phase=runtime status=FAIL subsystem=process source=main.main detail='SystemExit raised' code=%s", exc.code)
+        raise
     except Exception as exc:
+        exit_code = 1
+        exit_path = "exception"
         diagnostics.capture_exception(exc, phase="startup", fatal=True, category="startup", subsystem="startup", source="main_runtime", summary=format_exception_brief(exc))
         log.exception("Bot crashed")
+        raise
     finally:
+        if bot is not None and not start_completed and not getattr(bot, "ready_once", False):
+            diagnostics.logger.error(
+                "phase=startup status=FAIL subsystem=startup source=main.finally detail='startup aborted before bot became ready'"
+            )
+        diagnostics.logger.error(
+            "phase=runtime status=%s subsystem=process source=main.finally detail='final shutdown path' intentional=%s exit_path=%s",
+            "PASS" if exit_code == 0 else "FAIL",
+            bool(getattr(bot, "shutdown_intentional", False)) if bot is not None else False,
+            exit_path,
+        )
         diagnostics.write_local_report_file(bot)
         if bot is not None:
             try:
@@ -212,7 +274,26 @@ async def main() -> None:
                 log.exception("Failed during final bot.close()")
 
 
+def _run() -> int:
+    try:
+        asyncio.run(main())
+        return 0
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 1
+        if code == 0:
+            code = 1
+            print("[fatal] SystemExit(0) intercepted at process boundary; converting to exit code 1", file=sys.stderr)
+        return code
+    except KeyboardInterrupt:
+        print("[fatal] KeyboardInterrupt reached process boundary", file=sys.stderr)
+        return 130
+    except BaseException as exc:
+        print(f"[fatal] Unhandled process exception: {type(exc).__name__}: {exc}", file=sys.stderr)
+        traceback.print_exc()
+        return 1
+
+
 if __name__ == "__main__":
     if sys.platform.startswith("win"):
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())  # type: ignore[attr-defined]
-    asyncio.run(main())
+    raise SystemExit(_run())
