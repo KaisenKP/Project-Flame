@@ -26,15 +26,26 @@ FEED_NS = {
     "yt": "http://www.youtube.com/xml/schemas/2015",
 }
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+CHANNEL_ID_RE = re.compile(r'"channelId"\s*:\s*"(?P<id>UC[\w-]{20,})"')
+HANDLE_RE = re.compile(r"^@[\w.\-]+$")
+
+DEFAULT_TARGET_CHANNEL_ID = 1479752298195587072
+DEFAULT_TEMPLATE = (
+    "🚨 **New Blaze Silver Gaming Upload!**\n"
+    "**{video_title}**\n"
+    "🎬 Watch now: {video_url}"
+)
+DEFAULT_YOUTUBE_SOURCE = "https://youtube.com/@blazesilvergaming?si=gmJMf0IA6dSZD9UP"
 
 
 @dataclass
 class YouTubeConfig:
     guild_id: int
-    youtube_channel_id: str | None
+    youtube_channel_source: str | None
     target_channel_id: int | None
     ping_mode: str
     ping_role_id: int | None
+    message_template: str
     enabled: bool
 
 
@@ -72,10 +83,11 @@ class YouTubeNotificationsCog(commands.Cog):
         sql_cfg = f"""
         CREATE TABLE IF NOT EXISTS {self.CFG_TABLE} (
             guild_id BIGINT NOT NULL,
-            youtube_channel_id VARCHAR(64) NULL,
+            youtube_channel_source VARCHAR(255) NULL,
             target_channel_id BIGINT NULL,
             ping_mode VARCHAR(16) NOT NULL DEFAULT 'none',
             ping_role_id BIGINT NULL,
+            message_template TEXT NULL,
             enabled TINYINT(1) NOT NULL DEFAULT 0,
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             PRIMARY KEY (guild_id)
@@ -93,12 +105,58 @@ class YouTubeNotificationsCog(commands.Cog):
             async with session.begin():
                 await session.execute(text(sql_cfg))
                 await session.execute(text(sql_posted))
+                # Backward compatible migrations.
+                await session.execute(
+                    text(
+                        f"ALTER TABLE {self.CFG_TABLE} ADD COLUMN IF NOT EXISTS youtube_channel_source VARCHAR(255) NULL AFTER guild_id"
+                    )
+                )
+                await session.execute(
+                    text(
+                        f"ALTER TABLE {self.CFG_TABLE} ADD COLUMN IF NOT EXISTS message_template TEXT NULL AFTER ping_role_id"
+                    )
+                )
+                await session.execute(
+                    text(
+                        f"UPDATE {self.CFG_TABLE} SET youtube_channel_source = youtube_channel_id WHERE youtube_channel_source IS NULL AND youtube_channel_id IS NOT NULL"
+                    )
+                )
 
     def _feed_url(self, youtube_channel_id: str) -> str:
         q = urllib.parse.urlencode({"channel_id": youtube_channel_id})
         return f"https://www.youtube.com/feeds/videos.xml?{q}"
 
-    async def _fetch_feed(self, youtube_channel_id: str) -> list[FeedEntry]:
+    async def _resolve_channel_id(self, channel_source: str) -> str:
+        source = (channel_source or "").strip()
+        if not source:
+            raise RuntimeError("Empty YouTube channel source.")
+        if source.startswith("UC") and len(source) >= 22:
+            return source
+
+        if HANDLE_RE.match(source):
+            url = f"https://www.youtube.com/{source}"
+        elif source.startswith("http://") or source.startswith("https://"):
+            url = source
+        else:
+            raise RuntimeError("Use a channel ID, handle (e.g. @name), or full YouTube channel URL.")
+
+        def _download_channel_page() -> str:
+            req = urllib.request.Request(url, headers={"User-Agent": "FlameBot/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as response:
+                return response.read().decode("utf-8", errors="ignore")
+
+        try:
+            payload = await asyncio.to_thread(_download_channel_page)
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Could not resolve YouTube channel source: {exc}") from exc
+
+        match = CHANNEL_ID_RE.search(payload)
+        if not match:
+            raise RuntimeError("Could not parse YouTube channel ID from that source.")
+        return match.group("id")
+
+    async def _fetch_feed(self, youtube_channel_source: str) -> tuple[str, list[FeedEntry]]:
+        youtube_channel_id = await self._resolve_channel_id(youtube_channel_source)
         url = self._feed_url(youtube_channel_id)
 
         def _download() -> bytes:
@@ -132,11 +190,11 @@ class YouTubeNotificationsCog(commands.Cog):
                 entries.append(
                     FeedEntry(video_id=video_id, title=title, url=url_value, description=description, published_at=published)
                 )
-        return entries
+        return youtube_channel_id, entries
 
     async def fetch_configs(self) -> list[YouTubeConfig]:
         sql = text(
-            f"SELECT guild_id, youtube_channel_id, target_channel_id, ping_mode, ping_role_id, enabled FROM {self.CFG_TABLE} WHERE enabled = 1"
+            f"SELECT guild_id, youtube_channel_source, target_channel_id, ping_mode, ping_role_id, message_template, enabled FROM {self.CFG_TABLE} WHERE enabled = 1"
         )
         async with self.sessionmaker() as session:
             rows = (await session.execute(sql)).mappings().all()
@@ -146,10 +204,11 @@ class YouTubeNotificationsCog(commands.Cog):
             out.append(
                 YouTubeConfig(
                     guild_id=int(row["guild_id"]),
-                    youtube_channel_id=str(row["youtube_channel_id"]) if row["youtube_channel_id"] else None,
-                    target_channel_id=int(row["target_channel_id"]) if row["target_channel_id"] else None,
+                    youtube_channel_source=str(row["youtube_channel_source"]) if row["youtube_channel_source"] else DEFAULT_YOUTUBE_SOURCE,
+                    target_channel_id=int(row["target_channel_id"]) if row["target_channel_id"] else DEFAULT_TARGET_CHANNEL_ID,
                     ping_mode=str(row["ping_mode"] or "none"),
                     ping_role_id=int(row["ping_role_id"]) if row["ping_role_id"] else None,
+                    message_template=str(row["message_template"] or DEFAULT_TEMPLATE),
                     enabled=bool(row["enabled"]),
                 )
             )
@@ -157,31 +216,41 @@ class YouTubeNotificationsCog(commands.Cog):
 
     async def fetch_config(self, guild_id: int) -> YouTubeConfig:
         sql = text(
-            f"SELECT guild_id, youtube_channel_id, target_channel_id, ping_mode, ping_role_id, enabled FROM {self.CFG_TABLE} WHERE guild_id = :g LIMIT 1"
+            f"SELECT guild_id, youtube_channel_source, target_channel_id, ping_mode, ping_role_id, message_template, enabled FROM {self.CFG_TABLE} WHERE guild_id = :g LIMIT 1"
         )
         async with self.sessionmaker() as session:
             row = (await session.execute(sql, {"g": int(guild_id)})).mappings().first()
         if not row:
-            return YouTubeConfig(guild_id=guild_id, youtube_channel_id=None, target_channel_id=None, ping_mode="none", ping_role_id=None, enabled=False)
+            return YouTubeConfig(
+                guild_id=guild_id,
+                youtube_channel_source=DEFAULT_YOUTUBE_SOURCE,
+                target_channel_id=DEFAULT_TARGET_CHANNEL_ID,
+                ping_mode="everyone",
+                ping_role_id=None,
+                message_template=DEFAULT_TEMPLATE,
+                enabled=False,
+            )
         return YouTubeConfig(
             guild_id=int(row["guild_id"]),
-            youtube_channel_id=str(row["youtube_channel_id"]) if row["youtube_channel_id"] else None,
-            target_channel_id=int(row["target_channel_id"]) if row["target_channel_id"] else None,
+            youtube_channel_source=str(row["youtube_channel_source"]) if row["youtube_channel_source"] else DEFAULT_YOUTUBE_SOURCE,
+            target_channel_id=int(row["target_channel_id"]) if row["target_channel_id"] else DEFAULT_TARGET_CHANNEL_ID,
             ping_mode=str(row["ping_mode"] or "none"),
             ping_role_id=int(row["ping_role_id"]) if row["ping_role_id"] else None,
+            message_template=str(row["message_template"] or DEFAULT_TEMPLATE),
             enabled=bool(row["enabled"]),
         )
 
     async def upsert_config(self, cfg: YouTubeConfig) -> None:
         sql = text(
             f"""
-            INSERT INTO {self.CFG_TABLE} (guild_id, youtube_channel_id, target_channel_id, ping_mode, ping_role_id, enabled)
-            VALUES (:guild_id, :youtube_channel_id, :target_channel_id, :ping_mode, :ping_role_id, :enabled)
+            INSERT INTO {self.CFG_TABLE} (guild_id, youtube_channel_source, target_channel_id, ping_mode, ping_role_id, message_template, enabled)
+            VALUES (:guild_id, :youtube_channel_source, :target_channel_id, :ping_mode, :ping_role_id, :message_template, :enabled)
             ON DUPLICATE KEY UPDATE
-                youtube_channel_id = VALUES(youtube_channel_id),
+                youtube_channel_source = VALUES(youtube_channel_source),
                 target_channel_id = VALUES(target_channel_id),
                 ping_mode = VALUES(ping_mode),
                 ping_role_id = VALUES(ping_role_id),
+                message_template = VALUES(message_template),
                 enabled = VALUES(enabled)
             """
         )
@@ -191,10 +260,11 @@ class YouTubeNotificationsCog(commands.Cog):
                     sql,
                     {
                         "guild_id": cfg.guild_id,
-                        "youtube_channel_id": cfg.youtube_channel_id,
+                        "youtube_channel_source": cfg.youtube_channel_source,
                         "target_channel_id": cfg.target_channel_id,
                         "ping_mode": cfg.ping_mode,
                         "ping_role_id": cfg.ping_role_id,
+                        "message_template": cfg.message_template,
                         "enabled": 1 if cfg.enabled else 0,
                     },
                 )
@@ -210,6 +280,31 @@ class YouTubeNotificationsCog(commands.Cog):
         async with self.sessionmaker() as session:
             async with session.begin():
                 await session.execute(sql, {"g": guild_id, "v": video_id})
+
+    async def claim_video(self, guild_id: int, video_id: str) -> bool:
+        sql = text(f"INSERT IGNORE INTO {self.POSTED_TABLE} (guild_id, video_id) VALUES (:g, :v)")
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                result = await session.execute(sql, {"g": guild_id, "v": video_id})
+                return bool(result.rowcount and result.rowcount > 0)
+
+    async def unclaim_video(self, guild_id: int, video_id: str) -> None:
+        sql = text(f"DELETE FROM {self.POSTED_TABLE} WHERE guild_id = :g AND video_id = :v")
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                await session.execute(sql, {"g": guild_id, "v": video_id})
+
+    def _render_template(self, template: str, entry: FeedEntry) -> str:
+        chosen = (template or DEFAULT_TEMPLATE).strip() or DEFAULT_TEMPLATE
+        safe_map = {
+            "video_title": entry.title,
+            "video_url": entry.url,
+            "video_id": entry.video_id,
+        }
+        try:
+            return chosen.format_map(safe_map)
+        except KeyError as exc:
+            raise ValueError(f"Unknown template variable: {exc.args[0]}") from exc
 
     def _resolve_ping(self, guild: discord.Guild, cfg: YouTubeConfig) -> str:
         mode = cfg.ping_mode.lower()
@@ -228,6 +323,18 @@ class YouTubeNotificationsCog(commands.Cog):
             return
         channel = guild.get_channel(cfg.target_channel_id)
         if not isinstance(channel, discord.TextChannel):
+            log.warning("YouTube notifications: target channel %s missing/inaccessible in guild %s", cfg.target_channel_id, guild.id)
+            return
+        me = guild.me or guild.get_member(self.bot.user.id)  # type: ignore[arg-type]
+        if me is None:
+            log.warning("YouTube notifications: bot member not cached for guild %s", guild.id)
+            return
+        perms = channel.permissions_for(me)
+        if not perms.send_messages:
+            log.warning("YouTube notifications: missing send_messages in channel %s (guild %s)", channel.id, guild.id)
+            return
+        if not perms.embed_links:
+            log.warning("YouTube notifications: missing embed_links in channel %s (guild %s)", channel.id, guild.id)
             return
 
         embed = discord.Embed(
@@ -244,7 +351,8 @@ class YouTubeNotificationsCog(commands.Cog):
             embed.add_field(name="Description Link", value=f"[Open Mentioned Link]({description_link})", inline=False)
 
         ping_text = self._resolve_ping(guild, cfg)
-        content = f"{ping_text} New YouTube upload!".strip()
+        announcement = self._render_template(cfg.message_template, entry)
+        content = f"{ping_text}\n{announcement}".strip()
         allowed_mentions = discord.AllowedMentions(everyone=True, roles=True)
         await channel.send(content=content, embed=embed, allowed_mentions=allowed_mentions)
 
@@ -254,17 +362,21 @@ class YouTubeNotificationsCog(commands.Cog):
         async with self._run_lock:
             for cfg in await self.fetch_configs():
                 try:
-                    if not cfg.youtube_channel_id:
+                    if not cfg.youtube_channel_source:
                         continue
                     guild = self.bot.get_guild(cfg.guild_id)
                     if guild is None:
                         continue
-                    entries = await self._fetch_feed(cfg.youtube_channel_id)
+                    _, entries = await self._fetch_feed(cfg.youtube_channel_source)
                     for entry in reversed(entries[:5]):
-                        if await self.was_posted(guild.id, entry.video_id):
+                        claimed = await self.claim_video(guild.id, entry.video_id)
+                        if not claimed:
                             continue
-                        await self._post_entry(guild, cfg, entry)
-                        await self.mark_posted(guild.id, entry.video_id)
+                        try:
+                            await self._post_entry(guild, cfg, entry)
+                        except Exception:
+                            await self.unclaim_video(guild.id, entry.video_id)
+                            raise
                 except Exception as exc:
                     log.warning("YouTube loop failed for guild %s: %s", cfg.guild_id, exc)
 
@@ -287,23 +399,24 @@ class YouTubeNotificationsCog(commands.Cog):
     async def configure(
         self,
         interaction: discord.Interaction,
-        youtube_channel_id: str,
-        target_channel: discord.TextChannel,
         ping_mode: str,
+        youtube_channel: str = DEFAULT_YOUTUBE_SOURCE,
+        target_channel: discord.TextChannel | None = None,
         ping_role: discord.Role | None = None,
+        message_template: str | None = None,
     ) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("Server only.", ephemeral=True)
             return
 
-        raw_channel_id = youtube_channel_id.strip()
-        if not raw_channel_id:
-            await interaction.response.send_message("YouTube channel ID is required.", ephemeral=True)
+        raw_channel_source = youtube_channel.strip()
+        if not raw_channel_source:
+            await interaction.response.send_message("YouTube channel source is required.", ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            entries = await self._fetch_feed(raw_channel_id)
+            resolved_channel_id, entries = await self._fetch_feed(raw_channel_source)
         except Exception as exc:
             await interaction.followup.send(f"Couldn't validate that YouTube channel feed: {exc}", ephemeral=True)
             return
@@ -316,12 +429,22 @@ class YouTubeNotificationsCog(commands.Cog):
             await interaction.followup.send("Select a role when ping mode is `role`.", ephemeral=True)
             return
 
+        target = target_channel.id if target_channel else DEFAULT_TARGET_CHANNEL_ID
+        chosen_template = (message_template or DEFAULT_TEMPLATE).strip() or DEFAULT_TEMPLATE
+        preview_entry = entries[0]
+        try:
+            self._render_template(chosen_template, preview_entry)
+        except ValueError as exc:
+            await interaction.followup.send(f"Invalid template: {exc}", ephemeral=True)
+            return
+
         cfg = YouTubeConfig(
             guild_id=interaction.guild.id,
-            youtube_channel_id=raw_channel_id,
-            target_channel_id=target_channel.id,
+            youtube_channel_source=raw_channel_source,
+            target_channel_id=target,
             ping_mode=ping_mode,
             ping_role_id=ping_role.id if ping_role else None,
+            message_template=chosen_template,
             enabled=True,
         )
         await self.upsert_config(cfg)
@@ -330,11 +453,51 @@ class YouTubeNotificationsCog(commands.Cog):
         for entry in entries[:10]:
             await self.mark_posted(interaction.guild.id, entry.video_id)
         await interaction.followup.send(
-            f"✅ YouTube notifications enabled for `{raw_channel_id}` in {target_channel.mention}.\n"
+            f"✅ YouTube notifications enabled for `{raw_channel_source}` (`{resolved_channel_id}`) in <#{target}>.\n"
             f"Ping mode: **{ping_mode}**\n"
             f"Latest video saved as baseline: {newest.url}",
             ephemeral=True,
         )
+
+    @youtube.command(name="template", description="View, set, or reset the YouTube announcement template.")
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.choices(
+        action=[
+            app_commands.Choice(name="view", value="view"),
+            app_commands.Choice(name="set", value="set"),
+            app_commands.Choice(name="reset", value="reset"),
+        ]
+    )
+    async def template(self, interaction: discord.Interaction, action: str, template: str | None = None) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+        cfg = await self.fetch_config(interaction.guild.id)
+        if action == "view":
+            await interaction.response.send_message(
+                "Current template:\n"
+                f"```{cfg.message_template}```\n"
+                "Variables: `{video_title}`, `{video_url}`, `{video_id}`",
+                ephemeral=True,
+            )
+            return
+        if action == "reset":
+            cfg.message_template = DEFAULT_TEMPLATE
+            await self.upsert_config(cfg)
+            await interaction.response.send_message("✅ Template reset to default.", ephemeral=True)
+            return
+        if not template:
+            await interaction.response.send_message("Provide a template when using `set`.", ephemeral=True)
+            return
+        probe = FeedEntry(video_id="example123", title="Example Video", url="https://youtu.be/example123", description="", published_at=None)
+        try:
+            rendered = self._render_template(template, probe)
+        except ValueError as exc:
+            await interaction.response.send_message(f"Invalid template: {exc}", ephemeral=True)
+            return
+        cfg.message_template = template.strip()
+        await self.upsert_config(cfg)
+        await interaction.response.send_message(f"✅ Template updated.\nPreview:\n{rendered}", ephemeral=True)
 
     @youtube.command(name="disable", description="Disable YouTube notifications for this server.")
     @app_commands.default_permissions(manage_guild=True)
@@ -356,10 +519,11 @@ class YouTubeNotificationsCog(commands.Cog):
         cfg = await self.fetch_config(interaction.guild.id)
         embed = discord.Embed(title="YouTube Notification Settings", color=discord.Color.red())
         embed.add_field(name="Enabled", value="Yes" if cfg.enabled else "No", inline=True)
-        embed.add_field(name="YouTube Channel ID", value=cfg.youtube_channel_id or "Not set", inline=False)
+        embed.add_field(name="YouTube Source", value=cfg.youtube_channel_source or "Not set", inline=False)
         embed.add_field(name="Target Channel", value=f"<#{cfg.target_channel_id}>" if cfg.target_channel_id else "Not set", inline=True)
         embed.add_field(name="Ping Mode", value=cfg.ping_mode, inline=True)
         embed.add_field(name="Ping Role", value=f"<@&{cfg.ping_role_id}>" if cfg.ping_role_id else "None", inline=True)
+        embed.add_field(name="Template", value=f"```{cfg.message_template[:350]}```", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
