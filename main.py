@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import importlib.util
 import logging
 import os
 import signal
@@ -8,10 +10,6 @@ import sys
 from pathlib import Path
 
 import discord
-from rich.console import Console
-from rich.logging import RichHandler
-from rich.panel import Panel
-from rich.traceback import install as rich_traceback_install
 
 # ------------------------------------------------------------
 # Path bootstrap
@@ -21,13 +19,53 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from bot import build_bot_from_env  # noqa: E402
 from services.startup_diagnostics import StartupDiagnostics, format_exception_brief  # noqa: E402
 
 
 # ------------------------------------------------------------
-# Pretty logging (hardcoded defaults)
+# Optional Rich helpers + pretty logging (hardcoded defaults)
 # ------------------------------------------------------------
+
+
+def _has_rich() -> bool:
+    if importlib.util.find_spec("rich") is None:
+        return False
+    return (
+        importlib.util.find_spec("rich.console") is not None
+        and importlib.util.find_spec("rich.logging") is not None
+        and importlib.util.find_spec("rich.panel") is not None
+        and importlib.util.find_spec("rich.traceback") is not None
+    )
+
+
+def _rich_install_traceback() -> None:
+    rich_traceback_install = importlib.import_module("rich.traceback").install
+    rich_traceback_install(show_locals=False)
+
+
+def _build_rich_handler() -> logging.Handler:
+    rich_handler = importlib.import_module("rich.logging").RichHandler
+    return rich_handler(
+        rich_tracebacks=True,
+        show_time=True,
+        show_level=True,
+        show_path=False,
+        markup=True,
+    )
+
+
+def _print_rich_banner() -> None:
+    console = importlib.import_module("rich.console").Console()
+    panel = importlib.import_module("rich.panel").Panel
+    console.print(
+        panel.fit(
+            "[bold cyan]FlameBot[/bold cyan]\n"
+            "[green]Boot sequence engaged[/green]\n"
+            "[dim]All Services Run[/dim]",
+            border_style="cyan",
+        )
+    )
+
 
 def setup_logging() -> None:
     # Hardcoded vibe:
@@ -35,24 +73,23 @@ def setup_logging() -> None:
     # - hide file paths
     # - suppress voice warning
     # - reduce discord + sqlalchemy noise
-    try:
-        rich_traceback_install(show_locals=False)
-    except Exception as exc:
-        print(f"[boot] Rich traceback install failed, continuing without it: {exc}", file=sys.stderr)
+    has_rich = _has_rich()
+    if has_rich:
+        try:
+            _rich_install_traceback()
+        except Exception as exc:
+            print(f"[boot] Rich traceback install failed, continuing without it: {exc}", file=sys.stderr)
+            has_rich = False
 
     handlers: list[logging.Handler] = []
-    try:
-        handlers.append(
-            RichHandler(
-                rich_tracebacks=True,
-                show_time=True,
-                show_level=True,
-                show_path=False,
-                markup=True,
-            )
-        )
-    except Exception as exc:
-        print(f"[boot] Rich console handler failed, using plain StreamHandler: {exc}", file=sys.stderr)
+    if has_rich:
+        try:
+            handlers.append(_build_rich_handler())
+        except Exception as exc:
+            print(f"[boot] Rich console handler failed, using plain StreamHandler: {exc}", file=sys.stderr)
+            handlers.append(logging.StreamHandler())
+    else:
+        print("[boot] Optional dependency 'rich' is not installed; using plain logging output.", file=sys.stderr)
         handlers.append(logging.StreamHandler())
 
     logging.basicConfig(level=logging.INFO, format="%(name)s | %(message)s", datefmt="[%X]", handlers=handlers)
@@ -64,19 +101,13 @@ def setup_logging() -> None:
 
 
 def print_boot_banner() -> None:
-    try:
-        console = Console()
-        console.print(
-            Panel.fit(
-                "[bold cyan]FlameBot[/bold cyan]\n"
-                "[green]Boot sequence engaged[/green]\n"
-                "[dim]All Services Run[/dim]",
-                border_style="cyan",
-            )
-        )
-    except Exception as exc:
-        log.warning("Boot banner failed to render in rich console: %s", exc)
-        print("FlameBot | Boot sequence engaged | All Services Run")
+    if _has_rich():
+        try:
+            _print_rich_banner()
+            return
+        except Exception as exc:
+            log.warning("Boot banner failed to render in rich console: %s", exc)
+    print("FlameBot | Boot sequence engaged | All Services Run")
 
 
 log = logging.getLogger("boot")
@@ -85,6 +116,7 @@ log = logging.getLogger("boot")
 # ------------------------------------------------------------
 # Optional DB table safety
 # ------------------------------------------------------------
+
 
 async def _maybe_create_tables() -> None:
     try:
@@ -103,6 +135,7 @@ async def _maybe_create_tables() -> None:
 # ------------------------------------------------------------
 # Graceful shutdown
 # ------------------------------------------------------------
+
 
 async def shutdown(bot: discord.Client, sig: str) -> None:
     log.warning("Shutdown requested (%s)", sig)
@@ -123,6 +156,7 @@ def install_signal_handlers(loop: asyncio.AbstractEventLoop, bot: discord.Client
 # ------------------------------------------------------------
 # Main entry
 # ------------------------------------------------------------
+
 
 async def main() -> None:
     diagnostics = StartupDiagnostics()
@@ -151,7 +185,7 @@ async def main() -> None:
         await diagnostics.run_stage("database_engine_or_session_init", _maybe_create_tables, summary_on_pass="Optional table bootstrap completed")
         bot = await diagnostics.run_stage(
             "bot_build",
-            lambda: build_bot_from_env(startup_diagnostics=diagnostics),
+            lambda: importlib.import_module("bot").build_bot_from_env(startup_diagnostics=diagnostics),
             fatal=True,
             summary_on_pass="Bot instance constructed",
         )
