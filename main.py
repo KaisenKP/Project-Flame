@@ -35,13 +35,14 @@ def setup_logging() -> None:
     # - hide file paths
     # - suppress voice warning
     # - reduce discord + sqlalchemy noise
-    rich_traceback_install(show_locals=False)
+    try:
+        rich_traceback_install(show_locals=False)
+    except Exception as exc:
+        print(f"[boot] Rich traceback install failed, continuing without it: {exc}", file=sys.stderr)
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(name)s | %(message)s",
-        datefmt="[%X]",
-        handlers=[
+    handlers: list[logging.Handler] = []
+    try:
+        handlers.append(
             RichHandler(
                 rich_tracebacks=True,
                 show_time=True,
@@ -49,8 +50,12 @@ def setup_logging() -> None:
                 show_path=False,
                 markup=True,
             )
-        ],
-    )
+        )
+    except Exception as exc:
+        print(f"[boot] Rich console handler failed, using plain StreamHandler: {exc}", file=sys.stderr)
+        handlers.append(logging.StreamHandler())
+
+    logging.basicConfig(level=logging.INFO, format="%(name)s | %(message)s", datefmt="[%X]", handlers=handlers)
 
     logging.getLogger("discord").setLevel(logging.WARNING)
     logging.getLogger("discord.http").setLevel(logging.WARNING)
@@ -59,15 +64,19 @@ def setup_logging() -> None:
 
 
 def print_boot_banner() -> None:
-    console = Console()
-    console.print(
-        Panel.fit(
-            "[bold cyan]FlameBot[/bold cyan]\n"
-            "[green]Boot sequence engaged[/green]\n"
-            "[dim]All Services Run[/dim]",
-            border_style="cyan",
+    try:
+        console = Console()
+        console.print(
+            Panel.fit(
+                "[bold cyan]FlameBot[/bold cyan]\n"
+                "[green]Boot sequence engaged[/green]\n"
+                "[dim]All Services Run[/dim]",
+                border_style="cyan",
+            )
         )
-    )
+    except Exception as exc:
+        log.warning("Boot banner failed to render in rich console: %s", exc)
+        print("FlameBot | Boot sequence engaged | All Services Run")
 
 
 log = logging.getLogger("boot")
