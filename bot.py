@@ -176,9 +176,31 @@ class FlameBot(commands.Bot):
         self._post_ready_boot_completed = False
         self._persistent_views_registered = 0
         self.startup_manager = StartupManager()
+        self.shutdown_reason: str | None = None
+        self.shutdown_source: str = "unknown"
+        self.shutdown_intentional: bool = False
+
+    @property
+    def ready_once(self) -> bool:
+        return self._ready_once.is_set()
+
+    def note_shutdown(self, *, reason: str, intentional: bool, source: str) -> None:
+        self.shutdown_reason = reason
+        self.shutdown_intentional = intentional
+        self.shutdown_source = source
+        level = logging.INFO if intentional else logging.ERROR
+        log.log(
+            level,
+            "Shutdown reason recorded | intentional=%s reason=%s source=%s",
+            intentional,
+            reason,
+            source,
+        )
 
     async def setup_hook(self) -> None:
         diag = self.startup_diagnostics
+        if diag is not None:
+            diag.logger.info("phase=startup status=PASS subsystem=bot source=FlameBot.setup_hook detail='setup_hook entered'")
         if diag is not None:
             await diag.run_stage(
                 "setup_hook",
@@ -298,13 +320,21 @@ class FlameBot(commands.Bot):
         log.info("Guilds: %d", len(self.guilds))
         if self.startup_diagnostics is not None:
             await self.startup_diagnostics.run_stage("on_ready", lambda: None, summary_on_pass="on_ready fired")
+            self.startup_diagnostics.logger.info("phase=startup status=PASS subsystem=discord source=FlameBot.on_ready detail='on_ready reached'")
             if not self._startup_report_sent:
                 self._startup_report_sent = True
                 send_task = asyncio.create_task(self.startup_diagnostics.send_report(self), name="startup.report.delivery")
                 self.startup_diagnostics.add_startup_task(send_task)
                 self.startup_diagnostics.mark_startup_complete()
+                self.startup_diagnostics.logger.info("phase=startup status=PASS subsystem=startup source=FlameBot.on_ready detail='startup fully complete'")
 
     async def close(self) -> None:
+        if self.shutdown_reason is None:
+            self.note_shutdown(
+                reason="close() invoked without explicit shutdown request",
+                intentional=False,
+                source="FlameBot.close",
+            )
         await self.stop_background_tasks()
         await super().close()
 
@@ -335,13 +365,25 @@ class FlameBot(commands.Bot):
 
         loaded = 0
         failed = 0
+        failed_exts: list[str] = []
 
         for ext in exts:
+            if self.startup_diagnostics is not None:
+                self.startup_diagnostics.logger.info(
+                    "phase=startup status=PASS subsystem=extensions source=FlameBot.load_all_extensions detail='extension load start' extension=%s",
+                    ext,
+                )
             try:
                 await self.load_extension(ext)
                 loaded += 1
+                if self.startup_diagnostics is not None:
+                    self.startup_diagnostics.logger.info(
+                        "phase=startup status=PASS subsystem=extensions source=FlameBot.load_all_extensions detail='extension load success' extension=%s",
+                        ext,
+                    )
             except Exception:
                 failed += 1
+                failed_exts.append(ext)
                 if self.startup_diagnostics is not None:
                     self.startup_diagnostics.capture_exception(
                         sys.exc_info()[1] or RuntimeError(f"Failed to load extension {ext}"),
@@ -354,6 +396,8 @@ class FlameBot(commands.Bot):
                 log.exception("Failed to load: %s", ext)
 
         log.info("Extension load summary: %d/%d loaded, %d failed.", loaded, len(exts), failed)
+        if failed_exts:
+            raise RuntimeError(f"Extension load failure(s): {', '.join(failed_exts)}")
 
     async def reload_extensions(self, exts: Iterable[str]) -> dict[str, bool]:
         results: dict[str, bool] = {}
@@ -463,6 +507,7 @@ class FlameBot(commands.Bot):
                 return
 
             log.warning("Executing scheduled restart at 1:00 AM EST")
+            self.note_shutdown(reason="scheduled_restart", intentional=True, source="FlameBot._scheduled_restart_loop")
             await self.close()
             os.execv(sys.executable, [sys.executable, *sys.argv])
 

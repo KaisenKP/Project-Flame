@@ -20,6 +20,8 @@ class AdminRestart(commands.Cog):
     async def restart(self, interaction: discord.Interaction) -> None:
         async with self._restart_lock:
             await interaction.response.send_message("Restarting bot now...", ephemeral=True)
+            if hasattr(self.bot, "note_shutdown"):
+                self.bot.note_shutdown(reason="admin_restart_command", intentional=True, source="AdminRestart.restart")
             await self.bot.close()
             os.execv(sys.executable, [sys.executable, *sys.argv])
 
