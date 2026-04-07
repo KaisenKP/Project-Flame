@@ -345,12 +345,13 @@ class StartupDiagnostics:
         extra_context: dict[str, Any] | None = None,
     ) -> DiagnosticEntry | None:
         safe_context = dict(extra_context or {})
+        resolved_phase = phase or self.current_phase
         summary_text = summary or str(error)
         discord_http_details = self._extract_discord_http_exception_details(error)
         if discord_http_details:
             safe_context["discord_http"] = discord_http_details
             summary_text = self._build_http_summary_line(
-                phase=phase or self.current_phase,
+                phase=resolved_phase,
                 status=status,
                 subsystem=subsystem,
                 source=source,
@@ -359,8 +360,8 @@ class StartupDiagnostics:
                 original_summary=summary_text,
             )
         tb = traceback_text or "".join(traceback.format_exception(type(error), error, error.__traceback__))
-        return self.record_entry(
-            phase=phase or self.current_phase,
+        entry = self.record_entry(
+            phase=resolved_phase,
             status=status,
             fatal=fatal,
             category=category,
@@ -380,6 +381,17 @@ class StartupDiagnostics:
             task_name=task_name,
             extra_context=safe_context,
         )
+        if fatal:
+            self._emit_visible_fatal_exception_block(
+                phase=resolved_phase,
+                subsystem=subsystem,
+                source=source,
+                summary=summary_text,
+                traceback_text=tb,
+                exception_type=type(error).__name__,
+                discord_http_details=discord_http_details,
+            )
+        return entry
 
     def add_warning(self, message: str, *, stage_name: str | None = None, subsystem: str = "startup") -> None:
         self.record_entry(
@@ -574,6 +586,40 @@ class StartupDiagnostics:
         payload = json.dumps(block, ensure_ascii=False, sort_keys=True, default=str)
         print(f"[startup][discord_http_exception]{payload}", file=sys.stderr, flush=True)
         self.logger.error("[startup][discord_http_exception]%s", payload)
+
+    def _emit_visible_fatal_exception_block(
+        self,
+        *,
+        phase: str,
+        subsystem: str,
+        source: str,
+        summary: str,
+        traceback_text: str | None,
+        exception_type: str,
+        discord_http_details: dict[str, Any] | None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "phase": self._sanitize_secret_value(phase),
+            "subsystem": self._sanitize_secret_value(subsystem),
+            "source": self._sanitize_secret_value(source),
+            "summary": self._sanitize_secret_value(summary),
+            "exception_type": self._sanitize_secret_value(exception_type),
+            "traceback": self._sanitize_secret_value((traceback_text or "").rstrip()),
+        }
+        if isinstance(discord_http_details, dict):
+            payload.update(
+                {
+                    "http_status": discord_http_details.get("status"),
+                    "discord_code": discord_http_details.get("discord_code"),
+                    "method": discord_http_details.get("method"),
+                    "route": discord_http_details.get("route"),
+                    "retry_after": discord_http_details.get("retry_after"),
+                    "global": discord_http_details.get("global"),
+                }
+            )
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        print(f"[fatal_diagnostics]{serialized}", file=sys.stderr, flush=True)
+        self.logger.error("[fatal_diagnostics]%s", serialized)
 
     def _sanitize_secret_value(self, value: Any) -> Any:
         if value is None:
