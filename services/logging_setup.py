@@ -9,16 +9,17 @@ from rich.traceback import install as rich_traceback_install
 def setup_logging() -> None:
     level = os.getenv("LOG_LEVEL", "INFO").upper()
 
-    rich_traceback_install(
-        show_locals=False,   # keep clean
-        suppress=[logging],  # reduce noise
-    )
+    try:
+        rich_traceback_install(
+            show_locals=False,   # keep clean
+            suppress=[logging],  # reduce noise
+        )
+    except Exception:
+        pass
 
-    logging.basicConfig(
-        level=level,
-        format="%(name)s | %(message)s",
-        datefmt="[%X]",
-        handlers=[
+    handlers: list[logging.Handler] = []
+    try:
+        handlers.append(
             RichHandler(
                 console=Console(),
                 rich_tracebacks=True,
@@ -27,7 +28,15 @@ def setup_logging() -> None:
                 show_path=False,   # set True if you want file paths
                 markup=True,
             )
-        ],
+        )
+    except Exception:
+        handlers.append(logging.StreamHandler())
+
+    logging.basicConfig(
+        level=level,
+        format="%(name)s | %(message)s",
+        datefmt="[%X]",
+        handlers=handlers,
     )
 
     # Optional: reduce spam from common libs
