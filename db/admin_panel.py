@@ -222,7 +222,7 @@ class AdminPanel(commands.Cog):
         return True, ""
 
     def _panel_embed(self) -> discord.Embed:
-        e = discord.Embed(title="Project Pulse Admin Panel")
+        e = discord.Embed(title="FlameBot Admin Panel")
         e.description = (
             "Private control room.\n"
             "Buttons open modals for fast edits.\n"

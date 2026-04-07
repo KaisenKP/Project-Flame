@@ -62,7 +62,7 @@ def print_boot_banner() -> None:
     console = Console()
     console.print(
         Panel.fit(
-            "[bold cyan]CatBot[/bold cyan]\n"
+            "[bold cyan]FlameBot[/bold cyan]\n"
             "[green]Boot sequence engaged[/green]\n"
             "[dim]All Services Run[/dim]",
             border_style="cyan",
@@ -133,7 +133,7 @@ async def main() -> None:
 
     bot: discord.Client | None = None
     try:
-        log.info("Booting Project Pulse")
+        log.info("Booting FlameBot")
         token = (os.getenv("BOT_TOKEN") or "").strip()
         if not token:
             raise RuntimeError("BOT_TOKEN is missing")
