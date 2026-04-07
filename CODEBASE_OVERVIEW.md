@@ -1,8 +1,13 @@
-# Bartender Codebase Overview
+# FlameBot Codebase Overview
+
+
+## Legacy preservation
+- Legacy Pulse/CatBot naming remains supported through compatibility aliases in `bot.py` so historical imports can coexist during migration.
+- Existing cogs/services/DB modules remain available as reusable foundation code while FlameBot becomes the primary runtime identity.
 
 ## Runtime boot flow
 - `main.py` is the process entry point. It configures Rich logging, reads `BOT_TOKEN` from environment, optionally runs `tables.py` migration helper, builds the bot via `build_bot_from_env()`, and starts the Discord client with graceful SIGINT/SIGTERM shutdown handling.
-- `bot.py` defines `PulseBot`, auto-discovers cogs in the `cogs/` tree by looking for `setup()` functions, ensures DB schema (`Base.metadata.create_all(checkfirst=True)`), syncs slash commands, and runs a heartbeat background task.
+- `bot.py` defines `FlameBot`, auto-discovers cogs in the `cogs/` tree by looking for `setup()` functions, ensures DB schema (`Base.metadata.create_all(checkfirst=True)`), syncs slash commands, and runs a heartbeat background task.
 
 ## Data layer
 - `db/engine.py` builds a singleton SQLAlchemy async engine/sessionmaker from env vars (`DB_HOST`, `DB_NAME`, etc.) and supports sanitizing host/port values.

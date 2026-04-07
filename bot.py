@@ -71,7 +71,7 @@ def _iter_extension_modules(cogs_dir: Path, cogs_package: str) -> list[str]:
 
 
 
-class PulseCommandTree(app_commands.CommandTree["PulseBot"]):
+class FlameCommandTree(app_commands.CommandTree["FlameBot"]):
     async def on_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
         diagnostics = getattr(self.client, "startup_diagnostics", None)
         if diagnostics is not None:
@@ -92,7 +92,7 @@ class PulseCommandTree(app_commands.CommandTree["PulseBot"]):
         await super().on_error(interaction, error)
 
 
-class PulseBot(commands.Bot):
+class FlameBot(commands.Bot):
     def __init__(
         self,
         *,
@@ -116,10 +116,11 @@ class PulseBot(commands.Bot):
             command_prefix=commands.when_mentioned_or(prefix),
             intents=intents,
             help_command=None,
-            tree_cls=PulseCommandTree,
+            tree_cls=FlameCommandTree,
         )
 
-        self.pulse_prefix = prefix
+        self.flame_prefix = prefix
+        self.pulse_prefix = prefix  # legacy compatibility alias
         self.sync_commands = sync_commands
         self.dev_guild_id = dev_guild_id
         self.owner_ids = owner_ids or set()
@@ -332,8 +333,8 @@ class PulseBot(commands.Bot):
         return results
 
     def start_background_tasks(self) -> None:
-        self._spawn_task(self._heartbeat_loop(), name="pulse.heartbeat")
-        self._spawn_task(self._scheduled_restart_loop(), name="pulse.scheduled_restart")
+        self._spawn_task(self._heartbeat_loop(), name="flamebot.heartbeat")
+        self._spawn_task(self._scheduled_restart_loop(), name="flamebot.scheduled_restart")
 
     def _is_restart_block_window(self, now: dt.datetime | None = None) -> bool:
         now_est = (now or dt.datetime.now(tz=EST)).astimezone(EST)
@@ -460,7 +461,7 @@ class PulseBot(commands.Bot):
         await super().on_error(event_method, *args, **kwargs)
 
 
-async def build_bot_from_env(startup_diagnostics: StartupDiagnostics | None = None) -> PulseBot:
+async def build_bot_from_env(startup_diagnostics: StartupDiagnostics | None = None) -> FlameBot:
     prefix = (os.getenv("BOT_PREFIX") or "!").strip()
 
     intents_message_content = _truthy(os.getenv("INTENTS_MESSAGE_CONTENT"), default=True)
@@ -488,7 +489,7 @@ async def build_bot_from_env(startup_diagnostics: StartupDiagnostics | None = No
                 if startup_diagnostics is not None and startup_diagnostics.owner_id_hint is None:
                     startup_diagnostics.owner_id_hint = int(part)
 
-    return PulseBot(
+    return FlameBot(
         prefix=prefix,
         intents_message_content=intents_message_content,
         cogs_dir=cogs_dir,
@@ -498,3 +499,8 @@ async def build_bot_from_env(startup_diagnostics: StartupDiagnostics | None = No
         owner_ids=owner_ids,
         startup_diagnostics=startup_diagnostics,
     )
+
+
+# Legacy compatibility aliases for pre-FlameBot imports
+PulseCommandTree = FlameCommandTree
+PulseBot = FlameBot
