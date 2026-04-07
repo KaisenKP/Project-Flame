@@ -25,7 +25,7 @@ def _truthy(v: str | None, default: bool = False) -> bool:
 
 
 VIP_ROLE_ID: int = _int(os.getenv("VIP_ROLE_ID"), 0)
-GUILD_ID: int = _int(os.getenv("GUILD_ID"), 0)
+GUILD_ID: int = _int(os.getenv("GUILD_ID"), 1479503568095412325)
 
 STAMINA_DEFAULT_MAX: int = _int(os.getenv("STAMINA_DEFAULT_MAX"), 100)
 STAMINA_DEFAULT_START: int = _int(os.getenv("STAMINA_DEFAULT_START"), 0)
