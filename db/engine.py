@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
@@ -63,6 +63,55 @@ class DbSettings:
 
     @staticmethod
     def from_env() -> "DbSettings":
+        db_url = _clean(os.getenv("DATABASE_URL") or os.getenv("DB_URL"))
+        if db_url:
+            parsed = urlparse(db_url)
+            scheme = (parsed.scheme or "").lower()
+            if scheme not in {"mysql", "mysql+aiomysql"}:
+                raise RuntimeError(
+                    "DATABASE_URL/DB_URL must use mysql:// or mysql+aiomysql://"
+                )
+
+            host = _clean(parsed.hostname)
+            name = _clean((parsed.path or "").lstrip("/"))
+            user = _clean(unquote(parsed.username or ""))
+            password = _clean(unquote(parsed.password or ""))
+            port = int(parsed.port) if parsed.port else 3306
+
+            if not host or not name or not user or not password:
+                missing = [
+                    key
+                    for key, value in {
+                        "host": host,
+                        "database": name,
+                        "user": user,
+                        "password": password,
+                    }.items()
+                    if not value
+                ]
+                raise RuntimeError(
+                    "Incomplete DATABASE_URL/DB_URL. Missing: "
+                    + ", ".join(missing)
+                )
+
+            pool_size_raw = _clean(os.getenv("DB_POOL_SIZE"))
+            max_overflow_raw = _clean(os.getenv("DB_MAX_OVERFLOW"))
+            pool_size = int(pool_size_raw) if pool_size_raw.isdigit() else 5
+            max_overflow = int(max_overflow_raw) if max_overflow_raw.isdigit() else 10
+
+            echo = _clean(os.getenv("SQL_ECHO")).lower() in {"1", "true", "yes", "y", "on"}
+
+            return DbSettings(
+                host=host,
+                port=port,
+                name=name,
+                user=user,
+                password=password,
+                pool_size=pool_size,
+                max_overflow=max_overflow,
+                echo=echo,
+            )
+
         host_in = _clean(os.getenv("DB_HOST"))
         name = _clean(os.getenv("DB_NAME"))
         user = _clean(os.getenv("DB_USER"))

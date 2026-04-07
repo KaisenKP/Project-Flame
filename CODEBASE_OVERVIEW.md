@@ -5,7 +5,7 @@
 - `bot.py` defines `PulseBot`, auto-discovers cogs in the `cogs/` tree by looking for `setup()` functions, ensures DB schema (`Base.metadata.create_all(checkfirst=True)`), syncs slash commands, and runs a heartbeat background task.
 
 ## Data layer
-- `db/engine.py` builds a singleton SQLAlchemy async engine/sessionmaker from env vars (`DB_HOST`, `DB_NAME`, etc.) and supports sanitizing host/port values.
+- `db/engine.py` builds a singleton SQLAlchemy async engine/sessionmaker from env vars (either `DATABASE_URL`/`DB_URL` or split `DB_HOST`, `DB_NAME`, etc.) and supports sanitizing host/port values.
 - `db/models.py` is the central schema and includes tables for users/xp/wallets, activity and voice sessions, anti-raid sentinel logs, jobs/stamina/tools, items/effects/shop/lootboxes, crowns, and the Business system.
 - `services/db.py` exposes shared async sessionmaker access used across cogs.
 
@@ -24,4 +24,3 @@
 
 ## Configuration and persisted JSON
 - `data/` stores runtime JSON payloads like sentinel config, daily claims, level reward markers, and leaderboard snapshots for guilds.
-
