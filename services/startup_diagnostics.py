@@ -13,6 +13,7 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Awaitable, Callable
 
 import discord
@@ -28,6 +29,30 @@ PHASE_RUNTIME = "runtime"
 EMBED_FIELD_CHAR_LIMIT = 1024
 DEFAULT_FALLBACK_CHANNEL_ID = 1460862634143256803
 DISCORD_MESSAGE_LIMIT = 2000
+_REDACTED = "[REDACTED]"
+_SENSITIVE_KEYS = (
+    "authorization",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "cookie",
+    "set-cookie",
+    "api_key",
+    "apikey",
+    "session",
+)
+_RATE_LIMIT_HEADER_KEYS = (
+    "x-ratelimit-remaining",
+    "x-ratelimit-reset",
+    "x-ratelimit-reset-after",
+    "x-ratelimit-bucket",
+    "retry-after",
+    "cf-ray",
+    "cf-cache-status",
+    "server",
+    "via",
+)
 
 
 @dataclass(slots=True)
@@ -319,6 +344,20 @@ class StartupDiagnostics:
         task_name: str | None = None,
         extra_context: dict[str, Any] | None = None,
     ) -> DiagnosticEntry | None:
+        safe_context = dict(extra_context or {})
+        summary_text = summary or str(error)
+        discord_http_details = self._extract_discord_http_exception_details(error)
+        if discord_http_details:
+            safe_context["discord_http"] = discord_http_details
+            summary_text = self._build_http_summary_line(
+                phase=phase or self.current_phase,
+                status=status,
+                subsystem=subsystem,
+                source=source,
+                error=error,
+                details=discord_http_details,
+                original_summary=summary_text,
+            )
         tb = traceback_text or "".join(traceback.format_exception(type(error), error, error.__traceback__))
         return self.record_entry(
             phase=phase or self.current_phase,
@@ -327,7 +366,7 @@ class StartupDiagnostics:
             category=category,
             subsystem=subsystem,
             source=source,
-            summary=summary or str(error),
+            summary=summary_text,
             exception_type=type(error).__name__,
             exception_message=str(error),
             traceback_text=tb,
@@ -339,7 +378,7 @@ class StartupDiagnostics:
             interaction_type=interaction_type,
             extension_name=extension_name,
             task_name=task_name,
-            extra_context=extra_context,
+            extra_context=safe_context,
         )
 
     def add_warning(self, message: str, *, stage_name: str | None = None, subsystem: str = "startup") -> None:
@@ -374,8 +413,165 @@ class StartupDiagnostics:
             self.logger.warning(msg)
         else:
             self.logger.error(msg)
+        discord_http = entry.extra_context.get("discord_http") if isinstance(entry.extra_context, dict) else None
+        if isinstance(discord_http, dict):
+            try:
+                compact = {
+                    "status": discord_http.get("status"),
+                    "discord_code": discord_http.get("discord_code"),
+                    "method": discord_http.get("method"),
+                    "route": discord_http.get("route"),
+                    "retry_after": discord_http.get("retry_after"),
+                    "global": discord_http.get("global"),
+                }
+                self.logger.error(
+                    "phase=%s subsystem=%s source=%s http_exception=%s http_details=%s",
+                    entry.phase,
+                    entry.subsystem,
+                    entry.source,
+                    entry.exception_type,
+                    json.dumps(compact, ensure_ascii=False, sort_keys=True),
+                )
+                self.logger.error(
+                    "discord_http_detail_dump=%s",
+                    json.dumps(discord_http, ensure_ascii=False, sort_keys=True),
+                )
+            except Exception:
+                self.logger.exception("Failed to log Discord HTTP diagnostics for entry=%s", entry.id)
         if entry.traceback_text:
             self.logger.error(entry.traceback_text.rstrip())
+
+    def _extract_discord_http_exception_details(self, error: BaseException) -> dict[str, Any] | None:
+        if not isinstance(error, discord.HTTPException):
+            return None
+        details: dict[str, Any] = {}
+        try:
+            details["exception_type"] = type(error).__name__
+            details["status"] = self._safe_primitive(getattr(error, "status", None))
+            details["discord_code"] = self._safe_primitive(getattr(error, "code", None))
+            details["text"] = self._sanitize_secret_value(getattr(error, "text", None))
+            response = getattr(error, "response", None)
+            route = getattr(error, "route", None)
+            details["method"] = self._safe_primitive(
+                getattr(route, "method", None) or getattr(response, "method", None)
+            )
+            details["route"] = self._sanitize_secret_value(
+                getattr(route, "path", None)
+                or getattr(route, "url", None)
+                or getattr(route, "route", None)
+                or getattr(response, "url", None)
+            )
+            headers = self._extract_response_headers(response)
+            if headers:
+                details["response_headers"] = headers
+                details["ratelimit_headers"] = {
+                    key: value for key, value in headers.items() if key.lower() in _RATE_LIMIT_HEADER_KEYS
+                }
+            body = self._extract_http_body_payload(error)
+            if body is not None:
+                details["response_body"] = body
+            retry_after, is_global = self._extract_retry_payload(body)
+            if retry_after is None:
+                retry_after = self._safe_primitive(getattr(error, "retry_after", None))
+            details["retry_after"] = retry_after
+            details["global"] = is_global
+            details["raw_exception"] = self._sanitize_secret_value(str(error))
+            return details
+        except Exception as exc:
+            return {
+                "exception_type": type(error).__name__,
+                "diagnostic_parse_error": self._sanitize_secret_value(str(exc)),
+                "raw_exception": self._sanitize_secret_value(str(error)),
+            }
+
+    def _extract_response_headers(self, response: Any) -> dict[str, Any]:
+        headers_obj = getattr(response, "headers", None)
+        if headers_obj is None:
+            return {}
+        if isinstance(headers_obj, MappingProxyType):
+            items = list(headers_obj.items())
+        elif hasattr(headers_obj, "items"):
+            items = list(headers_obj.items())
+        else:
+            return {}
+        sanitized: dict[str, Any] = {}
+        for key, value in items:
+            sanitized[str(key)] = self._sanitize_secret_value(value)
+        return sanitized
+
+    def _extract_http_body_payload(self, error: BaseException) -> Any:
+        candidates = [
+            getattr(error, "errors", None),
+            getattr(error, "data", None),
+            getattr(error, "response_data", None),
+            getattr(error, "body", None),
+            getattr(error, "text", None),
+        ]
+        for candidate in candidates:
+            if candidate in (None, ""):
+                continue
+            return self._sanitize_secret_value(candidate)
+        return None
+
+    def _extract_retry_payload(self, body: Any) -> tuple[Any, bool | None]:
+        if not isinstance(body, dict):
+            return None, None
+        retry_after = self._safe_primitive(body.get("retry_after"))
+        is_global = body.get("global")
+        if isinstance(is_global, bool):
+            return retry_after, is_global
+        return retry_after, None
+
+    def _build_http_summary_line(
+        self,
+        *,
+        phase: str,
+        status: str,
+        subsystem: str,
+        source: str,
+        error: BaseException,
+        details: dict[str, Any],
+        original_summary: str,
+    ) -> str:
+        return (
+            f"phase={phase} subsystem={subsystem} source={source} status={status} "
+            f"http_status={details.get('status')} discord_code={details.get('discord_code')} "
+            f"method={details.get('method')} route={details.get('route')} "
+            f"retry_after={details.get('retry_after')} global={details.get('global')} "
+            f"summary={self._sanitize_secret_value(original_summary or str(error))}"
+        )
+
+    def _sanitize_secret_value(self, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            sanitized: dict[str, Any] = {}
+            for key, inner in value.items():
+                key_text = str(key)
+                if self._is_sensitive_key(key_text):
+                    sanitized[key_text] = _REDACTED
+                else:
+                    sanitized[key_text] = self._sanitize_secret_value(inner)
+            return sanitized
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return [self._sanitize_secret_value(item) for item in value]
+        text = str(value)
+        lowered = text.lower()
+        if any(marker in lowered for marker in _SENSITIVE_KEYS):
+            return _REDACTED
+        bot_token = os.getenv("BOT_TOKEN")
+        if bot_token:
+            text = text.replace(bot_token, _REDACTED)
+        return text
+
+    def _is_sensitive_key(self, key: str) -> bool:
+        lowered = key.lower()
+        return any(marker in lowered for marker in _SENSITIVE_KEYS)
+
+    def _safe_primitive(self, value: Any) -> Any:
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return self._sanitize_secret_value(value)
 
     def total_duration_ms(self) -> int:
         return int((time.perf_counter() - self._boot_perf_started) * 1000)
