@@ -541,6 +541,40 @@ class StartupDiagnostics:
             f"summary={self._sanitize_secret_value(original_summary or str(error))}"
         )
 
+    def _emit_visible_http_exception_block(
+        self,
+        *,
+        stage_name: str,
+        error: discord.HTTPException,
+        details: dict[str, Any] | None,
+    ) -> None:
+        safe_details = details or {}
+        ratelimit_headers = safe_details.get("ratelimit_headers")
+        rate_limit_bucket = None
+        if isinstance(ratelimit_headers, dict):
+            for key, value in ratelimit_headers.items():
+                if str(key).lower() == "x-ratelimit-bucket":
+                    rate_limit_bucket = value
+                    break
+        block = {
+            "stage": stage_name,
+            "exception_type": type(error).__name__,
+            "http_status": safe_details.get("status"),
+            "discord_error_code": safe_details.get("discord_code"),
+            "exception_text": safe_details.get("text") or self._sanitize_secret_value(str(error)),
+            "method": safe_details.get("method"),
+            "route": safe_details.get("route"),
+            "retry_after": safe_details.get("retry_after"),
+            "global": safe_details.get("global"),
+            "rate_limit_bucket": rate_limit_bucket,
+            "response_headers": safe_details.get("response_headers"),
+            "response_body": safe_details.get("response_body"),
+            "raw_exception": safe_details.get("raw_exception") or self._sanitize_secret_value(str(error)),
+        }
+        payload = json.dumps(block, ensure_ascii=False, sort_keys=True, default=str)
+        print(f"[startup][discord_http_exception]{payload}", file=sys.stderr, flush=True)
+        self.logger.error("[startup][discord_http_exception]%s", payload)
+
     def _sanitize_secret_value(self, value: Any) -> Any:
         if value is None:
             return None
@@ -679,6 +713,12 @@ class StartupDiagnostics:
             return value
         except Exception as exc:
             tb = traceback.format_exc()
+            if isinstance(exc, discord.HTTPException):
+                self._emit_visible_http_exception_block(
+                    stage_name=stage_name,
+                    error=exc,
+                    details=self._extract_discord_http_exception_details(exc),
+                )
             finished = datetime.now(timezone.utc)
             self.stages.append(
                 StartupStageResult(
