@@ -4,16 +4,11 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import date
 from typing import Any, Awaitable, Callable, Literal
 
 import discord
-from sqlalchemy import func, select
 
-from db.models import BusinessRunRow, SundayAnnouncementStateRow, UserRow, WalletRow
-from services.config import GUILD_ID, VIP_ROLE_ID
-from services.db import sessions
-from services.items_catalog import ITEMS
+from services.config import GUILD_ID
 from services.startup_diagnostics import STATUS_FAIL, STATUS_PASS, STATUS_SKIP, STATUS_WARN, StartupDiagnostics
 
 log = logging.getLogger("startup_manager")
@@ -138,19 +133,13 @@ class StartupManager:
             "guild_state_snapshot",
             _warm_guild_state_snapshot,
             required=False,
-            description="Preload guild-id and active-business counts for early runtime checks.",
+            description="Preload connected guild IDs for startup health checks.",
         )
         self.register_cache_warmup(
-            "feature_flag_snapshot",
-            _warm_feature_flags,
-            required=False,
-            description="Preload Sunday shop state flags used by recurring announcer logic.",
-        )
-        self.register_cache_warmup(
-            "static_lookup_indexes",
-            _warm_static_lookup_indexes,
+            "bot_identity_snapshot",
+            _warm_bot_identity_snapshot,
             required=True,
-            description="Build in-memory indexes for item/shop and category lookups.",
+            description="Cache startup identity metadata for diagnostics and health checks.",
         )
 
         self.register_boot_routine(
@@ -161,9 +150,9 @@ class StartupManager:
         )
         self.register_boot_routine(
             "sanitize_sunday_state",
-            _boot_sanitize_sunday_state,
+            _boot_noop_sanitizer,
             required=False,
-            description="Fix impossible Sunday announcement state rows to keep rotation sane.",
+            description="Legacy economy Sunday-state sanitizer intentionally disabled.",
         )
         self.register_boot_routine(
             "verify_background_services",
@@ -233,97 +222,24 @@ class StartupManager:
 
 
 async def _warm_guild_state_snapshot(bot: Any, cache: BotStartupCache) -> str:
-    sessionmaker = sessions()
-    guild_ids: set[int] = set()
-
-    async with sessionmaker() as session:
-        user_guilds = (await session.execute(select(UserRow.guild_id).group_by(UserRow.guild_id).limit(2000))).scalars().all()
-        wallet_guilds = (await session.execute(select(WalletRow.guild_id).group_by(WalletRow.guild_id).limit(2000))).scalars().all()
-        active_runs = (
-            await session.execute(
-                select(BusinessRunRow.guild_id, func.count(BusinessRunRow.id))
-                .where(BusinessRunRow.status == "running")
-                .group_by(BusinessRunRow.guild_id)
-                .limit(1000)
-            )
-        ).all()
-
-    guild_ids.update(int(g) for g in user_guilds)
-    guild_ids.update(int(g) for g in wallet_guilds)
-    guild_ids.update(int(gid) for gid, _ in active_runs)
-
+    guild_ids = {int(g.id) for g in getattr(bot, "guilds", [])}
     cache.guild_ids = guild_ids
-    cache.counters["active_business_runs"] = int(sum(int(cnt) for _, cnt in active_runs))
-    cache.lookup_maps["active_business_runs_by_guild"] = {str(int(gid)): int(cnt) for gid, cnt in active_runs}
-    return f"guilds={len(guild_ids)} active_runs={cache.counters['active_business_runs']}"
+    cache.counters["connected_guilds"] = len(guild_ids)
+    return f"connected_guilds={len(guild_ids)}"
 
 
-async def _warm_feature_flags(bot: Any, cache: BotStartupCache) -> str:
-    sessionmaker = sessions()
-    async with sessionmaker() as session:
-        rows = (
-            await session.execute(
-                select(
-                    SundayAnnouncementStateRow.guild_id,
-                    SundayAnnouncementStateRow.launch_sent,
-                    SundayAnnouncementStateRow.midday_sent,
-                    SundayAnnouncementStateRow.final_sent,
-                    SundayAnnouncementStateRow.last_event_date,
-                ).limit(2000)
-            )
-        ).all()
-
-    flags: dict[str, Any] = {}
-    for gid, launch, midday, final, last_event_date in rows:
-        flags[str(int(gid))] = {
-            "launch_sent": bool(launch),
-            "midday_sent": bool(midday),
-            "final_sent": bool(final),
-            "last_event_date": last_event_date.isoformat() if last_event_date else None,
-        }
-
-    cache.feature_flags["sunday_announcement"] = flags
-    return f"sunday_state_rows={len(flags)}"
-
-
-def _warm_static_lookup_indexes(bot: Any, cache: BotStartupCache) -> str:
-    rarity_counts: dict[str, int] = {}
-    for item in ITEMS.values():
-        rarity = str(item.rarity.value)
-        rarity_counts[rarity] = rarity_counts.get(rarity, 0) + 1
-
-    cache.lookup_maps["item_rarity_counts"] = rarity_counts
-    cache.lookup_maps["item_daily_limits"] = {k: int(v.daily_limit) for k, v in ITEMS.items()}
-    cache.counters["catalog_items"] = len(ITEMS)
-    return f"items={len(ITEMS)} rarities={len(rarity_counts)}"
+def _warm_bot_identity_snapshot(bot: Any, cache: BotStartupCache) -> str:
+    user = getattr(bot, "user", None)
+    cache.feature_flags["bot_identity"] = {
+        "user_id": getattr(user, "id", None),
+        "user_name": getattr(user, "name", None),
+        "guild_count": len(getattr(bot, "guilds", [])),
+    }
+    return f"user_id={cache.feature_flags['bot_identity']['user_id']} guilds={cache.feature_flags['bot_identity']['guild_count']}"
 
 
 def _configured_discord_targets() -> list[DiscordTargetSpec]:
-    from cogs.shop import SHOP_SUNDAY_ANNOUNCE_CHANNEL_ID
-
     targets: list[DiscordTargetSpec] = []
-
-    if int(VIP_ROLE_ID) > 0:
-        targets.append(
-            DiscordTargetSpec(
-                key="VIP_ROLE_ID",
-                target_id=int(VIP_ROLE_ID),
-                target_type="role",
-                required=False,
-                reason="VIP bonuses and VIP sync can degrade safely if this role is missing.",
-            )
-        )
-
-    if int(SHOP_SUNDAY_ANNOUNCE_CHANNEL_ID) > 0:
-        targets.append(
-            DiscordTargetSpec(
-                key="SHOP_SUNDAY_ANNOUNCE_CHANNEL_ID",
-                target_id=int(SHOP_SUNDAY_ANNOUNCE_CHANNEL_ID),
-                target_type="channel",
-                required=False,
-                reason="Sunday shop announcements are feature-specific and can be skipped.",
-            )
-        )
 
     return targets
 
@@ -482,23 +398,8 @@ async def _boot_validate_discord_targets(bot: Any, cache: BotStartupCache) -> st
     )
 
 
-async def _boot_sanitize_sunday_state(bot: Any, cache: BotStartupCache) -> str:
-    today = date.today()
-    fixed = 0
-    sessionmaker = sessions()
-
-    async with sessionmaker() as session:
-        async with session.begin():
-            rows = list((await session.execute(select(SundayAnnouncementStateRow))).scalars())
-            for row in rows:
-                if row.last_event_date and row.last_event_date > today:
-                    row.last_event_date = today
-                    row.launch_sent = False
-                    row.midday_sent = False
-                    row.final_sent = False
-                    fixed += 1
-
-    return f"rows_scanned={len(rows)} fixed={fixed}"
+def _boot_noop_sanitizer(bot: Any, cache: BotStartupCache) -> str:
+    return "legacy economy sanitizers disabled"
 
 
 def _boot_verify_background_services(bot: Any, cache: BotStartupCache) -> str:

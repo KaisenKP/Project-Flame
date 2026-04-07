@@ -4,6 +4,7 @@ import asyncio
 import datetime as dt
 import logging
 import os
+import fnmatch
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -69,6 +70,42 @@ def _iter_extension_modules(cogs_dir: Path, cogs_package: str) -> list[str]:
     return exts
 
 
+DEFAULT_ACTIVE_EXTENSIONS: tuple[str, ...] = (
+    "cogs.activity_listener",
+    "cogs.admin_restart",
+    "cogs.ban",
+    "cogs.community_tools",
+    "cogs.error_monitor",
+    "cogs.moderation",
+    "cogs.ping",
+    "cogs.sentinel",
+    "cogs.tickets",
+    "cogs.youtube_notifications",
+)
+
+
+def _parse_extension_patterns(raw: str | None) -> list[str]:
+    if raw is None:
+        return []
+    tokens = [t.strip() for t in raw.replace(",", " ").split()]
+    return [t for t in tokens if t]
+
+
+def _filter_extensions(
+    discovered: list[str],
+    *,
+    allow_patterns: list[str],
+    deny_patterns: list[str],
+) -> list[str]:
+    allowed = discovered
+    if allow_patterns:
+        allowed = [ext for ext in discovered if any(fnmatch.fnmatch(ext, pattern) for pattern in allow_patterns)]
+
+    if deny_patterns:
+        allowed = [ext for ext in allowed if not any(fnmatch.fnmatch(ext, pattern) for pattern in deny_patterns)]
+    return sorted(allowed)
+
+
 
 
 class FlameCommandTree(app_commands.CommandTree["FlameBot"]):
@@ -103,6 +140,8 @@ class FlameBot(commands.Bot):
         sync_commands: bool = True,
         dev_guild_id: int | None = None,
         owner_ids: set[int] | None = None,
+        active_extension_patterns: list[str] | None = None,
+        inactive_extension_patterns: list[str] | None = None,
         startup_diagnostics: StartupDiagnostics | None = None,
     ):
         intents = discord.Intents.default()
@@ -125,6 +164,8 @@ class FlameBot(commands.Bot):
         self.dev_guild_id = dev_guild_id
         self.owner_ids = owner_ids or set()
         self.startup_diagnostics = startup_diagnostics
+        self.active_extension_patterns = list(active_extension_patterns or DEFAULT_ACTIVE_EXTENSIONS)
+        self.inactive_extension_patterns = list(inactive_extension_patterns or [])
 
         self.cogs_dir = (cogs_dir or Path("cogs")).resolve()
         self.cogs_package = cogs_package
@@ -264,31 +305,33 @@ class FlameBot(commands.Bot):
                 self.startup_diagnostics.mark_startup_complete()
 
     async def close(self) -> None:
-        backup_cog = self.get_cog("EconomyBackupsCog")
-        if backup_cog is not None and hasattr(backup_cog, "run_pre_restart_backup"):
-            try:
-                await backup_cog.run_pre_restart_backup(reason="shutdown")
-            except Exception as exc:
-                if self.startup_diagnostics is not None:
-                    self.startup_diagnostics.capture_exception(
-                        exc,
-                        category="economy",
-                        subsystem="economy",
-                        source="pre_shutdown_backup",
-                        summary="Pre-shutdown economy backup failed",
-                    )
-                log.exception("Pre-shutdown economy backup failed")
         await self.stop_background_tasks()
         await super().close()
 
     async def load_all_extensions(self) -> None:
-        exts = _iter_extension_modules(self.cogs_dir, self.cogs_package)
+        discovered = _iter_extension_modules(self.cogs_dir, self.cogs_package)
+        exts = _filter_extensions(
+            discovered,
+            allow_patterns=self.active_extension_patterns,
+            deny_patterns=self.inactive_extension_patterns,
+        )
 
         if not exts:
-            log.warning("No extensions found (dir=%s package=%s).", self.cogs_dir, self.cogs_package)
+            log.warning(
+                "No active extensions found (dir=%s package=%s allow=%s deny=%s discovered=%d).",
+                self.cogs_dir,
+                self.cogs_package,
+                self.active_extension_patterns,
+                self.inactive_extension_patterns,
+                len(discovered),
+            )
             return
 
-        log.info("Loading %d extension(s) from %s ...", len(exts), self.cogs_dir)
+        skipped = sorted(set(discovered) - set(exts))
+        if skipped:
+            log.info("Extensions isolated from active startup: %s", ", ".join(skipped))
+
+        log.info("Loading %d active extension(s) from %s ...", len(exts), self.cogs_dir)
 
         loaded = 0
         failed = 0
@@ -488,6 +531,8 @@ async def build_bot_from_env(startup_diagnostics: StartupDiagnostics | None = No
                 owner_ids.add(int(part))
                 if startup_diagnostics is not None and startup_diagnostics.owner_id_hint is None:
                     startup_diagnostics.owner_id_hint = int(part)
+    active_extension_patterns = _parse_extension_patterns(os.getenv("ACTIVE_EXTENSIONS"))
+    inactive_extension_patterns = _parse_extension_patterns(os.getenv("INACTIVE_EXTENSIONS"))
 
     return FlameBot(
         prefix=prefix,
@@ -497,6 +542,8 @@ async def build_bot_from_env(startup_diagnostics: StartupDiagnostics | None = No
         sync_commands=sync_commands,
         dev_guild_id=dev_guild_id,
         owner_ids=owner_ids,
+        active_extension_patterns=active_extension_patterns,
+        inactive_extension_patterns=inactive_extension_patterns,
         startup_diagnostics=startup_diagnostics,
     )
 
