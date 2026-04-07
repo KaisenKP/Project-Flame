@@ -1,8 +1,13 @@
-# Bartender Codebase Overview
+# FlameBot Codebase Overview
 
 ## Runtime boot flow
 - `main.py` is the process entry point. It configures Rich logging, reads `BOT_TOKEN` from environment, optionally runs `tables.py` migration helper, builds the bot via `build_bot_from_env()`, and starts the Discord client with graceful SIGINT/SIGTERM shutdown handling.
-- `bot.py` defines `PulseBot`, auto-discovers cogs in the `cogs/` tree by looking for `setup()` functions, ensures DB schema (`Base.metadata.create_all(checkfirst=True)`), syncs slash commands, and runs a heartbeat background task.
+- `bot.py` defines `FlameBot` (with temporary legacy aliases `PulseBot`/`PulseCommandTree` for compatibility), auto-discovers cogs in the `cogs/` tree by looking for `setup()` functions, ensures DB schema (`Base.metadata.create_all(checkfirst=True)`), syncs slash commands, and runs heartbeat/restart background tasks.
+
+## Active vs legacy transition state
+- **Active identity:** FlameBot is now the primary runtime identity used for boot logging, ping responses, admin panel labels, and background task names.
+- **Preserved compatibility layer:** legacy class names and legacy background task identifiers are still accepted where needed so older imports/checks do not break while migration continues.
+- **Remaining legacy surface area:** legacy domain systems (economy, business, activity, jobs) stay in-place for reuse/reactivation, but are expected to stay behind FlameBot-facing command/cog entry points.
 
 ## Data layer
 - `db/engine.py` builds a singleton SQLAlchemy async engine/sessionmaker from env vars (either `DATABASE_URL`/`DB_URL` or split `DB_HOST`, `DB_NAME`, etc.) and supports sanitizing host/port values.

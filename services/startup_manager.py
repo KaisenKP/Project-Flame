@@ -504,10 +504,13 @@ async def _boot_sanitize_sunday_state(bot: Any, cache: BotStartupCache) -> str:
 def _boot_verify_background_services(bot: Any, cache: BotStartupCache) -> str:
     issues: list[str] = []
 
-    if not any(t.get_name() == "pulse.heartbeat" for t in getattr(bot, "_bg_tasks", set())):
-        issues.append("pulse.heartbeat task is missing")
-    if not any(t.get_name() == "pulse.scheduled_restart" for t in getattr(bot, "_bg_tasks", set())):
-        issues.append("pulse.scheduled_restart task is missing")
+    task_names = {t.get_name() for t in getattr(bot, "_bg_tasks", set())}
+    heartbeat_ok = "flame.heartbeat" in task_names or "pulse.heartbeat" in task_names
+    restart_ok = "flame.scheduled_restart" in task_names or "pulse.scheduled_restart" in task_names
+    if not heartbeat_ok:
+        issues.append("flame.heartbeat task is missing")
+    if not restart_ok:
+        issues.append("flame.scheduled_restart task is missing")
 
     activity_cog = bot.get_cog("ActivityListenerCog")
     if activity_cog is not None:

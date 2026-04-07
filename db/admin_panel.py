@@ -222,7 +222,7 @@ class AdminPanel(commands.Cog):
         return True, ""
 
     def _panel_embed(self) -> discord.Embed:
-        e = discord.Embed(title="Project Pulse Admin Panel")
+        e = discord.Embed(title="FlameBot Admin Panel")
         e.description = (
             "Private control room.\n"
             "Buttons open modals for fast edits.\n"
@@ -262,7 +262,7 @@ class AdminPanel(commands.Cog):
         try:
             msg = await channel.send(embed=self._panel_embed(), view=self.view)
             self._posted_once = True
-            print(f"[Pulse] Admin panel posted. Set ADMIN_PANEL_MESSAGE_ID={msg.id} to make it persistent.")
+            print(f"[FlameBot] Admin panel posted. Set ADMIN_PANEL_MESSAGE_ID={msg.id} to make it persistent.")
         except Exception:
             return
 
@@ -270,7 +270,7 @@ class AdminPanel(commands.Cog):
     async def on_ready(self):
         await self._ensure_panel_message()
 
-    @app_commands.command(name="admin_panel", description="Post or refresh the Pulse admin panel (admin only).")
+    @app_commands.command(name="admin_panel", description="Post or refresh the FlameBot admin panel (admin only).")
     async def admin_panel(self, interaction: discord.Interaction):
         ok, msg = self._guard(interaction)
         if not ok:
