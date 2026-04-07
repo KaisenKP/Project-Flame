@@ -18,7 +18,7 @@ class BanDraft:
     reason: str = "No reason provided"
     delete_days: int = 0
     dm_enabled: bool = True
-    dm_message: str = "You have been banned from Licka Sto."
+    dm_message: str = "You have been banned from this server."
     appeal_url: str = ""
 
 
@@ -68,7 +68,7 @@ class BanDeleteDaysModal(discord.ui.Modal, title="Set message delete window"):
 class BanDmMessageModal(discord.ui.Modal, title="Set DM message"):
     message = discord.ui.TextInput(
         label="DM Message",
-        placeholder="You have been banned from Licka Sto.",
+        placeholder="You have been banned from this server.",
         required=True,
         max_length=500,
         style=discord.TextStyle.paragraph,
