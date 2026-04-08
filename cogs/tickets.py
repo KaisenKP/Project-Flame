@@ -19,8 +19,10 @@ from services.db import sessions
 
 DEFAULT_OPEN_CATEGORY_ID = 1481813354849898648
 DEFAULT_ARCHIVE_CATEGORY_ID = 1481813977498652885
-DEFAULT_PANEL_CHANNEL_ID = 1480005549809467453
+DEFAULT_PANEL_CHANNEL_ID = 1491451689528594472
 DEFAULT_PANEL_MESSAGE_ID = 1481820566015971500
+TARGET_TICKET_GUILD_ID = 1479503568095412325
+TARGET_SUPPORT_PANEL_CHANNEL_ID = 1491451689528594472
 
 DEFAULT_STAFF_ROLE_ID = 1476620136114028544
 DEFAULT_HEAD_MOD_ROLE_ID = 1467394498878373979
@@ -575,6 +577,34 @@ class TicketsCog(commands.Cog):
                     except Exception:
                         pass
 
+    async def _ensure_category(
+        self,
+        guild: discord.Guild,
+        *,
+        preferred_id: int | None,
+        fallback_name: str,
+    ) -> int | None:
+        if preferred_id:
+            existing = guild.get_channel(int(preferred_id))
+            if isinstance(existing, discord.CategoryChannel):
+                return int(existing.id)
+            try:
+                fetched = await self.bot.fetch_channel(int(preferred_id))
+                if isinstance(fetched, discord.CategoryChannel) and fetched.guild.id == guild.id:
+                    return int(fetched.id)
+            except Exception:
+                pass
+
+        by_name = discord.utils.get(guild.categories, name=fallback_name)
+        if by_name:
+            return int(by_name.id)
+
+        try:
+            created = await guild.create_category(fallback_name, reason="Ticket system bootstrap")
+            return int(created.id)
+        except Exception:
+            return None
+
     async def _auto_seed_defaults_for_all_guilds(self) -> None:
         for guild in self.bot.guilds:
             try:
@@ -584,16 +614,34 @@ class TicketsCog(commands.Cog):
 
     async def _auto_seed_defaults_for_guild(self, guild: discord.Guild) -> None:
         cfg = await self.fetch_config(guild.id)
+
+        desired_panel_channel_id = (
+            TARGET_SUPPORT_PANEL_CHANNEL_ID
+            if int(guild.id) == TARGET_TICKET_GUILD_ID
+            else (cfg.panel_channel_id if cfg else None) or DEFAULT_PANEL_CHANNEL_ID
+        )
+
+        open_category_id = await self._ensure_category(
+            guild,
+            preferred_id=(cfg.category_id if cfg else None) or DEFAULT_OPEN_CATEGORY_ID,
+            fallback_name="Open Tickets",
+        )
+        archive_category_id = await self._ensure_category(
+            guild,
+            preferred_id=(cfg.archive_category_id if cfg else None) or DEFAULT_ARCHIVE_CATEGORY_ID,
+            fallback_name="Closed Tickets",
+        )
+
         if cfg is None:
             await self.upsert_config(
                 guild.id,
-                category_id=DEFAULT_OPEN_CATEGORY_ID,
-                archive_category_id=DEFAULT_ARCHIVE_CATEGORY_ID,
+                category_id=open_category_id or DEFAULT_OPEN_CATEGORY_ID,
+                archive_category_id=archive_category_id or DEFAULT_ARCHIVE_CATEGORY_ID,
                 log_channel_id=None,
                 support_role_id=DEFAULT_STAFF_ROLE_ID,
                 admin_role_id=DEFAULT_STAFF_ROLE_ID,
                 head_mod_role_id=DEFAULT_HEAD_MOD_ROLE_ID,
-                panel_channel_id=DEFAULT_PANEL_CHANNEL_ID,
+                panel_channel_id=desired_panel_channel_id,
                 panel_message_id=DEFAULT_PANEL_MESSAGE_ID,
                 panel_title=DEFAULT_PANEL_TITLE,
                 panel_description=DEFAULT_PANEL_DESCRIPTION,
@@ -605,13 +653,13 @@ class TicketsCog(commands.Cog):
         else:
             await self.upsert_config(
                 guild.id,
-                category_id=cfg.category_id or DEFAULT_OPEN_CATEGORY_ID,
-                archive_category_id=cfg.archive_category_id or DEFAULT_ARCHIVE_CATEGORY_ID,
+                category_id=open_category_id or cfg.category_id or DEFAULT_OPEN_CATEGORY_ID,
+                archive_category_id=archive_category_id or cfg.archive_category_id or DEFAULT_ARCHIVE_CATEGORY_ID,
                 log_channel_id=cfg.log_channel_id,
                 support_role_id=cfg.support_role_id or DEFAULT_STAFF_ROLE_ID,
                 admin_role_id=cfg.admin_role_id or DEFAULT_STAFF_ROLE_ID,
                 head_mod_role_id=cfg.head_mod_role_id or DEFAULT_HEAD_MOD_ROLE_ID,
-                panel_channel_id=cfg.panel_channel_id or DEFAULT_PANEL_CHANNEL_ID,
+                panel_channel_id=desired_panel_channel_id,
                 panel_message_id=cfg.panel_message_id or DEFAULT_PANEL_MESSAGE_ID,
                 panel_title=cfg.panel_title or DEFAULT_PANEL_TITLE,
                 panel_description=cfg.panel_description or DEFAULT_PANEL_DESCRIPTION,
@@ -688,29 +736,6 @@ class TicketsCog(commands.Cog):
                 "sort_order": 2,
             },
             {
-                "type_key": "partnership",
-                "label": "Partnership",
-                "emoji": "🤝",
-                "button_style": int(discord.ButtonStyle.primary),
-                "questions": [
-                    {
-                        "label": "Are you 18+?",
-                        "placeholder": "Yes / No",
-                        "required": True,
-                        "style": "short",
-                        "max_length": 50,
-                    },
-                    {
-                        "label": "What rep do you have in server?",
-                        "placeholder": "Tell us your standing / connection / history",
-                        "required": True,
-                        "style": "paragraph",
-                        "max_length": 1000,
-                    }
-                ],
-                "sort_order": 3,
-            },
-            {
                 "type_key": "donate",
                 "label": "Donate",
                 "emoji": "💙",
@@ -724,7 +749,7 @@ class TicketsCog(commands.Cog):
                         "max_length": 1200,
                     }
                 ],
-                "sort_order": 4,
+                "sort_order": 3,
             },
         ]
 
@@ -743,6 +768,21 @@ class TicketsCog(commands.Cog):
                     sort_order=item["sort_order"],
                     enabled=True,
                 )
+
+        partnership = await self.fetch_ticket_type(guild_id, "partnership")
+        if partnership and partnership.enabled:
+            await self.upsert_ticket_type(
+                guild_id,
+                type_key=partnership.type_key,
+                label=partnership.label,
+                emoji=partnership.emoji,
+                button_style=partnership.button_style,
+                category_id=partnership.category_id,
+                staff_role_id=partnership.staff_role_id,
+                questions_json=partnership.questions_json,
+                sort_order=partnership.sort_order,
+                enabled=False,
+            )
 
     async def _restore_panel_views(self) -> None:
         async with self.sessionmaker() as session:
@@ -1553,7 +1593,6 @@ class TicketsCog(commands.Cog):
             "general": "Any general questions or suggestions",
             "report": "Report a user and/or staff",
             "application": "Apply for staff",
-            "partnership": "Requirements 18+ and have rep in server",
             "donate": "Help with billing and donations",
         }
 
