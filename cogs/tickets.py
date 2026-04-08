@@ -822,7 +822,7 @@ class TicketsCog(commands.Cog):
                         admin_role_id=cfg.admin_role_id,
                         head_mod_role_id=cfg.head_mod_role_id,
                         panel_channel_id=cfg.panel_channel_id or DEFAULT_PANEL_CHANNEL_ID,
-                        panel_message_id=DEFAULT_PANEL_MESSAGE_ID,
+                        panel_message_id=None,
                         panel_title=cfg.panel_title,
                         panel_description=cfg.panel_description,
                         panel_image_url=cfg.panel_image_url,
@@ -830,6 +830,7 @@ class TicketsCog(commands.Cog):
                         transcript_enabled=cfg.transcript_enabled,
                         close_cooldown_s=cfg.close_cooldown_s,
                     )
+                await self._refresh_panel_message(guild, only_create_if_missing=True)
             except Exception:
                 pass
 
@@ -1771,8 +1772,6 @@ class TicketsCog(commands.Cog):
             msg = None
 
         if msg is None:
-            if only_create_if_missing:
-                return False, "Configured panel message was not found."
             msg = await panel_channel.send(embed=embed, view=view)
             await self.upsert_config(
                 guild.id,
