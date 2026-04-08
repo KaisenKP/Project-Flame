@@ -760,24 +760,19 @@ def _worker_slots_for_business_key_and_level(
     prestige: int = 0,
     legacy_floor: int = 0,
 ) -> int:
-    _ = business_key
-    normalized_level = max(int(level), 0)
+    _ = (business_key, level)
     normalized_prestige = max(int(prestige), 0)
 
-    # Worker capacity should materially outpace manager capacity so players
-    # can keep hiring workers as they upgrade businesses.
-    #
-    # - Baseline worker slots: BASE_WORKER_SLOTS
-    # - +1 slot every 2 levels (higher growth than manager slots)
-    # - +1 slot per prestige tier
-    #
+    # Worker capacity progression is now prestige-only.
     # Keep legacy floor protection so no existing assignments become invalid.
-    from_progression = BASE_WORKER_SLOTS + (normalized_level // 2) + normalized_prestige
+    from_progression = BASE_WORKER_SLOTS + normalized_prestige
     return max(from_progression, max(int(legacy_floor), 0))
 
 
-def _manager_slots_for_level(level: int) -> int:
-    return BASE_MANAGER_SLOTS + (max(int(level), 0) // 5)
+def _manager_slots_for_level(level: int, *, prestige: int = 0, legacy_floor: int = 0) -> int:
+    _ = level
+    from_progression = BASE_MANAGER_SLOTS + max(int(prestige), 0)
+    return max(from_progression, max(int(legacy_floor), 0))
 
 
 def _normalize_business_progress(*, level: int, prestige: int) -> tuple[int, int]:
@@ -1466,6 +1461,35 @@ async def _sum_active_worker_percent_bonus_bp_for_ownership(
     return int(value or 0)
 
 
+async def _max_active_worker_slot_index_for_ownership(session, *, ownership_id: int) -> int:
+    value = await session.scalar(
+        select(func.coalesce(func.max(BusinessWorkerAssignmentRow.slot_index), 0)).where(
+            BusinessWorkerAssignmentRow.ownership_id == int(ownership_id),
+            BusinessWorkerAssignmentRow.is_active.is_(True),
+        )
+    )
+    return max(int(value or 0), 0)
+
+
+async def _max_active_manager_slot_index_for_ownership(session, *, ownership_id: int) -> int:
+    value = await session.scalar(
+        select(func.coalesce(func.max(BusinessManagerAssignmentRow.slot_index), 0)).where(
+            BusinessManagerAssignmentRow.ownership_id == int(ownership_id),
+            BusinessManagerAssignmentRow.is_active.is_(True),
+        )
+    )
+    return max(int(value or 0), 0)
+
+
+async def _resolved_worker_slot_floor(session, *, ownership: BusinessOwnershipRow) -> int:
+    active_max_slot = await _max_active_worker_slot_index_for_ownership(session, ownership_id=int(ownership.id))
+    return max(int(getattr(ownership, "worker_slot_legacy_floor", 0) or 0), active_max_slot)
+
+
+async def _resolved_manager_slot_floor(session, *, ownership: BusinessOwnershipRow) -> int:
+    return await _max_active_manager_slot_index_for_ownership(session, ownership_id=int(ownership.id))
+
+
 async def _get_active_worker_rows_for_ownership(session, *, ownership_id: int) -> list[BusinessWorkerAssignmentRow]:
     rows = await session.scalars(
         select(BusinessWorkerAssignmentRow).where(
@@ -1587,7 +1611,7 @@ async def preview_worker_migration_for_ownership(
         str(ownership.business_key),
         level,
         prestige=prestige,
-        legacy_floor=int(getattr(ownership, "worker_slot_legacy_floor", 0) or 0),
+        legacy_floor=await _resolved_worker_slot_floor(session, ownership=ownership),
     )
     required_slot_floor = max(int(getattr(ownership, "worker_slot_legacy_floor", 0) or 0), projected_new_count)
     estimated_before_power = old_flat_total + old_bp_total
@@ -1760,7 +1784,7 @@ async def migrate_worker_system_for_ownership(session, *, ownership_id: int) -> 
         str(ownership.business_key),
         level,
         prestige=prestige,
-        legacy_floor=int(getattr(ownership, "worker_slot_legacy_floor", 0) or 0),
+        legacy_floor=await _resolved_worker_slot_floor(session, ownership=ownership),
     )
     if new_worker_count > required_slots:
         ownership.worker_slot_legacy_floor = int(new_worker_count)
@@ -2134,7 +2158,7 @@ async def _build_business_card_for_user(
             worker_slots_used=0,
             worker_slots_total=_worker_slots_for_business_key_and_level(defn.key, 0, prestige=0, legacy_floor=0),
             manager_slots_used=0,
-            manager_slots_total=_manager_slots_for_level(0),
+            manager_slots_total=_manager_slots_for_level(0, prestige=0, legacy_floor=0),
             purchase_cost=int(defn.cost_silver),
             image_url=defn.image_url,
         )
@@ -2180,10 +2204,10 @@ async def _build_business_card_for_user(
             defn.key,
             level,
             prestige=prestige,
-            legacy_floor=int(getattr(owned_row, "worker_slot_legacy_floor", 0) or 0),
+            legacy_floor=await _resolved_worker_slot_floor(session, ownership=owned_row),
         ),
         manager_slots_used=manager_used,
-        manager_slots_total=_manager_slots_for_level(level),
+        manager_slots_total=_manager_slots_for_level(level, prestige=prestige, legacy_floor=await _resolved_manager_slot_floor(session, ownership=owned_row)),
         projected_payout=int(hourly_profit * runtime_total),
         worker_bonus_bp=int(state["worker_bp"]),
         manager_summary=str(state["manager_summary"]),
@@ -2272,7 +2296,7 @@ async def get_business_manage_snapshot(
             bulk_upgrade_5_unlocked=bulk_option_for(prestige, 5).unlocked, bulk_upgrade_10_unlocked=bulk_option_for(prestige, 10).unlocked,
             runtime_remaining_hours=0, total_runtime_hours=runtime_total, worker_slots_used=0,
             worker_slots_total=_worker_slots_for_business_key_and_level(defn.key, level, prestige=prestige, legacy_floor=0), manager_slots_used=0,
-            manager_slots_total=_manager_slots_for_level(level), projected_payout=int(defn.base_hourly_income * runtime_total),
+            manager_slots_total=_manager_slots_for_level(level, prestige=prestige, legacy_floor=0), projected_payout=int(defn.base_hourly_income * runtime_total),
             worker_bonus_bp=0, worker_summary="No workers assigned", manager_summary="No managers assigned",
             active_event_summary="No active events", active_event_lines=[], synergy_bonus_bp=0, synergy_summary="No synergy active",
             run_mode="Standard", run_mode_key=RUN_MODE_STANDARD, trait_summary=trait.positive_bias,
@@ -2301,7 +2325,7 @@ async def get_business_manage_snapshot(
 
     next_unlock = None
     if level < 25:
-        next_unlock = "Level 25 unlocks stronger event scaling and deeper staffing value."
+        next_unlock = "Prestige increases worker/manager slot growth and improves staffing power."
     elif level < 50:
         next_unlock = "Level 50 unlocks Aggressive mode for this business."
     elif level < 75:
@@ -2339,9 +2363,9 @@ async def get_business_manage_snapshot(
             defn.key,
             level,
             prestige=prestige,
-            legacy_floor=int(getattr(ownership, "worker_slot_legacy_floor", 0) or 0),
+            legacy_floor=await _resolved_worker_slot_floor(session, ownership=ownership),
         ), manager_slots_used=manager_used,
-        manager_slots_total=_manager_slots_for_level(level), projected_payout=int(hourly_profit * runtime_total),
+        manager_slots_total=_manager_slots_for_level(level, prestige=prestige, legacy_floor=await _resolved_manager_slot_floor(session, ownership=ownership)), projected_payout=int(hourly_profit * runtime_total),
         worker_bonus_bp=int(state['worker_bp']), worker_summary=str(state['worker_summary']), manager_summary=str(state['manager_summary']),
         active_event_summary=str(state['active_event_summary']), active_event_lines=list(state['active_event_lines']),
         synergy_bonus_bp=int(state['synergy_bp']), synergy_summary=str(state['synergy_summary']),
@@ -3113,7 +3137,7 @@ async def get_worker_assignment_slots(
         str(business_key),
         level,
         prestige=prestige,
-        legacy_floor=int(getattr(ownership, "worker_slot_legacy_floor", 0) or 0),
+        legacy_floor=await _resolved_worker_slot_floor(session, ownership=ownership),
     )
     rows = await session.scalars(
         select(BusinessWorkerAssignmentRow)
@@ -3161,8 +3185,12 @@ async def get_manager_assignment_slots(
     if ownership is None:
         return []
 
-    level, _ = await _resolve_effective_business_progress(session, ownership=ownership)
-    total_slots = _manager_slots_for_level(level)
+    level, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
+    total_slots = _manager_slots_for_level(
+        level,
+        prestige=prestige,
+        legacy_floor=await _resolved_manager_slot_floor(session, ownership=ownership),
+    )
     rows = await session.scalars(
         select(BusinessManagerAssignmentRow)
         .where(
@@ -3226,7 +3254,7 @@ async def hire_worker(
         manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
         return BusinessActionResult(
             ok=False,
-            message="All worker slots are full. Upgrade the business to unlock more slots.",
+            message="All worker slots are full. Increase prestige to unlock more slots.",
             snapshot=hub,
             manage_snapshot=manage,
         )
@@ -3354,7 +3382,7 @@ async def hire_worker_manual(
     if free_slot is None:
         hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
         manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
-        return BusinessActionResult(ok=False, message="All worker slots are full. Upgrade the business to unlock more slots.", snapshot=hub, manage_snapshot=manage)
+        return BusinessActionResult(ok=False, message="All worker slots are full. Increase prestige to unlock more slots.", snapshot=hub, manage_snapshot=manage)
 
     norm_type = _normalize_worker_type(worker_type)
     norm_rarity = _normalize_worker_rarity(rarity)
@@ -3443,7 +3471,7 @@ async def roll_worker_candidate(
     if free_slot is None:
         hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
         manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
-        return BusinessActionResult(ok=False, message="All worker slots are full. Upgrade the business to unlock more slots.", snapshot=hub, manage_snapshot=manage)
+        return BusinessActionResult(ok=False, message="All worker slots are full. Increase prestige to unlock more slots.", snapshot=hub, manage_snapshot=manage)
 
     wallet = await _get_wallet(session, guild_id=guild_id, user_id=user_id)
     safe_cost = max(int(reroll_cost), 0)
@@ -3506,7 +3534,7 @@ async def remove_worker(
         str(business_key),
         level,
         prestige=prestige,
-        legacy_floor=int(getattr(ownership, "worker_slot_legacy_floor", 0) or 0),
+        legacy_floor=await _resolved_worker_slot_floor(session, ownership=ownership),
     )
     if normalized_slot <= 0 or normalized_slot > max_slot:
         hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
@@ -3581,7 +3609,7 @@ async def hire_manager(
         manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
         return BusinessActionResult(
             ok=False,
-            message="All manager slots are full. Upgrade the business to unlock more slots.",
+            message="All manager slots are full. Increase prestige to unlock more slots.",
             snapshot=hub,
             manage_snapshot=manage,
         )
@@ -3709,7 +3737,7 @@ async def roll_manager_candidate(
     if free_slot is None:
         hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
         manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
-        return BusinessActionResult(ok=False, message="All manager slots are full. Upgrade the business to unlock more slots.", snapshot=hub, manage_snapshot=manage)
+        return BusinessActionResult(ok=False, message="All manager slots are full. Increase prestige to unlock more slots.", snapshot=hub, manage_snapshot=manage)
 
     wallet = await _get_wallet(session, guild_id=guild_id, user_id=user_id)
     safe_cost = max(int(reroll_cost), 0)
@@ -3771,7 +3799,7 @@ async def hire_manager_manual(
     if free_slot is None:
         hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
         manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
-        return BusinessActionResult(ok=False, message="All manager slots are full. Upgrade the business to unlock more slots.", snapshot=hub, manage_snapshot=manage)
+        return BusinessActionResult(ok=False, message="All manager slots are full. Increase prestige to unlock more slots.", snapshot=hub, manage_snapshot=manage)
 
     norm_rarity = _normalize_rarity(rarity)
     runtime_bonus = _clamp_int(int(runtime_bonus_hours), 0, 48)
@@ -3861,8 +3889,12 @@ async def remove_manager(
         return BusinessActionResult(ok=False, message=f"You do not own **{defn.name}** yet.", snapshot=hub)
 
     normalized_slot = _normalize_slot_index(slot_index)
-    level, _ = await _resolve_effective_business_progress(session, ownership=ownership)
-    max_slot = _manager_slots_for_level(level)
+    level, prestige = await _resolve_effective_business_progress(session, ownership=ownership)
+    max_slot = _manager_slots_for_level(
+        level,
+        prestige=prestige,
+        legacy_floor=await _resolved_manager_slot_floor(session, ownership=ownership),
+    )
     if normalized_slot <= 0 or normalized_slot > max_slot:
         hub = await get_business_hub_snapshot(session, guild_id=guild_id, user_id=user_id)
         manage = await get_business_manage_snapshot(session, guild_id=guild_id, user_id=user_id, business_key=business_key)

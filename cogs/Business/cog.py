@@ -4920,7 +4920,7 @@ class BusinessCog(commands.Cog):
             else get_manager_assignment_slots(session, guild_id=guild_id, user_id=user_id, business_key=business_key)
         )
         if not any(not bool(getattr(slot, "is_active", False)) for slot in slots):
-            return False, f"All {staff_kind} slots are full. Upgrade the business to unlock more slots."
+            return False, f"All {staff_kind} slots are full. Increase prestige to unlock more slots."
         wallet = await session.scalar(
             select(WalletRow).where(
                 WalletRow.guild_id == int(guild_id),
