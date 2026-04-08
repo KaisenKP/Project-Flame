@@ -98,6 +98,16 @@ class ModerationCog(commands.Cog):
         except Exception:
             log.warning("Failed to send moderation log in guild %s", guild.id)
 
+    async def log_action(self, guild: discord.Guild, *, title: str, description: str, color: discord.Color) -> None:
+        cfg = await self.fetch_config(guild.id)
+        await self._send_mod_log(guild, cfg, title=title, description=description, color=color)
+
+    async def add_warning(self, *, guild_id: int, user_id: int, moderator_id: int, reason: str) -> None:
+        sql = text(f"INSERT INTO {self.WARN_TABLE} (guild_id, user_id, moderator_id, reason) VALUES (:g, :u, :m, :r)")
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                await session.execute(sql, {"g": int(guild_id), "u": int(user_id), "m": int(moderator_id), "r": reason[:1000]})
+
     mod = app_commands.Group(name="mod", description="Practical moderation commands.")
 
     @mod.command(name="config", description="Configure mod logs and mute role.")
@@ -124,15 +134,10 @@ class ModerationCog(commands.Cog):
             await interaction.response.send_message("You can't warn yourself.", ephemeral=True)
             return
 
-        sql = text(f"INSERT INTO {self.WARN_TABLE} (guild_id, user_id, moderator_id, reason) VALUES (:g, :u, :m, :r)")
-        async with self.sessionmaker() as session:
-            async with session.begin():
-                await session.execute(sql, {"g": interaction.guild.id, "u": user.id, "m": interaction.user.id, "r": reason[:1000]})
+        await self.add_warning(guild_id=interaction.guild.id, user_id=user.id, moderator_id=interaction.user.id, reason=reason)
 
-        cfg = await self.fetch_config(interaction.guild.id)
-        await self._send_mod_log(
+        await self.log_action(
             interaction.guild,
-            cfg,
             title="User Warned",
             description=f"{user.mention} was warned by {interaction.user.mention}.\n**Reason:** {reason}",
             color=discord.Color.orange(),
