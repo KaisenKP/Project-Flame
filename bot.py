@@ -70,17 +70,33 @@ def _iter_extension_modules(cogs_dir: Path, cogs_package: str) -> list[str]:
     return exts
 
 
-DEFAULT_ACTIVE_EXTENSIONS: tuple[str, ...] = (
-    "cogs.activity_listener",
-    "cogs.admin_restart",
-    "cogs.ban",
-    "cogs.community_tools",
-    "cogs.error_monitor",
-    "cogs.moderation",
-    "cogs.ping",
-    "cogs.sentinel",
-    "cogs.tickets",
-    "cogs.youtube_notifications",
+DEFAULT_ACTIVE_EXTENSIONS: tuple[str, ...] = ()
+DEFAULT_INACTIVE_EXTENSIONS: tuple[str, ...] = (
+    "cogs.economy",
+    "cogs.economy_backups",
+    "cogs.CurrencyAdminCog",
+    "cogs.daily",
+    "cogs.coinflip",
+    "cogs.dropparty",
+    "cogs.lootbox",
+    "cogs.pickpocket",
+    "cogs.slots",
+    "cogs.TwentyOne",
+    "cogs.inventory",
+    "cogs.shop",
+    "cogs.profile",
+    "cogs.stamina_tick",
+    "cogs.jobs",
+    "cogs.job_xp_migration",
+    "cogs.Business",
+    "cogs.crowns",
+    "cogs.LevelRewards",
+    "cogs.heist.cog",
+    "cogs.LuxuryAssets.cog",
+    "cogs.adventure",
+    "cogs.weekend_events",
+    "cogs.vctime",
+    "cogs.activity_tracker",
 )
 
 
@@ -164,8 +180,10 @@ class FlameBot(commands.Bot):
         self.dev_guild_id = dev_guild_id
         self.owner_ids = owner_ids or set()
         self.startup_diagnostics = startup_diagnostics
-        self.active_extension_patterns = list(active_extension_patterns or DEFAULT_ACTIVE_EXTENSIONS)
-        self.inactive_extension_patterns = list(inactive_extension_patterns or [])
+        self.active_extension_patterns = list(active_extension_patterns if active_extension_patterns is not None else DEFAULT_ACTIVE_EXTENSIONS)
+        self.inactive_extension_patterns = list(
+            inactive_extension_patterns if inactive_extension_patterns is not None else DEFAULT_INACTIVE_EXTENSIONS
+        )
 
         self.cogs_dir = (cogs_dir or Path("cogs")).resolve()
         self.cogs_package = cogs_package
@@ -576,8 +594,12 @@ async def build_bot_from_env(startup_diagnostics: StartupDiagnostics | None = No
                 owner_ids.add(int(part))
                 if startup_diagnostics is not None and startup_diagnostics.owner_id_hint is None:
                     startup_diagnostics.owner_id_hint = int(part)
-    active_extension_patterns = _parse_extension_patterns(os.getenv("ACTIVE_EXTENSIONS"))
-    inactive_extension_patterns = _parse_extension_patterns(os.getenv("INACTIVE_EXTENSIONS"))
+    raw_active_extensions = os.getenv("ACTIVE_EXTENSIONS")
+    raw_inactive_extensions = os.getenv("INACTIVE_EXTENSIONS")
+    active_extension_patterns = _parse_extension_patterns(raw_active_extensions) if raw_active_extensions is not None else None
+    inactive_extension_patterns = (
+        _parse_extension_patterns(raw_inactive_extensions) if raw_inactive_extensions is not None else None
+    )
 
     return FlameBot(
         prefix=prefix,
