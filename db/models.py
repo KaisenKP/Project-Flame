@@ -1328,6 +1328,10 @@ class BusinessAutoHireSessionRow(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     business_key: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     staff_kind: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    # NOTE:
+    # - 0 means "no rerolls left".
+    # - positive values are explicit rerolls remaining.
+    # - negative values mean "unlimited rerolls" (used by VIP auto-reroll flows).
     remaining_rerolls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     allowed_rarities_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
@@ -1339,6 +1343,38 @@ class BusinessAutoHireSessionRow(Base):
         onupdate=NOW,
         nullable=False,
     )
+
+    RARITY_ORDER = ("common", "rare", "epic", "legendary", "mythical")
+    RARITY_ALIASES = {
+        "legendsry": "legendary",
+    }
+    RARITY_FILTER_PRESETS = {
+        "legendary+": {"legendary", "mythical"},
+    }
+
+    @property
+    def rerolls_unlimited(self) -> bool:
+        return int(self.remaining_rerolls) < 0
+
+    def can_reroll(self) -> bool:
+        return self.rerolls_unlimited or int(self.remaining_rerolls) > 0
+
+    @classmethod
+    def normalize_rarity_filter_tokens(cls, raw_tokens: list[str] | set[str] | tuple[str, ...]) -> set[str]:
+        allowed = set(cls.RARITY_ORDER)
+        normalized: set[str] = set()
+        for raw in raw_tokens:
+            token = str(raw).strip().lower()
+            if not token:
+                continue
+            token = cls.RARITY_ALIASES.get(token, token)
+            preset = cls.RARITY_FILTER_PRESETS.get(token)
+            if preset:
+                normalized.update(preset)
+                continue
+            if token in allowed:
+                normalized.add(token)
+        return normalized
 
 
 class VipHiringJobRow(Base):
