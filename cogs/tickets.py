@@ -455,13 +455,40 @@ class TicketsCog(commands.Cog):
         self.sessionmaker = sessions()
         self._lock = asyncio.Lock()
         self._booted = False
+        self._base_views_registered = False
+        self._panel_view_signatures: dict[int, tuple[str, ...]] = {}
+
+    def _register_base_persistent_views(self) -> None:
+        if self._base_views_registered:
+            return
+        for view in (
+            TicketChannelView(self, is_closed=False),
+            TicketChannelView(self, is_closed=True),
+            LegacyClosedTranscriptView(self),
+        ):
+            try:
+                self.bot.add_view(view)
+            except ValueError:
+                continue
+        self._base_views_registered = True
+
+    def _register_panel_view(self, guild_id: int, items: list[TicketTypeRow]) -> None:
+        gid = int(guild_id)
+        if not items:
+            return
+        signature = tuple(item.type_key for item in items[:25])
+        if self._panel_view_signatures.get(gid) == signature:
+            return
+        try:
+            self.bot.add_view(TicketPanelView(self, gid, items))
+        except ValueError:
+            pass
+        self._panel_view_signatures[gid] = signature
 
     async def cog_load(self) -> None:
         await self._ensure_tables()
         await self._ensure_new_columns()
-        self.bot.add_view(TicketChannelView(self, is_closed=False))
-        self.bot.add_view(TicketChannelView(self, is_closed=True))
-        self.bot.add_view(LegacyClosedTranscriptView(self))
+        self._register_base_persistent_views()
         await self._restore_panel_views()
 
     @commands.Cog.listener("on_ready")
@@ -471,9 +498,7 @@ class TicketsCog(commands.Cog):
         self._booted = True
         await self._ensure_tables()
         await self._ensure_new_columns()
-        self.bot.add_view(TicketChannelView(self, is_closed=False))
-        self.bot.add_view(TicketChannelView(self, is_closed=True))
-        self.bot.add_view(LegacyClosedTranscriptView(self))
+        self._register_base_persistent_views()
         await self._auto_seed_defaults_for_all_guilds()
         await self._restore_panel_views()
         await self._ensure_default_panel_messages()
@@ -801,8 +826,7 @@ class TicketsCog(commands.Cog):
         for (guild_id,) in rows:
             try:
                 items = await self.fetch_ticket_types(int(guild_id), enabled_only=True)
-                if items:
-                    self.bot.add_view(TicketPanelView(self, int(guild_id), items))
+                self._register_panel_view(int(guild_id), items)
             except Exception:
                 pass
 
@@ -1811,7 +1835,7 @@ class TicketsCog(commands.Cog):
                     close_cooldown_s=cfg.close_cooldown_s,
                 )
 
-        self.bot.add_view(view)
+        self._register_panel_view(guild.id, items)
         return True, f"Panel is live in {panel_channel.mention}."
 
     async def _apply_claim_lock(
