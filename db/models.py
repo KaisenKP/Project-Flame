@@ -1355,13 +1355,30 @@ class BusinessAutoHireSessionRow(Base):
     MANAGER_REROLL_BASELINE_COST = 1_000
     MANAGER_REROLL_COST_CAP = 10_000_000
     MANAGER_REROLL_ANCHOR_BUSINESS_KEY = "restaurant"
+    STAFF_KIND_MANAGER = "manager"
 
     @property
     def rerolls_unlimited(self) -> bool:
-        return int(self.remaining_rerolls) < 0
+        return (
+            str(self.staff_kind).strip().lower() == self.STAFF_KIND_MANAGER
+            and int(self.remaining_rerolls) < 0
+        )
+
+    @property
+    def vip_auto_reroll_enabled(self) -> bool:
+        """True when this session is a VIP manager auto-reroll session."""
+        return self.rerolls_unlimited
 
     def can_reroll(self) -> bool:
         return self.rerolls_unlimited or int(self.remaining_rerolls) > 0
+
+    @classmethod
+    def starting_rerolls_for_session(cls, *, staff_kind: str, vip_auto: bool) -> int:
+        normalized_staff_kind = str(staff_kind).strip().lower()
+        if vip_auto and normalized_staff_kind == cls.STAFF_KIND_MANAGER:
+            # Negative sentinel means unlimited manager rerolls in VIP auto mode.
+            return -1
+        return 0
 
     @classmethod
     def normalize_rarity_filter_tokens(cls, raw_tokens: list[str] | set[str] | tuple[str, ...]) -> set[str]:
