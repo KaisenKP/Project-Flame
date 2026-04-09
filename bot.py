@@ -71,33 +71,9 @@ def _iter_extension_modules(cogs_dir: Path, cogs_package: str) -> list[str]:
 
 
 DEFAULT_ACTIVE_EXTENSIONS: tuple[str, ...] = ()
-DEFAULT_INACTIVE_EXTENSIONS: tuple[str, ...] = (
-    "cogs.economy",
-    "cogs.economy_backups",
-    "cogs.CurrencyAdminCog",
-    "cogs.daily",
-    "cogs.coinflip",
-    "cogs.dropparty",
-    "cogs.lootbox",
-    "cogs.pickpocket",
-    "cogs.slots",
-    "cogs.TwentyOne",
-    "cogs.inventory",
-    "cogs.shop",
-    "cogs.profile",
-    "cogs.stamina_tick",
-    "cogs.jobs",
-    "cogs.job_xp_migration",
-    "cogs.Business",
-    "cogs.crowns",
-    "cogs.LevelRewards",
-    "cogs.heist.cog",
-    "cogs.LuxuryAssets.cog",
-    "cogs.adventure",
-    "cogs.weekend_events",
-    "cogs.vctime",
-    "cogs.activity_tracker",
-)
+# Keep defaults permissive so newly added commands/cogs are auto-discovered.
+# Use INACTIVE_EXTENSIONS env var when you explicitly want to suppress modules.
+DEFAULT_INACTIVE_EXTENSIONS: tuple[str, ...] = ()
 
 
 def _parse_extension_patterns(raw: str | None) -> list[str]:
