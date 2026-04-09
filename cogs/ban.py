@@ -626,7 +626,7 @@ class PunishHubView(discord.ui.View):
         await interaction.response.send_modal(PunishConfirmModal(self, "delete", "DELETE"))
 
     @discord.ui.button(label="Timeout", style=discord.ButtonStyle.primary, emoji="🔇", row=2)
-    async def timeout(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+    async def timeout_action(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.send_modal(PunishConfirmModal(self, "timeout", "TIMEOUT"))
 
     @discord.ui.button(label="Kick", style=discord.ButtonStyle.danger, emoji="👢", row=2)
