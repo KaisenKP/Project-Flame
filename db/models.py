@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
 from sqlalchemy import (
@@ -1351,6 +1352,9 @@ class BusinessAutoHireSessionRow(Base):
     RARITY_FILTER_PRESETS = {
         "legendary+": {"legendary", "mythical"},
     }
+    MANAGER_REROLL_BASELINE_COST = 1_000
+    MANAGER_REROLL_COST_CAP = 10_000_000
+    MANAGER_REROLL_ANCHOR_BUSINESS_KEY = "restaurant"
 
     @property
     def rerolls_unlimited(self) -> bool:
@@ -1375,6 +1379,44 @@ class BusinessAutoHireSessionRow(Base):
             if token in allowed:
                 normalized.add(token)
         return normalized
+
+    @classmethod
+    def manager_reroll_cost_for_business(
+        cls,
+        business_key: str,
+        business_prices: dict[str, int],
+    ) -> int:
+        """Scale manager reroll cost from real business purchase prices.
+
+        Formula:
+            baseline * (business_price / restaurant_price)
+
+        - Restaurant is hard-anchored to exactly baseline.
+        - Final value is rounded half-up to a whole integer.
+        - Final value is hard-capped.
+        """
+
+        key = str(business_key).strip().lower()
+        anchor_key = cls.MANAGER_REROLL_ANCHOR_BUSINESS_KEY
+        if key == anchor_key:
+            return cls.MANAGER_REROLL_BASELINE_COST
+
+        normalized_prices = {str(k).strip().lower(): int(v) for k, v in business_prices.items()}
+
+        restaurant_price = normalized_prices.get(anchor_key)
+        if restaurant_price is None or restaurant_price <= 0:
+            raise ValueError("business_prices must include a positive restaurant price")
+
+        business_price = normalized_prices.get(key)
+        if business_price is None or business_price <= 0:
+            raise ValueError(f"business_prices must include a positive price for '{business_key}'")
+
+        scaled = (
+            Decimal(cls.MANAGER_REROLL_BASELINE_COST)
+            * (Decimal(business_price) / Decimal(restaurant_price))
+        ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+
+        return min(int(scaled), cls.MANAGER_REROLL_COST_CAP)
 
 
 class VipHiringJobRow(Base):
