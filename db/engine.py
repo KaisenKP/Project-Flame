@@ -6,6 +6,8 @@ from urllib.parse import unquote, urlparse
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
+from config import db_defaults
+
 
 def _clean(s: str | None) -> str:
     return (s or "").strip()
@@ -60,9 +62,17 @@ class DbSettings:
     pool_size: int
     max_overflow: int
     echo: bool
+    source: str
 
     @staticmethod
     def from_env() -> "DbSettings":
+        pool_size_raw = _clean(os.getenv("DB_POOL_SIZE"))
+        max_overflow_raw = _clean(os.getenv("DB_MAX_OVERFLOW"))
+        pool_size = int(pool_size_raw) if pool_size_raw.isdigit() else 5
+        max_overflow = int(max_overflow_raw) if max_overflow_raw.isdigit() else 10
+
+        echo = _clean(os.getenv("SQL_ECHO")).lower() in {"1", "true", "yes", "y", "on"}
+
         db_url = _clean(os.getenv("DATABASE_URL") or os.getenv("DB_URL"))
         if db_url:
             parsed = urlparse(db_url)
@@ -94,13 +104,6 @@ class DbSettings:
                     + ", ".join(missing)
                 )
 
-            pool_size_raw = _clean(os.getenv("DB_POOL_SIZE"))
-            max_overflow_raw = _clean(os.getenv("DB_MAX_OVERFLOW"))
-            pool_size = int(pool_size_raw) if pool_size_raw.isdigit() else 5
-            max_overflow = int(max_overflow_raw) if max_overflow_raw.isdigit() else 10
-
-            echo = _clean(os.getenv("SQL_ECHO")).lower() in {"1", "true", "yes", "y", "on"}
-
             return DbSettings(
                 host=host,
                 port=port,
@@ -110,41 +113,70 @@ class DbSettings:
                 pool_size=pool_size,
                 max_overflow=max_overflow,
                 echo=echo,
+                source="process_env",
             )
 
         host_in = _clean(os.getenv("DB_HOST"))
-        name = _clean(os.getenv("DB_NAME"))
-        user = _clean(os.getenv("DB_USER"))
-        password = _clean(os.getenv("DB_PASS"))
-        port_in = _clean(os.getenv("DB_PORT"))
+        name_in = _clean(os.getenv("DB_NAME"))
+        user_in = _clean(os.getenv("DB_USER"))
+        password_in = _clean(os.getenv("DB_PASS"))
 
-        if not host_in or not name or not user or not password:
-            missing = [k for k, v in {
-                "DB_HOST": host_in,
-                "DB_NAME": name,
-                "DB_USER": user,
-                "DB_PASS": password,
-            }.items() if not v]
-            raise RuntimeError(f"Missing DB env var(s): {', '.join(missing)}")
+        env_has_all = all((host_in, name_in, user_in, password_in))
 
-        host, port = _parse_host_and_port(host_in, port_in)
+        if env_has_all:
+            port_in = _clean(os.getenv("DB_PORT"))
+            host, port = _parse_host_and_port(host_in, port_in)
+            return DbSettings(
+                host=host,
+                port=port,
+                name=name_in,
+                user=user_in,
+                password=password_in,
+                pool_size=pool_size,
+                max_overflow=max_overflow,
+                echo=echo,
+                source="process_env",
+            )
 
-        pool_size_raw = _clean(os.getenv("DB_POOL_SIZE"))
-        max_overflow_raw = _clean(os.getenv("DB_MAX_OVERFLOW"))
-        pool_size = int(pool_size_raw) if pool_size_raw.isdigit() else 5
-        max_overflow = int(max_overflow_raw) if max_overflow_raw.isdigit() else 10
+        fallback_host = _clean(getattr(db_defaults, "DB_HOST", ""))
+        fallback_name = _clean(getattr(db_defaults, "DB_NAME", ""))
+        fallback_user = _clean(getattr(db_defaults, "DB_USER", ""))
+        fallback_pass = _clean(getattr(db_defaults, "DB_PASS", ""))
+        fallback_port_raw = str(getattr(db_defaults, "DB_PORT", "")).strip()
 
-        echo = _clean(os.getenv("SQL_ECHO")).lower() in {"1", "true", "yes", "y", "on"}
+        if not fallback_host or not fallback_name or not fallback_user or not fallback_pass:
+            missing = [
+                key
+                for key, value in {
+                    "DB_HOST": fallback_host,
+                    "DB_NAME": fallback_name,
+                    "DB_USER": fallback_user,
+                    "DB_PASS": fallback_pass,
+                }.items()
+                if not value
+            ]
+            if host_in or name_in or user_in or password_in:
+                raise RuntimeError(
+                    "Incomplete process DB env vars and fallback config is incomplete. "
+                    f"Missing in fallback: {', '.join(missing)}"
+                )
+            raise RuntimeError(
+                "Missing DB env vars and fallback config is incomplete. "
+                f"Missing in fallback: {', '.join(missing)}"
+            )
+
+        host, port = _parse_host_and_port(fallback_host, fallback_port_raw)
 
         return DbSettings(
             host=host,
             port=port,
-            name=name,
-            user=user,
-            password=password,
+            name=fallback_name,
+            user=fallback_user,
+            password=fallback_pass,
             pool_size=pool_size,
             max_overflow=max_overflow,
             echo=echo,
+            source="repo_fallback",
         )
 
     def url(self) -> str:
@@ -167,7 +199,8 @@ def init_engine() -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
     cfg = DbSettings.from_env()
 
     print(
-        "[DB] config:",
+        "[DB] startup config source=",
+        cfg.source,
         f"host={cfg.host}",
         f"port={cfg.port}",
         f"name={cfg.name}",
@@ -175,6 +208,7 @@ def init_engine() -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
         f"pool={cfg.pool_size}",
         f"overflow={cfg.max_overflow}",
         f"echo={cfg.echo}",
+        sep="",
     )
 
     _engine = create_async_engine(
