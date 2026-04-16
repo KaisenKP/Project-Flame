@@ -251,11 +251,15 @@ class FlameBot(commands.Bot):
     async def _ensure_db_schema(self) -> None:
         try:
             from db import Base
+            from db.economy_migrations import ensure_economy_bigint_columns
             from db.engine import get_engine
 
             engine = get_engine()
             async with engine.begin() as conn:
                 await conn.run_sync(lambda sync_conn: Base.metadata.create_all(sync_conn, checkfirst=True))
+                promoted_columns = await ensure_economy_bigint_columns(conn)
+            if promoted_columns:
+                log.info("DB economy bigint migration applied: %s", ", ".join(promoted_columns))
             log.info("DB schema ensured (checkfirst=True)")
         except Exception as exc:
             if self.startup_diagnostics is not None:

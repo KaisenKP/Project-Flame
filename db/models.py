@@ -84,11 +84,11 @@ class WalletRow(Base):
     guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
 
-    silver: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    silver: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     diamonds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
-    silver_earned: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    silver_spent: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    silver_earned: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    silver_spent: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
 
     updated_at: Mapped[datetime] = mapped_column(
         TS,
@@ -110,7 +110,7 @@ class SlotJackpotRow(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
-    pool_silver: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pool_silver: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
 
     updated_at: Mapped[datetime] = mapped_column(
         TS,
@@ -906,7 +906,7 @@ class BankRobberyProfileRow(Base):
 
     heist_rep: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     personal_heat: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    lifetime_bankrobbery_earnings: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lifetime_bankrobbery_earnings: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     clean_successes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     messy_successes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     partial_successes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
