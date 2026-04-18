@@ -10,6 +10,8 @@ from discord.ext import commands
 from sqlalchemy import text
 
 from services.db import sessions
+from services.mod_warnings import add_warning as store_warning
+from services.mod_warnings import ensure_warning_table
 
 log = logging.getLogger(__name__)
 UTC = timezone.utc
@@ -34,18 +36,7 @@ class ModerationCog(commands.Cog):
         await self._ensure_tables()
 
     async def _ensure_tables(self) -> None:
-        sql_warn = f"""
-        CREATE TABLE IF NOT EXISTS {self.WARN_TABLE} (
-            id BIGINT NOT NULL AUTO_INCREMENT,
-            guild_id BIGINT NOT NULL,
-            user_id BIGINT NOT NULL,
-            moderator_id BIGINT NOT NULL,
-            reason TEXT NOT NULL,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (id),
-            KEY ix_mod_warn_guild_user (guild_id, user_id)
-        );
-        """
+        await ensure_warning_table()
         sql_cfg = f"""
         CREATE TABLE IF NOT EXISTS {self.CONFIG_TABLE} (
             guild_id BIGINT NOT NULL,
@@ -57,7 +48,6 @@ class ModerationCog(commands.Cog):
         """
         async with self.sessionmaker() as session:
             async with session.begin():
-                await session.execute(text(sql_warn))
                 await session.execute(text(sql_cfg))
 
     async def fetch_config(self, guild_id: int) -> ModConfig:
@@ -103,10 +93,7 @@ class ModerationCog(commands.Cog):
         await self._send_mod_log(guild, cfg, title=title, description=description, color=color)
 
     async def add_warning(self, *, guild_id: int, user_id: int, moderator_id: int, reason: str) -> None:
-        sql = text(f"INSERT INTO {self.WARN_TABLE} (guild_id, user_id, moderator_id, reason) VALUES (:g, :u, :m, :r)")
-        async with self.sessionmaker() as session:
-            async with session.begin():
-                await session.execute(sql, {"g": int(guild_id), "u": int(user_id), "m": int(moderator_id), "r": reason[:1000]})
+        await store_warning(guild_id=guild_id, user_id=user_id, moderator_id=moderator_id, reason=reason)
 
     mod = app_commands.Group(name="mod", description="Practical moderation commands.")
 
