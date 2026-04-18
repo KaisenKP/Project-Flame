@@ -1,11 +1,5 @@
-"""Repository fallback database credentials.
+"""Deprecated database fallback module.
 
-WARNING: These credentials are intentionally committed to the repository.
-Rotate them immediately if this repository is exposed outside trusted access.
+Database credentials must come from runtime environment variables:
+DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME.
 """
-
-DB_HOST = "PASTE_MY_HOST"
-DB_PORT = 3306
-DB_NAME = "PASTE_MY_DB_NAME"
-DB_USER = "PASTE_MY_DB_USER"
-DB_PASS = "PASTE_MY_DB_PASS"

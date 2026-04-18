@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from urllib.parse import unquote, urlparse
+from pathlib import Path
+from urllib.parse import quote_plus, urlparse
 
+from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
-
-from config import db_defaults
 
 
 def _clean(s: str | None) -> str:
@@ -49,7 +49,34 @@ def _parse_host_and_port(host_raw: str, port_raw: str) -> tuple[str, int]:
     if port_raw.isdigit():
         return host_raw, int(port_raw)
 
-    return host_raw, 3306
+    raise RuntimeError(
+        f"Invalid DB_PORT value: {port_raw!r}. DB_PORT must be a valid integer."
+    )
+
+
+_DOTENV_LOADED = False
+
+
+def _maybe_load_local_dotenv() -> None:
+    """Load .env for local development only.
+
+    Sparked Host production uses system environment variables directly, so this is
+    intentionally a best-effort local fallback and never overrides existing values.
+    """
+
+    global _DOTENV_LOADED
+    if _DOTENV_LOADED:
+        return
+
+    env_name = _clean(os.getenv("ENV") or os.getenv("APP_ENV") or os.getenv("PY_ENV")).lower()
+    if env_name in {"prod", "production"}:
+        _DOTENV_LOADED = True
+        return
+
+    if Path(".env").exists():
+        load_dotenv(override=False)
+
+    _DOTENV_LOADED = True
 
 
 @dataclass(frozen=True)
@@ -66,6 +93,8 @@ class DbSettings:
 
     @staticmethod
     def from_env() -> "DbSettings":
+        _maybe_load_local_dotenv()
+
         pool_size_raw = _clean(os.getenv("DB_POOL_SIZE"))
         max_overflow_raw = _clean(os.getenv("DB_MAX_OVERFLOW"))
         pool_size = int(pool_size_raw) if pool_size_raw.isdigit() else 5
@@ -73,118 +102,47 @@ class DbSettings:
 
         echo = _clean(os.getenv("SQL_ECHO")).lower() in {"1", "true", "yes", "y", "on"}
 
-        db_url = _clean(os.getenv("DATABASE_URL") or os.getenv("DB_URL"))
-        if db_url:
-            parsed = urlparse(db_url)
-            scheme = (parsed.scheme or "").lower()
-            if scheme not in {"mysql", "mysql+aiomysql"}:
-                raise RuntimeError(
-                    "DATABASE_URL/DB_URL must use mysql:// or mysql+aiomysql://"
-                )
-
-            host = _clean(parsed.hostname)
-            name = _clean((parsed.path or "").lstrip("/"))
-            user = _clean(unquote(parsed.username or ""))
-            password = _clean(unquote(parsed.password or ""))
-            port = int(parsed.port) if parsed.port else 3306
-
-            if not host or not name or not user or not password:
-                missing = [
-                    key
-                    for key, value in {
-                        "host": host,
-                        "database": name,
-                        "user": user,
-                        "password": password,
-                    }.items()
-                    if not value
-                ]
-                raise RuntimeError(
-                    "Incomplete DATABASE_URL/DB_URL. Missing: "
-                    + ", ".join(missing)
-                )
-
-            return DbSettings(
-                host=host,
-                port=port,
-                name=name,
-                user=user,
-                password=password,
-                pool_size=pool_size,
-                max_overflow=max_overflow,
-                echo=echo,
-                source="process_env",
-            )
-
         host_in = _clean(os.getenv("DB_HOST"))
         name_in = _clean(os.getenv("DB_NAME"))
         user_in = _clean(os.getenv("DB_USER"))
-        password_in = _clean(os.getenv("DB_PASS"))
+        password_in = _clean(os.getenv("DB_PASSWORD"))
+        port_in = _clean(os.getenv("DB_PORT"))
 
-        env_has_all = all((host_in, name_in, user_in, password_in))
+        missing: list[str] = []
+        if not host_in:
+            missing.append("DB_HOST")
+        if not name_in:
+            missing.append("DB_NAME")
+        if not user_in:
+            missing.append("DB_USER")
+        if not password_in:
+            missing.append("DB_PASSWORD")
 
-        if env_has_all:
-            port_in = _clean(os.getenv("DB_PORT"))
-            host, port = _parse_host_and_port(host_in, port_in)
-            return DbSettings(
-                host=host,
-                port=port,
-                name=name_in,
-                user=user_in,
-                password=password_in,
-                pool_size=pool_size,
-                max_overflow=max_overflow,
-                echo=echo,
-                source="process_env",
-            )
-
-        fallback_host = _clean(getattr(db_defaults, "DB_HOST", ""))
-        fallback_name = _clean(getattr(db_defaults, "DB_NAME", ""))
-        fallback_user = _clean(getattr(db_defaults, "DB_USER", ""))
-        fallback_pass = _clean(getattr(db_defaults, "DB_PASS", ""))
-        fallback_port_raw = str(getattr(db_defaults, "DB_PORT", "")).strip()
-
-        if not fallback_host or not fallback_name or not fallback_user or not fallback_pass:
-            missing = [
-                key
-                for key, value in {
-                    "DB_HOST": fallback_host,
-                    "DB_NAME": fallback_name,
-                    "DB_USER": fallback_user,
-                    "DB_PASS": fallback_pass,
-                }.items()
-                if not value
-            ]
-            if host_in or name_in or user_in or password_in:
-                raise RuntimeError(
-                    "Incomplete process DB env vars and fallback config is incomplete. "
-                    f"Missing in fallback: {', '.join(missing)}"
-                )
+        if missing:
             raise RuntimeError(
-                "Missing DB env vars and fallback config is incomplete. "
-                f"Missing in fallback: {', '.join(missing)}"
+                "Missing required database environment variable(s): "
+                + ", ".join(missing)
+                + ". Configure Sparked Host Apollo system variables for production or add them to a local .env for development."
             )
 
-        host, port = _parse_host_and_port(fallback_host, fallback_port_raw)
+        host, port = _parse_host_and_port(host_in, port_in)
 
         return DbSettings(
             host=host,
             port=port,
-            name=fallback_name,
-            user=fallback_user,
-            password=fallback_pass,
+            name=name_in,
+            user=user_in,
+            password=password_in,
             pool_size=pool_size,
             max_overflow=max_overflow,
             echo=echo,
-            source="repo_fallback",
+            source="process_env",
         )
 
     def url(self) -> str:
-        return (
-            f"mysql+aiomysql://{self.user}:{self.password}"
-            f"@{self.host}:{int(self.port)}/{self.name}"
-            f"?charset=utf8mb4"
-        )
+        user = quote_plus(self.user)
+        password = quote_plus(self.password)
+        return f"mysql+aiomysql://{user}:{password}@{self.host}:{int(self.port)}/{self.name}"
 
 
 _engine: AsyncEngine | None = None
