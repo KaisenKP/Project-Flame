@@ -17,8 +17,8 @@ from sqlalchemy import text
 from services.db import sessions
 
 
-DEFAULT_OPEN_CATEGORY_ID = 1481813354849898648
-DEFAULT_ARCHIVE_CATEGORY_ID = 1481813977498652885
+DEFAULT_OPEN_CATEGORY_ID = 1491451868407271545
+DEFAULT_ARCHIVE_CATEGORY_ID = 1495166803486310642
 DEFAULT_PANEL_CHANNEL_ID = 1491451689528594472
 DEFAULT_PANEL_MESSAGE_ID = 1481820566015971500
 TARGET_TICKET_GUILD_ID = 1479503568095412325
@@ -27,6 +27,7 @@ TARGET_SUPPORT_PANEL_CHANNEL_ID = 1491451689528594472
 DEFAULT_STAFF_ROLE_ID = 1476620136114028544
 DEFAULT_HEAD_MOD_ROLE_ID = 1467394498878373979
 CLOSED_TICKET_TRANSCRIPTS_CHANNEL_ID = 1490729352072269975
+DEFAULT_CLOSED_TRANSCRIPTS_CHANNEL_NAME = "ticket-transcripts"
 
 DEFAULT_PANEL_TITLE = "Support Center"
 DEFAULT_PANEL_DESCRIPTION = (
@@ -137,6 +138,7 @@ class TicketConfig:
     head_mod_role_id: int | None
     panel_channel_id: int | None
     panel_message_id: int | None
+    transcript_channel_id: int | None
     panel_title: str
     panel_description: str
     panel_image_url: str | None
@@ -514,6 +516,7 @@ class TicketsCog(commands.Cog):
             admin_role_id BIGINT NULL,
             panel_channel_id BIGINT NULL,
             panel_message_id BIGINT NULL,
+            transcript_channel_id BIGINT NULL,
             panel_title VARCHAR(150) NOT NULL,
             panel_description TEXT NOT NULL,
             max_open_per_user INT NOT NULL DEFAULT 1,
@@ -592,6 +595,7 @@ class TicketsCog(commands.Cog):
         statements = [
             f"ALTER TABLE {self.TABLE_CONFIG} ADD COLUMN head_mod_role_id BIGINT NULL",
             f"ALTER TABLE {self.TABLE_CONFIG} ADD COLUMN panel_image_url TEXT NULL",
+            f"ALTER TABLE {self.TABLE_CONFIG} ADD COLUMN transcript_channel_id BIGINT NULL",
             f"ALTER TABLE {self.TABLE_TICKETS} ADD COLUMN intake_answers_json LONGTEXT NULL",
         ]
         async with self.sessionmaker() as session:
@@ -630,6 +634,60 @@ class TicketsCog(commands.Cog):
         except Exception:
             return None
 
+    async def _ensure_transcript_channel(
+        self,
+        guild: discord.Guild,
+        *,
+        preferred_id: int | None,
+        archive_category_id: int | None,
+    ) -> int | None:
+        if preferred_id:
+            existing = guild.get_channel(int(preferred_id))
+            if isinstance(existing, discord.TextChannel) and existing.guild.id == guild.id:
+                return int(existing.id)
+            try:
+                fetched = await self.bot.fetch_channel(int(preferred_id))
+                if isinstance(fetched, discord.TextChannel) and fetched.guild.id == guild.id:
+                    return int(fetched.id)
+            except Exception:
+                pass
+
+        if int(guild.id) == TARGET_TICKET_GUILD_ID:
+            legacy = guild.get_channel(int(CLOSED_TICKET_TRANSCRIPTS_CHANNEL_ID))
+            if isinstance(legacy, discord.TextChannel):
+                return int(legacy.id)
+            try:
+                fetched = await self.bot.fetch_channel(int(CLOSED_TICKET_TRANSCRIPTS_CHANNEL_ID))
+                if isinstance(fetched, discord.TextChannel) and fetched.guild.id == guild.id:
+                    return int(fetched.id)
+            except Exception:
+                pass
+
+        archive_category = None
+        if archive_category_id:
+            maybe_archive = guild.get_channel(int(archive_category_id))
+            if isinstance(maybe_archive, discord.CategoryChannel):
+                archive_category = maybe_archive
+
+        for channel in guild.text_channels:
+            if channel.category_id == (archive_category.id if archive_category else None) and channel.name == DEFAULT_CLOSED_TRANSCRIPTS_CHANNEL_NAME:
+                return int(channel.id)
+
+        overwrites = None
+        if archive_category is not None:
+            overwrites = archive_category.overwrites
+
+        try:
+            created = await guild.create_text_channel(
+                DEFAULT_CLOSED_TRANSCRIPTS_CHANNEL_NAME,
+                category=archive_category,
+                overwrites=overwrites,
+                reason="Ticket system bootstrap: transcript storage channel",
+            )
+            return int(created.id)
+        except Exception:
+            return None
+
     async def _auto_seed_defaults_for_all_guilds(self) -> None:
         for guild in self.bot.guilds:
             try:
@@ -656,6 +714,11 @@ class TicketsCog(commands.Cog):
             preferred_id=(cfg.archive_category_id if cfg else None) or DEFAULT_ARCHIVE_CATEGORY_ID,
             fallback_name="Closed Tickets",
         )
+        transcript_channel_id = await self._ensure_transcript_channel(
+            guild,
+            preferred_id=cfg.transcript_channel_id if cfg else None,
+            archive_category_id=archive_category_id or (cfg.archive_category_id if cfg else None),
+        )
 
         if cfg is None:
             await self.upsert_config(
@@ -668,6 +731,7 @@ class TicketsCog(commands.Cog):
                 head_mod_role_id=DEFAULT_HEAD_MOD_ROLE_ID,
                 panel_channel_id=desired_panel_channel_id,
                 panel_message_id=DEFAULT_PANEL_MESSAGE_ID,
+                transcript_channel_id=transcript_channel_id,
                 panel_title=DEFAULT_PANEL_TITLE,
                 panel_description=DEFAULT_PANEL_DESCRIPTION,
                 panel_image_url=DEFAULT_PANEL_IMAGE_URL,
@@ -686,6 +750,7 @@ class TicketsCog(commands.Cog):
                 head_mod_role_id=cfg.head_mod_role_id or DEFAULT_HEAD_MOD_ROLE_ID,
                 panel_channel_id=desired_panel_channel_id,
                 panel_message_id=cfg.panel_message_id or DEFAULT_PANEL_MESSAGE_ID,
+                transcript_channel_id=transcript_channel_id or cfg.transcript_channel_id,
                 panel_title=cfg.panel_title or DEFAULT_PANEL_TITLE,
                 panel_description=cfg.panel_description or DEFAULT_PANEL_DESCRIPTION,
                 panel_image_url=cfg.panel_image_url or DEFAULT_PANEL_IMAGE_URL,
@@ -874,6 +939,7 @@ class TicketsCog(commands.Cog):
                             head_mod_role_id,
                             panel_channel_id,
                             panel_message_id,
+                            transcript_channel_id,
                             panel_title,
                             panel_description,
                             panel_image_url,
@@ -901,12 +967,13 @@ class TicketsCog(commands.Cog):
             head_mod_role_id=int(row[6]) if row[6] is not None else None,
             panel_channel_id=int(row[7]) if row[7] is not None else None,
             panel_message_id=int(row[8]) if row[8] is not None else None,
-            panel_title=str(row[9] or DEFAULT_PANEL_TITLE),
-            panel_description=str(row[10] or DEFAULT_PANEL_DESCRIPTION),
-            panel_image_url=str(row[11]) if row[11] else None,
-            max_open_per_user=int(row[12] or 1),
-            transcript_enabled=bool(int(row[13] or 0)),
-            close_cooldown_s=max(0, int(row[14] or 5)),
+            transcript_channel_id=int(row[9]) if row[9] is not None else None,
+            panel_title=str(row[10] or DEFAULT_PANEL_TITLE),
+            panel_description=str(row[11] or DEFAULT_PANEL_DESCRIPTION),
+            panel_image_url=str(row[12]) if row[12] else None,
+            max_open_per_user=int(row[13] or 1),
+            transcript_enabled=bool(int(row[14] or 0)),
+            close_cooldown_s=max(0, int(row[15] or 5)),
         )
 
     async def upsert_config(
@@ -921,6 +988,7 @@ class TicketsCog(commands.Cog):
         head_mod_role_id: int | None,
         panel_channel_id: int | None = None,
         panel_message_id: int | None = None,
+        transcript_channel_id: int | None = None,
         panel_title: str | None = None,
         panel_description: str | None = None,
         panel_image_url: str | None = None,
@@ -945,6 +1013,7 @@ class TicketsCog(commands.Cog):
                             head_mod_role_id,
                             panel_channel_id,
                             panel_message_id,
+                            transcript_channel_id,
                             panel_title,
                             panel_description,
                             panel_image_url,
@@ -962,6 +1031,7 @@ class TicketsCog(commands.Cog):
                             :head_mod_role_id,
                             :panel_channel_id,
                             :panel_message_id,
+                            :transcript_channel_id,
                             :panel_title,
                             :panel_description,
                             :panel_image_url,
@@ -978,6 +1048,7 @@ class TicketsCog(commands.Cog):
                             head_mod_role_id=VALUES(head_mod_role_id),
                             panel_channel_id=COALESCE(VALUES(panel_channel_id), panel_channel_id),
                             panel_message_id=COALESCE(VALUES(panel_message_id), panel_message_id),
+                            transcript_channel_id=COALESCE(VALUES(transcript_channel_id), transcript_channel_id),
                             panel_title=VALUES(panel_title),
                             panel_description=VALUES(panel_description),
                             panel_image_url=VALUES(panel_image_url),
@@ -996,6 +1067,7 @@ class TicketsCog(commands.Cog):
                         "head_mod_role_id": int(head_mod_role_id) if head_mod_role_id is not None else None,
                         "panel_channel_id": int(panel_channel_id) if panel_channel_id is not None else None,
                         "panel_message_id": int(panel_message_id) if panel_message_id is not None else None,
+                        "transcript_channel_id": int(transcript_channel_id) if transcript_channel_id is not None else None,
                         "panel_title": str(panel_title or (existing.panel_title if existing else DEFAULT_PANEL_TITLE)),
                         "panel_description": str(
                             panel_description or (existing.panel_description if existing else DEFAULT_PANEL_DESCRIPTION)
@@ -1752,8 +1824,8 @@ class TicketsCog(commands.Cog):
             return None
         return None
 
-    async def _resolve_closed_transcript_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
-        channel_id = int(CLOSED_TICKET_TRANSCRIPTS_CHANNEL_ID)
+    async def _resolve_closed_transcript_channel(self, guild: discord.Guild, cfg: TicketConfig) -> discord.TextChannel | None:
+        channel_id = int(cfg.transcript_channel_id or CLOSED_TICKET_TRANSCRIPTS_CHANNEL_ID)
         ch = guild.get_channel(channel_id)
         if isinstance(ch, discord.TextChannel):
             return ch
@@ -1762,8 +1834,38 @@ class TicketsCog(commands.Cog):
             if isinstance(fetched, discord.TextChannel) and fetched.guild.id == guild.id:
                 return fetched
         except Exception:
+            pass
+
+        ensured_channel_id = await self._ensure_transcript_channel(
+            guild,
+            preferred_id=cfg.transcript_channel_id,
+            archive_category_id=cfg.archive_category_id,
+        )
+        if ensured_channel_id is None:
             return None
-        return None
+
+        if cfg.transcript_channel_id != ensured_channel_id:
+            await self.upsert_config(
+                guild.id,
+                category_id=cfg.category_id,
+                archive_category_id=cfg.archive_category_id,
+                log_channel_id=cfg.log_channel_id,
+                support_role_id=cfg.support_role_id,
+                admin_role_id=cfg.admin_role_id,
+                head_mod_role_id=cfg.head_mod_role_id,
+                panel_channel_id=cfg.panel_channel_id,
+                panel_message_id=cfg.panel_message_id,
+                transcript_channel_id=ensured_channel_id,
+                panel_title=cfg.panel_title,
+                panel_description=cfg.panel_description,
+                panel_image_url=cfg.panel_image_url,
+                max_open_per_user=cfg.max_open_per_user,
+                transcript_enabled=cfg.transcript_enabled,
+                close_cooldown_s=cfg.close_cooldown_s,
+            )
+
+        final_ch = guild.get_channel(int(ensured_channel_id))
+        return final_ch if isinstance(final_ch, discord.TextChannel) else None
 
     async def _send_log(self, guild: discord.Guild, cfg: TicketConfig, *, embed: discord.Embed, file: discord.File | None = None) -> None:
         ch = await self._resolve_log_channel(guild, cfg)
@@ -2593,10 +2695,11 @@ a {{
                 await interaction.followup.send("You can't save this transcript.", ephemeral=True)
                 return
 
-            transcript_channel = await self._resolve_closed_transcript_channel(interaction.guild)
+            transcript_channel = await self._resolve_closed_transcript_channel(interaction.guild, cfg)
             if transcript_channel is None:
+                target_channel_id = int(cfg.transcript_channel_id or CLOSED_TICKET_TRANSCRIPTS_CHANNEL_ID)
                 await interaction.followup.send(
-                    f"Closed transcript channel <#{CLOSED_TICKET_TRANSCRIPTS_CHANNEL_ID}> is missing or inaccessible.",
+                    f"Closed transcript channel <#{target_channel_id}> is missing or inaccessible.",
                     ephemeral=True,
                 )
                 return
@@ -2622,8 +2725,9 @@ a {{
             try:
                 await transcript_channel.send(embed=embed, file=file)
             except Exception:
+                target_channel_id = int(cfg.transcript_channel_id or CLOSED_TICKET_TRANSCRIPTS_CHANNEL_ID)
                 await interaction.followup.send(
-                    f"Could not send transcript to <#{CLOSED_TICKET_TRANSCRIPTS_CHANNEL_ID}>.",
+                    f"Could not send transcript to <#{target_channel_id}>.",
                     ephemeral=True,
                 )
                 return
@@ -2823,6 +2927,11 @@ a {{
         e.add_field(name="Open Category", value=f"<#{cfg.category_id}>" if cfg.category_id else "None", inline=True)
         e.add_field(name="Closed Category", value=f"<#{cfg.archive_category_id}>" if cfg.archive_category_id else "None", inline=True)
         e.add_field(name="Panel Channel", value=f"<#{cfg.panel_channel_id}>" if cfg.panel_channel_id else "None", inline=True)
+        e.add_field(
+            name="Transcript Channel",
+            value=f"<#{cfg.transcript_channel_id}>" if cfg.transcript_channel_id else "Auto/None",
+            inline=True,
+        )
         e.add_field(name="Log Channel", value=f"<#{cfg.log_channel_id}>" if cfg.log_channel_id else "None", inline=True)
         e.add_field(name="Staff Role", value=f"<@&{cfg.support_role_id}>" if cfg.support_role_id else "None", inline=True)
         e.add_field(name="Head Mod Role", value=f"<@&{cfg.head_mod_role_id}>" if cfg.head_mod_role_id else "None", inline=True)
