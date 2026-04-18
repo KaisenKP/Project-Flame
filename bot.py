@@ -317,8 +317,6 @@ class FlameBot(commands.Bot):
             self.startup_diagnostics.logger.info("phase=startup status=PASS subsystem=discord source=FlameBot.on_ready detail='on_ready reached'")
             if not self._startup_report_sent:
                 self._startup_report_sent = True
-                send_task = asyncio.create_task(self.startup_diagnostics.send_report(self), name="startup.report.delivery")
-                self.startup_diagnostics.add_startup_task(send_task)
                 self.startup_diagnostics.mark_startup_complete()
                 self.startup_diagnostics.logger.info("phase=startup status=PASS subsystem=startup source=FlameBot.on_ready detail='startup fully complete'")
 
