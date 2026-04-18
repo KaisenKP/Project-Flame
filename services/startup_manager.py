@@ -152,7 +152,7 @@ class StartupManager:
             "sanitize_sunday_state",
             _boot_noop_sanitizer,
             required=False,
-            description="Legacy economy Sunday-state sanitizer intentionally disabled.",
+            description="Legacy Sunday-state sanitizer intentionally disabled.",
         )
         self.register_boot_routine(
             "verify_background_services",
@@ -253,7 +253,7 @@ async def _resolve_configured_role(bot: Any, cache: BotStartupCache, *, role_id:
     configured_guild_id = int(GUILD_ID)
     role_id = int(role_id)
     log.info(
-        "Discord target validation context: configured_guild_id=%s configured_vip_role_id=%s bot_guild_count=%s",
+        "Discord target validation context: configured_guild_id=%s configured_role_id=%s bot_guild_count=%s",
         configured_guild_id,
         role_id,
         len(getattr(bot, "guilds", [])),
@@ -399,7 +399,7 @@ async def _boot_validate_discord_targets(bot: Any, cache: BotStartupCache) -> st
 
 
 def _boot_noop_sanitizer(bot: Any, cache: BotStartupCache) -> str:
-    return "legacy economy sanitizers disabled"
+    return "legacy sanitizers disabled"
 
 
 def _boot_verify_background_services(bot: Any, cache: BotStartupCache) -> str:
