@@ -35,7 +35,7 @@ DEFAULT_TEMPLATE = (
     "**{video_title}**\n"
     "🎬 Watch now: {video_url}"
 )
-DEFAULT_YOUTUBE_SOURCE = "https://youtube.com/@blazesilvergaming?si=gmJMf0IA6dSZD9UP"
+DEFAULT_YOUTUBE_HANDLE = "@blazesilvergaming"
 
 
 @dataclass
@@ -73,6 +73,7 @@ class YouTubeNotificationsCog(commands.Cog):
         self._run_lock = asyncio.Lock()
         self._bootstrap_lock = asyncio.Lock()
         self._bootstrap_completed = False
+        self._resolved_default_source: str | None = None
         self.youtube_loop.start()
 
     def cog_unload(self) -> None:
@@ -118,11 +119,59 @@ class YouTubeNotificationsCog(commands.Cog):
                         f"ALTER TABLE {self.CFG_TABLE} ADD COLUMN IF NOT EXISTS message_template TEXT NULL AFTER ping_role_id"
                     )
                 )
-                await session.execute(
-                    text(
-                        f"UPDATE {self.CFG_TABLE} SET youtube_channel_source = youtube_channel_id WHERE youtube_channel_source IS NULL AND youtube_channel_id IS NOT NULL"
-                    )
+                legacy_col_exists = await self._legacy_youtube_channel_id_exists(session)
+                log.info(
+                    "YouTube migration: legacy column youtube_channel_id exists=%s",
+                    legacy_col_exists,
                 )
+                if legacy_col_exists:
+                    try:
+                        await session.execute(
+                            text(
+                                f"UPDATE {self.CFG_TABLE} "
+                                f"SET youtube_channel_source = youtube_channel_id "
+                                f"WHERE youtube_channel_source IS NULL AND youtube_channel_id IS NOT NULL"
+                            )
+                        )
+                    except Exception as exc:
+                        log.warning("YouTube migration skipped (legacy copy failed safely): %s", exc)
+
+    async def _legacy_youtube_channel_id_exists(self, session) -> bool:
+        sql = text(
+            """
+            SELECT 1
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = :table_name
+              AND COLUMN_NAME = 'youtube_channel_id'
+            LIMIT 1
+            """
+        )
+        try:
+            row = (await session.execute(sql, {"table_name": self.CFG_TABLE})).first()
+            return row is not None
+        except Exception as exc:
+            log.warning("YouTube migration: unable to inspect INFORMATION_SCHEMA safely: %s", exc)
+            return False
+
+    @staticmethod
+    def _clean_youtube_url(raw: str) -> str:
+        source = (raw or "").strip()
+        if not source.lower().startswith(("http://", "https://")):
+            return source
+        parsed = urllib.parse.urlsplit(source)
+        cleaned = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
+        return cleaned
+
+    async def _default_youtube_source(self) -> str:
+        if self._resolved_default_source:
+            return self._resolved_default_source
+        try:
+            self._resolved_default_source = await self._resolve_channel_id(DEFAULT_YOUTUBE_HANDLE)
+        except Exception as exc:
+            log.warning("YouTube default channel ID resolution failed; falling back to handle: %s", exc)
+            self._resolved_default_source = DEFAULT_YOUTUBE_HANDLE
+        return self._resolved_default_source
 
     @staticmethod
     def _normalize_channel_source(channel_source: str | None) -> str:
@@ -136,12 +185,14 @@ class YouTubeNotificationsCog(commands.Cog):
 
     def _matches_default_bootstrap_intent(self, row: dict[str, object]) -> bool:
         source = self._normalize_channel_source(str(row.get("youtube_channel_source") or ""))
-        default_source = self._normalize_channel_source(DEFAULT_YOUTUBE_SOURCE)
+        default_source = self._normalize_channel_source(DEFAULT_YOUTUBE_HANDLE)
         allowed_default_sources = {
             default_source,
             self._normalize_channel_source("https://youtube.com/@blazesilvergaming"),
             self._normalize_channel_source("@blazesilvergaming"),
         }
+        if self._resolved_default_source:
+            allowed_default_sources.add(self._normalize_channel_source(self._resolved_default_source))
         ping_mode = str(row.get("ping_mode") or "none").lower()
         message_template = str(row.get("message_template") or DEFAULT_TEMPLATE)
         ping_role_id = row.get("ping_role_id")
@@ -183,6 +234,7 @@ class YouTubeNotificationsCog(commands.Cog):
                 """
             )
             sql_enable = text(f"UPDATE {self.CFG_TABLE} SET enabled = 1 WHERE guild_id = :guild_id")
+            default_source = await self._default_youtube_source()
 
             for guild in self.bot.guilds:
                 guild_id = int(guild.id)
@@ -198,7 +250,7 @@ class YouTubeNotificationsCog(commands.Cog):
                                 sql_insert,
                                 {
                                     "guild_id": guild_id,
-                                    "youtube_channel_source": DEFAULT_YOUTUBE_SOURCE,
+                                    "youtube_channel_source": default_source,
                                     "target_channel_id": target_channel_id,
                                     "ping_mode": "none",
                                     "ping_role_id": None,
@@ -213,25 +265,42 @@ class YouTubeNotificationsCog(commands.Cog):
                                 await session.execute(sql_enable, {"guild_id": guild_id})
                                 action = "enabled_default"
 
+                stored_cfg = await self.fetch_config(guild_id)
+                stored_source = stored_cfg.youtube_channel_source
+                starts_with_uc = bool(stored_source and stored_source.startswith("UC"))
+                feed_resolution_ok = False
+                if stored_source:
+                    try:
+                        await self._fetch_feed(stored_source)
+                        feed_resolution_ok = True
+                    except Exception:
+                        feed_resolution_ok = False
+
                 if action in {"created", "enabled_default"}:
-                    seed_count, latest_url = await self._seed_baseline_posts(guild_id, DEFAULT_YOUTUBE_SOURCE)
+                    seed_count, latest_url = await self._seed_baseline_posts(guild_id, stored_source)
 
                 if latest_url:
                     log.info(
-                        "YouTube bootstrap %s for guild_id=%s target_channel_id=%s seeded=%s latest=%s",
+                        "YouTube bootstrap %s for guild_id=%s target_channel_id=%s seeded=%s latest=%s source=%s starts_with_uc=%s feed_resolution_ok=%s",
                         action,
                         guild_id,
                         target_channel_id,
                         seed_count,
                         latest_url,
+                        stored_source,
+                        starts_with_uc,
+                        feed_resolution_ok,
                     )
                 else:
                     log.info(
-                        "YouTube bootstrap %s for guild_id=%s target_channel_id=%s seeded=%s",
+                        "YouTube bootstrap %s for guild_id=%s target_channel_id=%s seeded=%s source=%s starts_with_uc=%s feed_resolution_ok=%s",
                         action,
                         guild_id,
                         target_channel_id,
                         seed_count,
+                        stored_source,
+                        starts_with_uc,
+                        feed_resolution_ok,
                     )
 
             self._bootstrap_completed = True
@@ -318,7 +387,7 @@ class YouTubeNotificationsCog(commands.Cog):
             out.append(
                 YouTubeConfig(
                     guild_id=int(row["guild_id"]),
-                    youtube_channel_source=str(row["youtube_channel_source"]) if row["youtube_channel_source"] else DEFAULT_YOUTUBE_SOURCE,
+                    youtube_channel_source=str(row["youtube_channel_source"]) if row["youtube_channel_source"] else DEFAULT_YOUTUBE_HANDLE,
                     target_channel_id=int(row["target_channel_id"]) if row["target_channel_id"] else DEFAULT_TARGET_CHANNEL_ID,
                     ping_mode=str(row["ping_mode"] or "none"),
                     ping_role_id=int(row["ping_role_id"]) if row["ping_role_id"] else None,
@@ -337,7 +406,7 @@ class YouTubeNotificationsCog(commands.Cog):
         if not row:
             return YouTubeConfig(
                 guild_id=guild_id,
-                youtube_channel_source=DEFAULT_YOUTUBE_SOURCE,
+                youtube_channel_source=DEFAULT_YOUTUBE_HANDLE,
                 target_channel_id=DEFAULT_TARGET_CHANNEL_ID,
                 ping_mode="everyone",
                 ping_role_id=None,
@@ -346,7 +415,7 @@ class YouTubeNotificationsCog(commands.Cog):
             )
         return YouTubeConfig(
             guild_id=int(row["guild_id"]),
-            youtube_channel_source=str(row["youtube_channel_source"]) if row["youtube_channel_source"] else DEFAULT_YOUTUBE_SOURCE,
+            youtube_channel_source=str(row["youtube_channel_source"]) if row["youtube_channel_source"] else DEFAULT_YOUTUBE_HANDLE,
             target_channel_id=int(row["target_channel_id"]) if row["target_channel_id"] else DEFAULT_TARGET_CHANNEL_ID,
             ping_mode=str(row["ping_mode"] or "none"),
             ping_role_id=int(row["ping_role_id"]) if row["ping_role_id"] else None,
@@ -515,7 +584,7 @@ class YouTubeNotificationsCog(commands.Cog):
         self,
         interaction: discord.Interaction,
         ping_mode: str,
-        youtube_channel: str = DEFAULT_YOUTUBE_SOURCE,
+        youtube_channel: str = DEFAULT_YOUTUBE_HANDLE,
         target_channel: discord.TextChannel | None = None,
         ping_role: discord.Role | None = None,
         message_template: str | None = None,
@@ -524,7 +593,7 @@ class YouTubeNotificationsCog(commands.Cog):
             await interaction.response.send_message("Server only.", ephemeral=True)
             return
 
-        raw_channel_source = youtube_channel.strip()
+        raw_channel_source = self._clean_youtube_url(youtube_channel.strip())
         if not raw_channel_source:
             await interaction.response.send_message("YouTube channel source is required.", ephemeral=True)
             return
@@ -555,7 +624,7 @@ class YouTubeNotificationsCog(commands.Cog):
 
         cfg = YouTubeConfig(
             guild_id=interaction.guild.id,
-            youtube_channel_source=raw_channel_source,
+            youtube_channel_source=resolved_channel_id,
             target_channel_id=target,
             ping_mode=ping_mode,
             ping_role_id=ping_role.id if ping_role else None,
