@@ -94,7 +94,7 @@ class VcTimeCog(commands.Cog):
         current_session = "Not in VC"
         vs = target.voice
         if vs is not None and vs.channel is not None:
-            # If your VC XP ticker requires "not muted/deaf + not alone", we can mirror that here.
+            # If your VC ticker requires "not muted/deaf + not alone", we can mirror that here.
             # For a pure "time in VC right now" display, just show the channel and elapsed unknown.
             current_session = f"In **{vs.channel.name}**"
 
