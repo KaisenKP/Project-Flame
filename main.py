@@ -83,18 +83,26 @@ def setup_logging() -> None:
             print(f"[boot] Rich traceback install failed, continuing without it: {exc}", file=sys.stderr)
             has_rich = False
 
-    handlers: list[logging.Handler] = []
+    console_handler: logging.Handler
     if has_rich:
         try:
-            handlers.append(_build_rich_handler())
+            console_handler = _build_rich_handler()
         except Exception as exc:
             print(f"[boot] Rich console handler failed, using plain StreamHandler: {exc}", file=sys.stderr)
-            handlers.append(logging.StreamHandler())
+            console_handler = logging.StreamHandler()
     else:
         print("[boot] Optional dependency 'rich' is not installed; using plain logging output.", file=sys.stderr)
-        handlers.append(logging.StreamHandler())
+        console_handler = logging.StreamHandler()
 
-    logging.basicConfig(level=logging.INFO, format="%(name)s | %(message)s", datefmt="[%X]", handlers=handlers)
+    if isinstance(console_handler, logging.StreamHandler) and not hasattr(console_handler, "console"):
+        console_handler.setFormatter(logging.Formatter("%(name)s | %(message)s"))
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    for existing in list(root_logger.handlers):
+        if isinstance(existing, logging.StreamHandler) and not isinstance(existing, logging.FileHandler):
+            root_logger.removeHandler(existing)
+    root_logger.addHandler(console_handler)
 
     logging.getLogger("discord").setLevel(logging.WARNING)
     logging.getLogger("discord.http").setLevel(logging.WARNING)

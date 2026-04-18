@@ -306,6 +306,13 @@ class FlameBot(commands.Bot):
             deny_patterns=self.inactive_extension_patterns,
         )
 
+        if discovered:
+            log.info("Discovered %d extension candidate(s):", len(discovered))
+            for ext in discovered:
+                log.info(" - %s", ext)
+        else:
+            log.warning("No extension candidates were discovered in %s.", self.cogs_dir)
+
         if not exts:
             log.warning(
                 "No active extensions found (dir=%s package=%s allow=%s deny=%s discovered=%d).",
@@ -319,7 +326,9 @@ class FlameBot(commands.Bot):
 
         skipped = sorted(set(discovered) - set(exts))
         if skipped:
-            log.info("Extensions isolated from active startup: %s", ", ".join(skipped))
+            log.info("Extensions that will NOT load due to ACTIVE/INACTIVE filters:")
+            for ext in skipped:
+                log.info(" - %s (filtered)", ext)
 
         log.info("Loading %d active extension(s) from %s ...", len(exts), self.cogs_dir)
 
@@ -334,8 +343,10 @@ class FlameBot(commands.Bot):
                     ext,
                 )
             try:
+                log.info("Loading extension: %s", ext)
                 await self.load_extension(ext)
                 loaded += 1
+                log.info("Loaded extension: %s", ext)
                 if self.startup_diagnostics is not None:
                     self.startup_diagnostics.logger.info(
                         "phase=startup status=PASS subsystem=extensions source=FlameBot.load_all_extensions detail='extension load success' extension=%s",
@@ -344,6 +355,7 @@ class FlameBot(commands.Bot):
             except Exception:
                 failed += 1
                 failed_exts.append(ext)
+                log.error("Did NOT load extension: %s", ext)
                 if self.startup_diagnostics is not None:
                     self.startup_diagnostics.capture_exception(
                         sys.exc_info()[1] or RuntimeError(f"Failed to load extension {ext}"),
