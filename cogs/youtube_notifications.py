@@ -26,7 +26,13 @@ FEED_NS = {
     "yt": "http://www.youtube.com/xml/schemas/2015",
 }
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
-CHANNEL_ID_RE = re.compile(r'"channelId"\s*:\s*"(?P<id>UC[\w-]{20,})"')
+CHANNEL_ID_PATTERNS = (
+    re.compile(r'"channelId"\s*:\s*"(?P<id>UC[\w-]{20,})"'),
+    re.compile(r'"externalId"\s*:\s*"(?P<id>UC[\w-]{20,})"'),
+    re.compile(r'"browseId"\s*:\s*"(?P<id>UC[\w-]{20,})"'),
+)
+CHANNEL_PATH_RE = re.compile(r"^/channel/(?P<id>UC[\w-]{20,})$", re.IGNORECASE)
+HANDLE_PATH_RE = re.compile(r"^/@(?P<handle>[\w.\-]+)$")
 HANDLE_RE = re.compile(r"^@[\w.\-]+$")
 
 DEFAULT_TARGET_CHANNEL_ID = 1479752298195587072
@@ -58,6 +64,10 @@ class FeedEntry:
     published_at: datetime | None
 
 
+class InvalidYouTubeSourceError(RuntimeError):
+    pass
+
+
 def _extract_first_url(text_value: str) -> str | None:
     match = URL_RE.search(text_value or "")
     return match.group(0) if match else None
@@ -74,6 +84,7 @@ class YouTubeNotificationsCog(commands.Cog):
         self._bootstrap_lock = asyncio.Lock()
         self._bootstrap_completed = False
         self._resolved_default_source: str | None = None
+        self._invalid_source_notified_guilds: set[int] = set()
         self.youtube_loop.start()
 
     def cog_unload(self) -> None:
@@ -157,11 +168,53 @@ class YouTubeNotificationsCog(commands.Cog):
     @staticmethod
     def _clean_youtube_url(raw: str) -> str:
         source = (raw or "").strip()
+        if not source:
+            return ""
         if not source.lower().startswith(("http://", "https://")):
             return source
         parsed = urllib.parse.urlsplit(source)
-        cleaned = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
-        return cleaned
+        return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
+
+    @staticmethod
+    def _extract_channel_source_parts(channel_source: str) -> tuple[str, str]:
+        source = (channel_source or "").strip()
+        if not source:
+            raise InvalidYouTubeSourceError("Invalid YouTube source. Please provide a channel ID or resolvable handle.")
+        source = source.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+
+        if re.match(r"^UC[\w-]{20,}$", source):
+            return "channel_id", source
+
+        normalized = source
+        if HANDLE_RE.match(normalized):
+            return "handle", normalized
+
+        if normalized.startswith("/"):
+            normalized = f"https://www.youtube.com{normalized}"
+        elif normalized.lower().startswith(("youtube.com/", "www.youtube.com/")):
+            normalized = f"https://{normalized}"
+
+        if normalized.startswith(("http://", "https://")):
+            parsed = urllib.parse.urlsplit(normalized)
+            host = parsed.netloc.lower()
+            path = parsed.path.rstrip("/")
+            if host.endswith("youtube.com"):
+                handle_match = HANDLE_PATH_RE.match(path)
+                if handle_match:
+                    return "handle", f"@{handle_match.group('handle')}"
+                channel_match = CHANNEL_PATH_RE.match(path)
+                if channel_match:
+                    return "channel_id", channel_match.group("id")
+
+        channel_path_match = CHANNEL_PATH_RE.match(source.rstrip("/"))
+        if channel_path_match:
+            return "channel_id", channel_path_match.group("id")
+
+        handle_path_match = HANDLE_PATH_RE.match(source.rstrip("/"))
+        if handle_path_match:
+            return "handle", f"@{handle_path_match.group('handle')}"
+
+        raise InvalidYouTubeSourceError("Invalid YouTube source. Please provide a channel ID or resolvable handle.")
 
     async def _default_youtube_source(self) -> str:
         if self._resolved_default_source:
@@ -310,18 +363,12 @@ class YouTubeNotificationsCog(commands.Cog):
         return f"https://www.youtube.com/feeds/videos.xml?{q}"
 
     async def _resolve_channel_id(self, channel_source: str) -> str:
-        source = (channel_source or "").strip()
-        if not source:
-            raise RuntimeError("Empty YouTube channel source.")
-        if source.startswith("UC") and len(source) >= 22:
-            return source
+        source_kind, normalized_source = self._extract_channel_source_parts(channel_source)
+        if source_kind == "channel_id":
+            log.info("YouTube source normalized raw=%r resolved_channel_id=%s", channel_source, normalized_source)
+            return normalized_source
 
-        if HANDLE_RE.match(source):
-            url = f"https://www.youtube.com/{source}"
-        elif source.startswith("http://") or source.startswith("https://"):
-            url = source
-        else:
-            raise RuntimeError("Use a channel ID, handle (e.g. @name), or full YouTube channel URL.")
+        url = f"https://www.youtube.com/{normalized_source}"
 
         def _download_channel_page() -> str:
             req = urllib.request.Request(url, headers={"User-Agent": "FlameBot/1.0"})
@@ -331,12 +378,21 @@ class YouTubeNotificationsCog(commands.Cog):
         try:
             payload = await asyncio.to_thread(_download_channel_page)
         except urllib.error.URLError as exc:
-            raise RuntimeError(f"Could not resolve YouTube channel source: {exc}") from exc
+            raise InvalidYouTubeSourceError("Invalid YouTube source. Please provide a channel ID or resolvable handle.") from exc
 
-        match = CHANNEL_ID_RE.search(payload)
-        if not match:
-            raise RuntimeError("Could not parse YouTube channel ID from that source.")
-        return match.group("id")
+        for pattern in CHANNEL_ID_PATTERNS:
+            match = pattern.search(payload)
+            if match:
+                resolved_channel_id = match.group("id")
+                log.info(
+                    "YouTube source normalized raw=%r handle=%s resolved_channel_id=%s",
+                    channel_source,
+                    normalized_source,
+                    resolved_channel_id,
+                )
+                return resolved_channel_id
+
+        raise InvalidYouTubeSourceError("Invalid YouTube source. Please provide a channel ID or resolvable handle.")
 
     async def _fetch_feed(self, youtube_channel_source: str) -> tuple[str, list[FeedEntry]]:
         youtube_channel_id = await self._resolve_channel_id(youtube_channel_source)
@@ -539,6 +595,29 @@ class YouTubeNotificationsCog(commands.Cog):
         allowed_mentions = discord.AllowedMentions(everyone=True, roles=True)
         await channel.send(content=content, embed=embed, allowed_mentions=allowed_mentions)
 
+    async def _notify_invalid_source(self, guild: discord.Guild, cfg: YouTubeConfig, reason: str) -> None:
+        log.warning(
+            "YouTube notifications invalid source for guild %s source=%r: %s",
+            guild.id,
+            cfg.youtube_channel_source,
+            reason,
+        )
+        if guild.id in self._invalid_source_notified_guilds:
+            return
+        self._invalid_source_notified_guilds.add(guild.id)
+        if not cfg.target_channel_id:
+            return
+        channel = guild.get_channel(cfg.target_channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            return
+        me = guild.me or guild.get_member(self.bot.user.id) if self.bot.user else None
+        if me and not channel.permissions_for(me).send_messages:
+            return
+        try:
+            await channel.send(f"⚠️ {reason}")
+        except Exception:
+            log.exception("Failed to send YouTube invalid-source status message to guild %s", guild.id)
+
     @tasks.loop(minutes=5)
     async def youtube_loop(self) -> None:
         await self.bot.wait_until_ready()
@@ -551,6 +630,7 @@ class YouTubeNotificationsCog(commands.Cog):
                     if guild is None:
                         continue
                     _, entries = await self._fetch_feed(cfg.youtube_channel_source)
+                    self._invalid_source_notified_guilds.discard(cfg.guild_id)
                     for entry in reversed(entries[:5]):
                         claimed = await self.claim_video(guild.id, entry.video_id)
                         if not claimed:
@@ -560,8 +640,13 @@ class YouTubeNotificationsCog(commands.Cog):
                         except Exception:
                             await self.unclaim_video(guild.id, entry.video_id)
                             raise
+                except InvalidYouTubeSourceError as exc:
+                    if guild is not None:
+                        await self._notify_invalid_source(guild, cfg, str(exc))
+                    else:
+                        log.warning("YouTube loop invalid source for missing guild %s: %s", cfg.guild_id, exc)
                 except Exception as exc:
-                    log.warning("YouTube loop failed for guild %s: %s", cfg.guild_id, exc)
+                    log.warning("YouTube loop failed for guild %s source=%r: %s", cfg.guild_id, cfg.youtube_channel_source, exc)
 
     @youtube_loop.before_loop
     async def _before_loop(self) -> None:
@@ -601,6 +686,12 @@ class YouTubeNotificationsCog(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             resolved_channel_id, entries = await self._fetch_feed(raw_channel_source)
+        except InvalidYouTubeSourceError:
+            await interaction.followup.send(
+                "Invalid YouTube source. Please provide a channel ID or resolvable handle.",
+                ephemeral=True,
+            )
+            return
         except Exception as exc:
             await interaction.followup.send(f"Couldn't validate that YouTube channel feed: {exc}", ephemeral=True)
             return
