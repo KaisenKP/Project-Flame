@@ -296,31 +296,9 @@ class StartupDiagnostics:
         return entry
 
     def _schedule_automatic_runtime_delivery(self, entry: DiagnosticEntry) -> None:
-        if entry.phase != PHASE_RUNTIME or entry.status not in {STATUS_FAIL, STATUS_WARN}:
-            return
-        if self._bot_ref is None or self._runtime_report_task is not None:
-            return
-        now = time.monotonic()
-        if now - self._last_runtime_delivery_at < self._runtime_delivery_cooldown_seconds:
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        self._last_runtime_delivery_at = now
-        self._runtime_report_task = loop.create_task(
-            self.deliver_report(self._bot_ref, reason="runtime", force_channel=True),
-            name="diagnostics.runtime.delivery",
-        )
-
-        def _done(task: asyncio.Task[Any]) -> None:
-            self._runtime_report_task = None
-            try:
-                task.result()
-            except Exception:
-                self.logger.exception("Automatic runtime diagnostics delivery crashed")
-
-        self._runtime_report_task.add_done_callback(_done)
+        # Discord delivery intentionally disabled; diagnostics stay local
+        # (console + diagnostics log/report files).
+        return
 
     def capture_exception(
         self,
@@ -1153,31 +1131,16 @@ class StartupDiagnostics:
         reason: str,
         force_channel: bool = False,
     ) -> None:
-        summary = self.render_summary_embed(bot)
-        view = DiagnosticsReportView(self)
         report_path = self.write_local_report_file(bot)
         counts = self.counts()
-        attachment_path = report_path if (counts["errors"] > 0 or counts["warnings"] > 0) else None
-
-        send_errors: list[str] = []
-        dm_ok = False
-        if not force_channel:
-            dm_ok, dm_error = await self.send_report_to_owner_dm(bot, summary=summary, view=view, report_path=attachment_path)
-            if dm_error:
-                send_errors.append(dm_error)
-
-        channel_ok, channel_status = await self.send_report_to_channel(bot, summary=summary, view=view, report_path=attachment_path)
-        if not channel_ok:
-            send_errors.append(channel_status)
         self.logger.info(
-            "Diagnostics delivery result reason=%s dm_ok=%s channel_ok=%s",
+            "Diagnostics persisted locally only (reason=%s, force_channel=%s, errors=%s, warnings=%s, report=%s)",
             reason,
-            dm_ok,
-            channel_ok,
+            force_channel,
+            counts["errors"],
+            counts["warnings"],
+            report_path,
         )
-        if send_errors and not channel_ok:
-            self.logger.error("Diagnostics delivery failure reason=%s details=%s", reason, " | ".join(send_errors))
-            self.write_local_report_file(bot)
 
     async def send_report(self, bot: discord.Client, *, include_success_message: bool = True) -> None:
         if self._report_sent:
@@ -1187,9 +1150,13 @@ class StartupDiagnostics:
         self.mark_startup_complete()
 
         counts = self.counts()
-        if counts["errors"] == 0 and counts["warnings"] == 0 and include_success_message:
-            pass
-
+        if include_success_message:
+            self.logger.info(
+                "Startup diagnostics summary (local only): errors=%s warnings=%s entries=%s",
+                counts["errors"],
+                counts["warnings"],
+                counts["entries"],
+            )
         await self.deliver_report(bot, reason="startup")
 
 
