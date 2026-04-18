@@ -26,7 +26,6 @@ SENTINEL_NAME = "SENTINEL"
 SENTINEL_ICON = "https://cdn.discordapp.com/emojis/1086355036920744057.png"
 
 DEFAULT_LOG_CHANNEL_ID = 1461111447194042510
-STAFF_ALERT_CHANNEL_ID = 1461115017662566631
 
 CONFIG_PATH = "data/sentinel_config.json"
 
@@ -205,6 +204,7 @@ class Sentinel(commands.Cog):
 
         self._cfg: Dict[str, Any] = {"guilds": {}}
         self._log_ch_by_guild: Dict[int, int] = {}
+        self._staff_ch_by_guild: Dict[int, int] = {}
         self._load_cfg()
 
         self._cache_by_channel: Dict[int, Deque[CachedMsg]] = defaultdict(lambda: deque(maxlen=CACHE_PER_CHANNEL))
@@ -241,6 +241,9 @@ class Sentinel(commands.Cog):
                 gid = int(gid_str)
                 cid = int(data.get("log_channel_id", DEFAULT_LOG_CHANNEL_ID))
                 self._log_ch_by_guild[gid] = cid
+                staff_cid = data.get("staff_channel_id")
+                if staff_cid is not None:
+                    self._staff_ch_by_guild[gid] = int(staff_cid)
             except Exception:
                 continue
 
@@ -261,6 +264,16 @@ class Sentinel(commands.Cog):
         self._cfg["guilds"][str(guild_id)]["log_channel_id"] = int(channel_id)
         self._save_cfg()
 
+    def _get_staff_channel_id(self, guild_id: int) -> int:
+        return self._staff_ch_by_guild.get(guild_id, self._get_log_channel_id(guild_id))
+
+    def _set_staff_channel_id(self, guild_id: int, channel_id: int) -> None:
+        self._staff_ch_by_guild[guild_id] = channel_id
+        self._cfg.setdefault("guilds", {})
+        self._cfg["guilds"].setdefault(str(guild_id), {})
+        self._cfg["guilds"][str(guild_id)]["staff_channel_id"] = int(channel_id)
+        self._save_cfg()
+
     async def _log_channel(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
         cid = self._get_log_channel_id(guild.id)
         ch = guild.get_channel(cid)
@@ -275,11 +288,12 @@ class Sentinel(commands.Cog):
         return None
 
     async def _staff_channel(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
-        ch = guild.get_channel(STAFF_ALERT_CHANNEL_ID)
+        cid = self._get_staff_channel_id(guild.id)
+        ch = guild.get_channel(cid)
         if isinstance(ch, discord.TextChannel):
             return ch
         try:
-            fetched = await guild.fetch_channel(STAFF_ALERT_CHANNEL_ID)
+            fetched = await guild.fetch_channel(cid)
             if isinstance(fetched, discord.TextChannel):
                 return fetched
         except Exception:
@@ -846,6 +860,35 @@ class Sentinel(commands.Cog):
         e.add_field(name="New Channel", value=f"{channel.mention}\n`{channel.id}`", inline=True)
 
         await interaction.response.send_message(f"Done. Logging to {channel.mention}.", ephemeral=True)
+        await self._send_embed(interaction.guild, e)
+
+    @sentinel_group.command(name="setstaffchannel", description="Set the Sentinel staff alert channel for this server.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def sentinel_setstaffchannel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if interaction.guild is None:
+            return await interaction.response.send_message("Server only.", ephemeral=True)
+
+        self._set_staff_channel_id(interaction.guild.id, channel.id)
+
+        case_id = await self._store_event(
+            guild_id=interaction.guild.id,
+            event_type="CONFIG_STAFF_CHANNEL",
+            severity="OK",
+            summary=f"Staff channel set to #{channel.name} ({channel.id})",
+            actor_user_id=interaction.user.id,
+            channel_id=channel.id,
+            payload={
+                "actor": {"id": interaction.user.id, "tag": str(interaction.user)},
+                "channel": {"id": channel.id, "name": channel.name},
+                "interaction": interaction.data or {},
+            },
+        )
+
+        e = self._embed(interaction.guild, "Staff Alert Channel Updated", "OK", case_id=case_id)
+        e.add_field(name="Set By", value=f"{interaction.user.mention}\n`{interaction.user.id}`", inline=True)
+        e.add_field(name="New Channel", value=f"{channel.mention}\n`{channel.id}`", inline=True)
+
+        await interaction.response.send_message(f"Done. Staff alerts now go to {channel.mention}.", ephemeral=True)
         await self._send_embed(interaction.guild, e)
 
     @sentinel_group.command(name="last", description="Show recent Sentinel cases.")
