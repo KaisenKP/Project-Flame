@@ -15,7 +15,6 @@ from discord.ext import commands
 
 from services.error_logging import build_context_from_command, build_context_from_interaction
 from services.startup_diagnostics import StartupDiagnostics
-from services.startup_manager import StartupManager
 
 log = logging.getLogger("bot")
 
@@ -167,9 +166,7 @@ class FlameBot(commands.Bot):
         self._bg_tasks: set[asyncio.Task] = set()
         self._ready_once = asyncio.Event()
         self._startup_report_sent = False
-        self._post_ready_boot_completed = False
         self._persistent_views_registered = 0
-        self.startup_manager = StartupManager()
         self.shutdown_reason: str | None = None
         self.shutdown_source: str = "unknown"
         self.shutdown_intentional: bool = False
@@ -222,8 +219,6 @@ class FlameBot(commands.Bot):
         elif diag is not None:
             await diag.run_stage("command_tree_sync", lambda: None, summary_on_pass="Command sync disabled", summary_on_skip="Command sync disabled by config")
 
-        self.startup_manager.configure_defaults()
-
         if diag is not None:
             await diag.run_stage("background_task_startup", lambda: self.start_background_tasks(), summary_on_pass="Background tasks started")
             await diag.run_stage(
@@ -231,22 +226,8 @@ class FlameBot(commands.Bot):
                 lambda: None,
                 summary_on_pass=f"Persistent views registered: {self._persistent_views_registered}",
             )
-            await diag.run_stage("cache_warmup", self._run_cache_warmup, fatal=True, summary_on_pass="Cache warmup completed")
         else:
             self.start_background_tasks()
-            await self._run_cache_warmup()
-
-    async def _run_cache_warmup(self) -> str:
-        report = await self.startup_manager.run_category("cache_warmup", bot=self, diagnostics=self.startup_diagnostics)
-        if report.failed_required:
-            raise RuntimeError(report.summary)
-        return report.summary
-
-    async def _run_custom_boot_routines(self) -> str:
-        report = await self.startup_manager.run_category("custom_boot", bot=self, diagnostics=self.startup_diagnostics)
-        if report.failed_required:
-            raise RuntimeError(report.summary)
-        return report.summary
 
     async def _ensure_db_schema(self) -> None:
         try:
@@ -295,19 +276,6 @@ class FlameBot(commands.Bot):
     async def on_ready(self) -> None:
         if not self._ready_once.is_set():
             self._ready_once.set()
-
-        if not self._post_ready_boot_completed:
-            self._post_ready_boot_completed = True
-            diag = self.startup_diagnostics
-            if diag is not None:
-                await diag.run_stage(
-                    "custom_boot_routines",
-                    self._run_custom_boot_routines,
-                    fatal=True,
-                    summary_on_pass="Custom boot routines completed",
-                )
-            else:
-                await self._run_custom_boot_routines()
 
         assert self.user is not None
         log.info("Ready as %s (id=%s)", self.user, self.user.id)
