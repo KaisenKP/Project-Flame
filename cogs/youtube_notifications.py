@@ -71,6 +71,8 @@ class YouTubeNotificationsCog(commands.Cog):
         self.bot = bot
         self.sessionmaker = sessions()
         self._run_lock = asyncio.Lock()
+        self._bootstrap_lock = asyncio.Lock()
+        self._bootstrap_completed = False
         self.youtube_loop.start()
 
     def cog_unload(self) -> None:
@@ -121,6 +123,118 @@ class YouTubeNotificationsCog(commands.Cog):
                         f"UPDATE {self.CFG_TABLE} SET youtube_channel_source = youtube_channel_id WHERE youtube_channel_source IS NULL AND youtube_channel_id IS NOT NULL"
                     )
                 )
+
+    @staticmethod
+    def _normalize_channel_source(channel_source: str | None) -> str:
+        source = (channel_source or "").strip().lower()
+        if not source:
+            return ""
+        source = re.sub(r"^https?://(www\.)?", "", source)
+        source = source.rstrip("/")
+        source = source.split("?", 1)[0]
+        return source
+
+    def _matches_default_bootstrap_intent(self, row: dict[str, object]) -> bool:
+        source = self._normalize_channel_source(str(row.get("youtube_channel_source") or ""))
+        default_source = self._normalize_channel_source(DEFAULT_YOUTUBE_SOURCE)
+        allowed_default_sources = {
+            default_source,
+            self._normalize_channel_source("https://youtube.com/@blazesilvergaming"),
+            self._normalize_channel_source("@blazesilvergaming"),
+        }
+        ping_mode = str(row.get("ping_mode") or "none").lower()
+        message_template = str(row.get("message_template") or DEFAULT_TEMPLATE)
+        ping_role_id = row.get("ping_role_id")
+        target_channel_id = int(row.get("target_channel_id") or DEFAULT_TARGET_CHANNEL_ID)
+        return (
+            source in allowed_default_sources
+            and target_channel_id == DEFAULT_TARGET_CHANNEL_ID
+            and ping_mode == "none"
+            and message_template == DEFAULT_TEMPLATE
+            and ping_role_id is None
+        )
+
+    async def _seed_baseline_posts(self, guild_id: int, youtube_channel_source: str) -> tuple[int, str | None]:
+        try:
+            _, entries = await self._fetch_feed(youtube_channel_source)
+        except Exception as exc:
+            log.warning("YouTube bootstrap feed seed failed for guild %s: %s", guild_id, exc)
+            return 0, None
+        seeded = 0
+        latest_url: str | None = entries[0].url if entries else None
+        for entry in entries[:10]:
+            await self.mark_posted(guild_id, entry.video_id)
+            seeded += 1
+        return seeded, latest_url
+
+    async def ensure_default_guild_configs(self) -> None:
+        async with self._bootstrap_lock:
+            if self._bootstrap_completed:
+                return
+            sql_get = text(
+                f"SELECT guild_id, youtube_channel_source, target_channel_id, ping_mode, ping_role_id, message_template, enabled "
+                f"FROM {self.CFG_TABLE} WHERE guild_id = :guild_id LIMIT 1"
+            )
+            sql_insert = text(
+                f"""
+                INSERT INTO {self.CFG_TABLE}
+                (guild_id, youtube_channel_source, target_channel_id, ping_mode, ping_role_id, message_template, enabled)
+                VALUES (:guild_id, :youtube_channel_source, :target_channel_id, :ping_mode, :ping_role_id, :message_template, :enabled)
+                """
+            )
+            sql_enable = text(f"UPDATE {self.CFG_TABLE} SET enabled = 1 WHERE guild_id = :guild_id")
+
+            for guild in self.bot.guilds:
+                guild_id = int(guild.id)
+                target_channel_id = DEFAULT_TARGET_CHANNEL_ID
+                action = "skipped"
+                seed_count = 0
+                latest_url: str | None = None
+                async with self.sessionmaker() as session:
+                    async with session.begin():
+                        row = (await session.execute(sql_get, {"guild_id": guild_id})).mappings().first()
+                        if not row:
+                            await session.execute(
+                                sql_insert,
+                                {
+                                    "guild_id": guild_id,
+                                    "youtube_channel_source": DEFAULT_YOUTUBE_SOURCE,
+                                    "target_channel_id": target_channel_id,
+                                    "ping_mode": "none",
+                                    "ping_role_id": None,
+                                    "message_template": DEFAULT_TEMPLATE,
+                                    "enabled": 1,
+                                },
+                            )
+                            action = "created"
+                        else:
+                            target_channel_id = int(row["target_channel_id"]) if row["target_channel_id"] else DEFAULT_TARGET_CHANNEL_ID
+                            if not bool(row["enabled"]) and self._matches_default_bootstrap_intent(dict(row)):
+                                await session.execute(sql_enable, {"guild_id": guild_id})
+                                action = "enabled_default"
+
+                if action in {"created", "enabled_default"}:
+                    seed_count, latest_url = await self._seed_baseline_posts(guild_id, DEFAULT_YOUTUBE_SOURCE)
+
+                if latest_url:
+                    log.info(
+                        "YouTube bootstrap %s for guild_id=%s target_channel_id=%s seeded=%s latest=%s",
+                        action,
+                        guild_id,
+                        target_channel_id,
+                        seed_count,
+                        latest_url,
+                    )
+                else:
+                    log.info(
+                        "YouTube bootstrap %s for guild_id=%s target_channel_id=%s seeded=%s",
+                        action,
+                        guild_id,
+                        target_channel_id,
+                        seed_count,
+                    )
+
+            self._bootstrap_completed = True
 
     def _feed_url(self, youtube_channel_id: str) -> str:
         q = urllib.parse.urlencode({"channel_id": youtube_channel_id})
@@ -383,6 +497,7 @@ class YouTubeNotificationsCog(commands.Cog):
     @youtube_loop.before_loop
     async def _before_loop(self) -> None:
         await self.bot.wait_until_ready()
+        await self.ensure_default_guild_configs()
 
     youtube = app_commands.Group(name="youtube", description="YouTube upload notifications.")
 
