@@ -39,6 +39,9 @@ DEFAULT_PANEL_IMAGE_URL = (
     "69acbce85ee689a96f4dd42f/2ad3540fd_tickets.png"
 )
 DEFAULT_BLUE = 0x2F6BFF
+STAFF_ACCESS_TYPE_KEYS = {"staff_access"}
+STAFF_ACCESS_PING_USER_NAMES = ("Silver (Owner)", "Blaze", "Starlight")
+STAFF_ACCESS_PING_ROLE_NAMES = ("Server Mod",)
 PUBLIC_TICKET_CLAIM_MESSAGE = "✅ This ticket is now being handled by {user_mention}."
 PRIVATE_TICKET_OVERRIDE_DENIED_MESSAGE = (
     "This ticket is already assigned to {claimer_mention}. "
@@ -125,6 +128,16 @@ def _member_has_role(member: discord.Member, role_id: int | None) -> bool:
     if not role_id:
         return False
     return any(r.id == int(role_id) for r in member.roles)
+
+
+def _matches_name(value: str | None, target: str) -> bool:
+    if not value:
+        return False
+    return value.casefold() == target.casefold()
+
+
+def _is_staff_access_ticket_type(ticket_type: TicketTypeRow) -> bool:
+    return _clean_key(ticket_type.type_key) in STAFF_ACCESS_TYPE_KEYS
 
 
 @dataclass
@@ -2040,6 +2053,48 @@ class TicketsCog(commands.Cog):
         except discord.HTTPException:
             pass
 
+    def _resolve_named_member(self, guild: discord.Guild, target_name: str) -> discord.Member | None:
+        for member in guild.members:
+            if _matches_name(member.display_name, target_name) or _matches_name(member.name, target_name):
+                return member
+            if member.global_name and _matches_name(member.global_name, target_name):
+                return member
+        return None
+
+    def _resolve_named_role(self, guild: discord.Guild, target_name: str) -> discord.Role | None:
+        for role in guild.roles:
+            if _matches_name(role.name, target_name):
+                return role
+        return None
+
+    def _build_ticket_open_ping_mentions(self, guild: discord.Guild, cfg: TicketConfig, ticket_type: TicketTypeRow) -> str:
+        mention_tokens: list[str] = []
+        seen_ids: set[int] = set()
+
+        for role_id in (cfg.support_role_id, ticket_type.staff_role_id, cfg.head_mod_role_id):
+            if not role_id:
+                continue
+            role_id = int(role_id)
+            if role_id in seen_ids:
+                continue
+            seen_ids.add(role_id)
+            mention_tokens.append(f"<@&{role_id}>")
+
+        if _is_staff_access_ticket_type(ticket_type):
+            for member_name in STAFF_ACCESS_PING_USER_NAMES:
+                member = self._resolve_named_member(guild, member_name)
+                if member and member.id not in seen_ids:
+                    seen_ids.add(member.id)
+                    mention_tokens.append(member.mention)
+
+            for role_name in STAFF_ACCESS_PING_ROLE_NAMES:
+                role = self._resolve_named_role(guild, role_name)
+                if role and role.id not in seen_ids:
+                    seen_ids.add(role.id)
+                    mention_tokens.append(role.mention)
+
+        return " ".join(mention_tokens)
+
     async def create_ticket_from_modal(
         self,
         interaction: discord.Interaction,
@@ -2160,8 +2215,7 @@ class TicketsCog(commands.Cog):
                 answers=answers,
             )
 
-            ping_roles = {cfg.support_role_id, ticket_type.staff_role_id, cfg.head_mod_role_id}
-            staff_ping = " ".join(f"<@&{rid}>" for rid in ping_roles if rid)
+            staff_ping = self._build_ticket_open_ping_mentions(interaction.guild, cfg, ticket_type)
 
             sent = await channel.send(
                 content=f"{interaction.user.mention} {staff_ping}".strip(),
