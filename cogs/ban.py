@@ -7,6 +7,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from services.mod_warnings import add_warning as store_warning
+
 
 MAX_DELETE_DAYS = 7
 
@@ -662,15 +664,24 @@ class PunishHubView(discord.ui.View):
             await self._permission_error(interaction, "Target is no longer in this server.")
             return
         moderation_cog = self._moderation_cog()
-        if moderation_cog is None or not hasattr(moderation_cog, "add_warning"):
+        try:
+            if moderation_cog is not None and hasattr(moderation_cog, "add_warning"):
+                await moderation_cog.add_warning(
+                    guild_id=interaction.guild.id,
+                    user_id=target.id,
+                    moderator_id=interaction.user.id,
+                    reason=self.draft.reason,
+                )
+            else:
+                await store_warning(
+                    guild_id=interaction.guild.id,
+                    user_id=target.id,
+                    moderator_id=interaction.user.id,
+                    reason=self.draft.reason,
+                )
+        except Exception:
             await self._permission_error(interaction, "Moderation warning storage is unavailable.")
             return
-        await moderation_cog.add_warning(
-            guild_id=interaction.guild.id,
-            user_id=target.id,
-            moderator_id=interaction.user.id,
-            reason=self.draft.reason,
-        )
         await self._log_action(
             interaction.guild,
             title="Punishment Hub • User Warned",
