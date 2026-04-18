@@ -46,8 +46,10 @@ def _safe_json_load(raw: str | None, fallback: list[int]) -> list[int]:
 @dataclass
 class CommunityConfig:
     guild_id: int
+    welcome_enabled: bool
     welcome_channel_id: int | None
     welcome_message: str
+    welcome_image_url: str
     auto_role_ids: list[int]
     self_roles_channel_id: int | None
     self_roles_message_id: int | None
@@ -159,8 +161,10 @@ class CommunityToolsCog(commands.Cog):
         sql = f"""
         CREATE TABLE IF NOT EXISTS {self.TABLE} (
             guild_id BIGINT NOT NULL,
+            welcome_enabled TINYINT(1) NOT NULL DEFAULT 0,
             welcome_channel_id BIGINT NULL,
             welcome_message TEXT NULL,
+            welcome_image_url TEXT NULL,
             auto_role_ids_json LONGTEXT NULL,
             self_roles_channel_id BIGINT NULL,
             self_roles_message_id BIGINT NULL,
@@ -172,11 +176,15 @@ class CommunityToolsCog(commands.Cog):
         async with self.sessionmaker() as session:
             async with session.begin():
                 await session.execute(text(sql))
+                await session.execute(
+                    text(f"ALTER TABLE {self.TABLE} ADD COLUMN IF NOT EXISTS welcome_enabled TINYINT(1) NOT NULL DEFAULT 0")
+                )
+                await session.execute(text(f"ALTER TABLE {self.TABLE} ADD COLUMN IF NOT EXISTS welcome_image_url TEXT NULL"))
 
     async def fetch_config(self, guild_id: int) -> CommunityConfig | None:
         sql = text(
             f"""
-            SELECT guild_id, welcome_channel_id, welcome_message, auto_role_ids_json,
+            SELECT guild_id, welcome_enabled, welcome_channel_id, welcome_message, welcome_image_url, auto_role_ids_json,
                    self_roles_channel_id, self_roles_message_id, self_role_ids_json
             FROM {self.TABLE}
             WHERE guild_id = :guild_id
@@ -190,8 +198,10 @@ class CommunityToolsCog(commands.Cog):
             return None
         return CommunityConfig(
             guild_id=int(row["guild_id"]),
+            welcome_enabled=bool(int(row.get("welcome_enabled", 0) or 0)),
             welcome_channel_id=int(row["welcome_channel_id"]) if row["welcome_channel_id"] else None,
             welcome_message=str(row["welcome_message"] or DEFAULT_WELCOME_MESSAGE),
+            welcome_image_url=str(row.get("welcome_image_url") or DEFAULT_WELCOME_IMAGE_URL),
             auto_role_ids=_safe_json_load(row["auto_role_ids_json"], []),
             self_roles_channel_id=int(row["self_roles_channel_id"]) if row["self_roles_channel_id"] else None,
             self_roles_message_id=int(row["self_roles_message_id"]) if row["self_roles_message_id"] else None,
@@ -202,12 +212,14 @@ class CommunityToolsCog(commands.Cog):
         sql = text(
             f"""
             INSERT INTO {self.TABLE}
-                (guild_id, welcome_channel_id, welcome_message, auto_role_ids_json, self_roles_channel_id, self_roles_message_id, self_role_ids_json)
+                (guild_id, welcome_enabled, welcome_channel_id, welcome_message, welcome_image_url, auto_role_ids_json, self_roles_channel_id, self_roles_message_id, self_role_ids_json)
             VALUES
-                (:guild_id, :welcome_channel_id, :welcome_message, :auto_role_ids_json, :self_roles_channel_id, :self_roles_message_id, :self_role_ids_json)
+                (:guild_id, :welcome_enabled, :welcome_channel_id, :welcome_message, :welcome_image_url, :auto_role_ids_json, :self_roles_channel_id, :self_roles_message_id, :self_role_ids_json)
             ON DUPLICATE KEY UPDATE
+                welcome_enabled = VALUES(welcome_enabled),
                 welcome_channel_id = VALUES(welcome_channel_id),
                 welcome_message = VALUES(welcome_message),
+                welcome_image_url = VALUES(welcome_image_url),
                 auto_role_ids_json = VALUES(auto_role_ids_json),
                 self_roles_channel_id = VALUES(self_roles_channel_id),
                 self_roles_message_id = VALUES(self_roles_message_id),
@@ -220,8 +232,10 @@ class CommunityToolsCog(commands.Cog):
                     sql,
                     {
                         "guild_id": cfg.guild_id,
+                        "welcome_enabled": 1 if cfg.welcome_enabled else 0,
                         "welcome_channel_id": cfg.welcome_channel_id,
                         "welcome_message": cfg.welcome_message,
+                        "welcome_image_url": cfg.welcome_image_url,
                         "auto_role_ids_json": json.dumps(cfg.auto_role_ids),
                         "self_roles_channel_id": cfg.self_roles_channel_id,
                         "self_roles_message_id": cfg.self_roles_message_id,
@@ -235,8 +249,10 @@ class CommunityToolsCog(commands.Cog):
             return cfg
         cfg = CommunityConfig(
             guild_id=guild_id,
+            welcome_enabled=False,
             welcome_channel_id=None,
             welcome_message=DEFAULT_WELCOME_MESSAGE,
+            welcome_image_url=DEFAULT_WELCOME_IMAGE_URL,
             auto_role_ids=[],
             self_roles_channel_id=None,
             self_roles_message_id=None,
@@ -253,14 +269,15 @@ class CommunityToolsCog(commands.Cog):
             .replace("{server_name}", member.guild.name)
         )
 
-    def _build_welcome_embed(self, member: discord.Member, *, template: str) -> discord.Embed:
+    def _build_welcome_embed(self, member: discord.Member, *, template: str, image_url: str | None = None) -> discord.Embed:
         embed = discord.Embed(
             title=f"✨ Welcome to {member.guild.name}!",
             description=self._render_welcome_message(template, member),
             color=discord.Color.from_rgb(255, 129, 217),
             timestamp=datetime.now(tz=UTC),
         )
-        embed.set_image(url=DEFAULT_WELCOME_IMAGE_URL)
+        if image_url:
+            embed.set_image(url=image_url)
         embed.set_thumbnail(url=member.display_avatar.url)
         embed.set_footer(text="We’re glad you’re here 💖")
         return embed
@@ -295,10 +312,10 @@ class CommunityToolsCog(commands.Cog):
             if missing:
                 log.warning("Missing configured auto-role IDs in guild %s: %s", member.guild.id, missing)
 
-        if cfg.welcome_channel_id:
+        if cfg.welcome_enabled and cfg.welcome_channel_id:
             channel = member.guild.get_channel(cfg.welcome_channel_id)
             if isinstance(channel, discord.TextChannel):
-                embed = self._build_welcome_embed(member, template=cfg.welcome_message)
+                embed = self._build_welcome_embed(member, template=cfg.welcome_message, image_url=cfg.welcome_image_url)
                 try:
                     await channel.send(content=member.mention, embed=embed)
                 except discord.HTTPException:
@@ -318,8 +335,11 @@ class CommunityToolsCog(commands.Cog):
             await interaction.response.send_message("Server only.", ephemeral=True)
             return
         cfg = await self._require_cfg(interaction.guild.id)
+        cfg.welcome_enabled = True
         cfg.welcome_channel_id = channel.id
         cfg.welcome_message = message[:1500]
+        if not cfg.welcome_image_url:
+            cfg.welcome_image_url = DEFAULT_WELCOME_IMAGE_URL
         await self.upsert_config(cfg)
         await interaction.response.send_message(
             "✅ Welcome system updated. Supported placeholders: `{user_mention}`, `{user_name}`, `{server_name}`.",
@@ -336,14 +356,123 @@ class CommunityToolsCog(commands.Cog):
         if not cfg or not cfg.welcome_channel_id:
             await interaction.response.send_message("Welcome system is not configured yet.", ephemeral=True)
             return
+        if not cfg.welcome_enabled:
+            await interaction.response.send_message("Welcome system is currently disabled. Enable it from `/welcomemessage` first.", ephemeral=True)
+            return
         channel = interaction.guild.get_channel(cfg.welcome_channel_id)
         if not isinstance(channel, discord.TextChannel):
             await interaction.response.send_message("Welcome channel is missing. Set it again.", ephemeral=True)
             return
 
-        embed = self._build_welcome_embed(interaction.user, template=cfg.welcome_message)
+        embed = self._build_welcome_embed(interaction.user, template=cfg.welcome_message, image_url=cfg.welcome_image_url)
         await channel.send(content=interaction.user.mention, embed=embed)
         await interaction.response.send_message(f"✅ Sent a welcome preview in {channel.mention}.", ephemeral=True)
+
+    welcomemessage = app_commands.Group(name="welcomemessage", description="Welcome message hub for admins.")
+
+    @welcomemessage.command(name="hub", description="Show and edit welcome configuration.")
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.choices(
+        action=[
+            app_commands.Choice(name="status", value="status"),
+            app_commands.Choice(name="enable", value="enable"),
+            app_commands.Choice(name="disable", value="disable"),
+            app_commands.Choice(name="set_channel", value="set_channel"),
+            app_commands.Choice(name="set_message", value="set_message"),
+            app_commands.Choice(name="set_attachment", value="set_attachment"),
+            app_commands.Choice(name="test", value="test"),
+            app_commands.Choice(name="reset_defaults", value="reset_defaults"),
+        ]
+    )
+    async def welcome_hub(
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        channel: discord.TextChannel | None = None,
+        message: str | None = None,
+        attachment_link: str | None = None,
+    ) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+        cfg = await self._require_cfg(interaction.guild.id)
+
+        value = action.value
+        if value == "enable":
+            if cfg.welcome_channel_id is None:
+                await interaction.response.send_message("Set a welcome channel first (`set_channel`).", ephemeral=True)
+                return
+            cfg.welcome_enabled = True
+            await self.upsert_config(cfg)
+            await interaction.response.send_message("✅ Welcome messages are now enabled.", ephemeral=True)
+            return
+
+        if value == "disable":
+            cfg.welcome_enabled = False
+            await self.upsert_config(cfg)
+            await interaction.response.send_message("✅ Welcome messages are now disabled.", ephemeral=True)
+            return
+
+        if value == "set_channel":
+            if channel is None:
+                await interaction.response.send_message("Pick a `channel` when using `set_channel`.", ephemeral=True)
+                return
+            cfg.welcome_channel_id = channel.id
+            await self.upsert_config(cfg)
+            await interaction.response.send_message(f"✅ Welcome channel set to {channel.mention}.", ephemeral=True)
+            return
+
+        if value == "set_message":
+            if message is None or not message.strip():
+                await interaction.response.send_message("Provide a non-empty `message` for `set_message`.", ephemeral=True)
+                return
+            cfg.welcome_message = message.strip()[:1500]
+            await self.upsert_config(cfg)
+            await interaction.response.send_message("✅ Welcome message updated.", ephemeral=True)
+            return
+
+        if value == "set_attachment":
+            if attachment_link is None or not attachment_link.strip():
+                await interaction.response.send_message("Provide a valid `attachment_link` for `set_attachment`.", ephemeral=True)
+                return
+            cfg.welcome_image_url = attachment_link.strip()
+            await self.upsert_config(cfg)
+            await interaction.response.send_message("✅ Welcome attachment link updated.", ephemeral=True)
+            return
+
+        if value == "reset_defaults":
+            cfg.welcome_message = DEFAULT_WELCOME_MESSAGE
+            cfg.welcome_image_url = DEFAULT_WELCOME_IMAGE_URL
+            await self.upsert_config(cfg)
+            await interaction.response.send_message("✅ Welcome message and attachment were reset to defaults.", ephemeral=True)
+            return
+
+        if value == "test":
+            if not cfg.welcome_channel_id:
+                await interaction.response.send_message("Set a welcome channel first (`set_channel`).", ephemeral=True)
+                return
+            channel_obj = interaction.guild.get_channel(cfg.welcome_channel_id)
+            if not isinstance(channel_obj, discord.TextChannel):
+                await interaction.response.send_message("Configured channel no longer exists. Set it again.", ephemeral=True)
+                return
+            embed = self._build_welcome_embed(interaction.user, template=cfg.welcome_message, image_url=cfg.welcome_image_url)
+            try:
+                await channel_obj.send(content=interaction.user.mention, embed=embed)
+            except discord.HTTPException:
+                await interaction.response.send_message("Failed to send test welcome message.", ephemeral=True)
+                return
+            await interaction.response.send_message(f"✅ Test welcome sent in {channel_obj.mention}.", ephemeral=True)
+            return
+
+        # status
+        channel_obj = interaction.guild.get_channel(cfg.welcome_channel_id) if cfg.welcome_channel_id else None
+        status_embed = discord.Embed(title="Welcome Message Hub", color=discord.Color.blurple())
+        status_embed.add_field(name="Enabled", value="Yes" if cfg.welcome_enabled else "No", inline=True)
+        status_embed.add_field(name="Channel", value=channel_obj.mention if isinstance(channel_obj, discord.TextChannel) else "Not set", inline=True)
+        status_embed.add_field(name="Attachment Link", value=cfg.welcome_image_url or "Not set", inline=False)
+        status_embed.add_field(name="Message", value=cfg.welcome_message[:1024], inline=False)
+        status_embed.set_footer(text="Use /welcomemessage hub with action options to edit settings.")
+        await interaction.response.send_message(embed=status_embed, ephemeral=True)
 
     @community.command(name="autorole_set", description="Set roles that should be auto-assigned when users join.")
     @app_commands.default_permissions(manage_guild=True)
