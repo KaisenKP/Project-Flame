@@ -8,7 +8,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import discord
 from discord import app_commands
@@ -42,6 +42,9 @@ DEFAULT_TEMPLATE = (
     "🎬 Watch now: {video_url}"
 )
 DEFAULT_YOUTUBE_HANDLE = "@blazesilvergaming"
+YOUTUBE_POLL_INTERVAL_MINUTES = 1
+YOUTUBE_MAX_CONCURRENT_FEED_FETCHES = 8
+CHANNEL_ID_CACHE_TTL = timedelta(hours=6)
 
 
 @dataclass
@@ -85,6 +88,7 @@ class YouTubeNotificationsCog(commands.Cog):
         self._bootstrap_completed = False
         self._resolved_default_source: str | None = None
         self._invalid_source_notified_guilds: set[int] = set()
+        self._channel_id_cache: dict[str, tuple[str, datetime]] = {}
         self.youtube_loop.start()
 
     def cog_unload(self) -> None:
@@ -368,6 +372,14 @@ class YouTubeNotificationsCog(commands.Cog):
             log.info("YouTube source normalized raw=%r resolved_channel_id=%s", channel_source, normalized_source)
             return normalized_source
 
+        cached_resolution = self._channel_id_cache.get(normalized_source)
+        now = datetime.now(tz=UTC)
+        if cached_resolution is not None:
+            resolved_channel_id, resolved_at = cached_resolution
+            if now - resolved_at <= CHANNEL_ID_CACHE_TTL:
+                return resolved_channel_id
+            self._channel_id_cache.pop(normalized_source, None)
+
         url = f"https://www.youtube.com/{normalized_source}"
 
         def _download_channel_page() -> str:
@@ -390,6 +402,7 @@ class YouTubeNotificationsCog(commands.Cog):
                     normalized_source,
                     resolved_channel_id,
                 )
+                self._channel_id_cache[normalized_source] = (resolved_channel_id, now)
                 return resolved_channel_id
 
         raise InvalidYouTubeSourceError("Invalid YouTube source. Please provide a channel ID or resolvable handle.")
@@ -618,18 +631,45 @@ class YouTubeNotificationsCog(commands.Cog):
         except Exception:
             log.exception("Failed to send YouTube invalid-source status message to guild %s", guild.id)
 
-    @tasks.loop(minutes=5)
+    @tasks.loop(minutes=YOUTUBE_POLL_INTERVAL_MINUTES)
     async def youtube_loop(self) -> None:
         await self.bot.wait_until_ready()
         async with self._run_lock:
-            for cfg in await self.fetch_configs():
-                try:
-                    if not cfg.youtube_channel_source:
-                        continue
-                    guild = self.bot.get_guild(cfg.guild_id)
-                    if guild is None:
-                        continue
-                    _, entries = await self._fetch_feed(cfg.youtube_channel_source)
+            configs = await self.fetch_configs()
+            grouped_configs: dict[str, dict[str, object]] = {}
+            for cfg in configs:
+                if not cfg.youtube_channel_source:
+                    continue
+                guild = self.bot.get_guild(cfg.guild_id)
+                if guild is None:
+                    continue
+                key = self._normalize_channel_source(cfg.youtube_channel_source)
+                if key not in grouped_configs:
+                    grouped_configs[key] = {"source": cfg.youtube_channel_source, "targets": []}
+                grouped_configs[key]["targets"].append((guild, cfg))
+
+            semaphore = asyncio.Semaphore(YOUTUBE_MAX_CONCURRENT_FEED_FETCHES)
+
+            async def _fetch_group(key: str, source: str) -> tuple[str, list[FeedEntry]]:
+                async with semaphore:
+                    _, entries = await self._fetch_feed(source)
+                    return key, entries
+
+            fetch_tasks = [
+                asyncio.create_task(_fetch_group(key, str(group["source"])))
+                for key, group in grouped_configs.items()
+            ]
+            fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+
+            for result in fetch_results:
+                if isinstance(result, Exception):
+                    continue
+                key, entries = result
+                group = grouped_configs.get(key)
+                if not group:
+                    continue
+                targets = group["targets"]
+                for guild, cfg in targets:
                     self._invalid_source_notified_guilds.discard(cfg.guild_id)
                     for entry in reversed(entries[:5]):
                         claimed = await self.claim_video(guild.id, entry.video_id)
@@ -640,13 +680,18 @@ class YouTubeNotificationsCog(commands.Cog):
                         except Exception:
                             await self.unclaim_video(guild.id, entry.video_id)
                             raise
-                except InvalidYouTubeSourceError as exc:
-                    if guild is not None:
-                        await self._notify_invalid_source(guild, cfg, str(exc))
-                    else:
-                        log.warning("YouTube loop invalid source for missing guild %s: %s", cfg.guild_id, exc)
-                except Exception as exc:
-                    log.warning("YouTube loop failed for guild %s source=%r: %s", cfg.guild_id, cfg.youtube_channel_source, exc)
+
+            for result, (key, group) in zip(fetch_results, grouped_configs.items(), strict=False):
+                if not isinstance(result, Exception):
+                    continue
+                targets = group["targets"]
+                source = group["source"]
+                if isinstance(result, InvalidYouTubeSourceError):
+                    for guild, cfg in targets:
+                        await self._notify_invalid_source(guild, cfg, str(result))
+                else:
+                    for guild, cfg in targets:
+                        log.warning("YouTube loop failed for guild %s source=%r: %s", guild.id, source, result)
 
     @youtube_loop.before_loop
     async def _before_loop(self) -> None:
