@@ -671,15 +671,27 @@ class YouTubeNotificationsCog(commands.Cog):
                 targets = group["targets"]
                 for guild, cfg in targets:
                     self._invalid_source_notified_guilds.discard(cfg.guild_id)
-                    for entry in reversed(entries[:5]):
-                        claimed = await self.claim_video(guild.id, entry.video_id)
-                        if not claimed:
+
+                    # Prefer the newest unseen upload to avoid posting stale backlog in random order.
+                    next_entry: FeedEntry | None = None
+                    for candidate in entries[:15]:
+                        if await self.was_posted(guild.id, candidate.video_id):
                             continue
-                        try:
-                            await self._post_entry(guild, cfg, entry)
-                        except Exception:
-                            await self.unclaim_video(guild.id, entry.video_id)
-                            raise
+                        next_entry = candidate
+                        break
+
+                    if next_entry is None:
+                        continue
+
+                    claimed = await self.claim_video(guild.id, next_entry.video_id)
+                    if not claimed:
+                        continue
+
+                    try:
+                        await self._post_entry(guild, cfg, next_entry)
+                    except Exception:
+                        await self.unclaim_video(guild.id, next_entry.video_id)
+                        raise
 
             for result, (key, group) in zip(fetch_results, grouped_configs.items(), strict=False):
                 if not isinstance(result, Exception):
