@@ -858,6 +858,74 @@ class YouTubeNotificationsCog(commands.Cog):
         embed.add_field(name="Template", value=f"```{cfg.message_template[:350]}```", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    @youtube.command(name="force_latest", description="Force post the newest unclaimed upload immediately.")
+    @app_commands.default_permissions(manage_guild=True)
+    async def force_latest(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+
+        cfg = await self.fetch_config(interaction.guild.id)
+        if not cfg.enabled:
+            await interaction.response.send_message(
+                "YouTube notifications are disabled. Enable them first with `/youtube configure`.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            resolved_channel_id, entries = await self._fetch_feed(cfg.youtube_channel_source or DEFAULT_YOUTUBE_HANDLE)
+        except InvalidYouTubeSourceError:
+            await interaction.followup.send(
+                "Invalid YouTube source in current config. Re-run `/youtube configure` with a valid source.",
+                ephemeral=True,
+            )
+            return
+        except Exception as exc:
+            await interaction.followup.send(f"Couldn't fetch the YouTube feed right now: {exc}", ephemeral=True)
+            return
+
+        if not entries:
+            await interaction.followup.send("Feed loaded but no videos were found.", ephemeral=True)
+            return
+
+        next_entry: FeedEntry | None = None
+        for candidate in entries[:25]:
+            if await self.was_posted(interaction.guild.id, candidate.video_id):
+                continue
+            next_entry = candidate
+            break
+
+        if next_entry is None:
+            await interaction.followup.send(
+                "No unclaimed videos found in the latest feed window (top 25 entries).",
+                ephemeral=True,
+            )
+            return
+
+        claimed = await self.claim_video(interaction.guild.id, next_entry.video_id)
+        if not claimed:
+            await interaction.followup.send(
+                "That latest unclaimed video was just claimed by another run. Try again in a few seconds.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            await self._post_entry(interaction.guild, cfg, next_entry)
+        except Exception as exc:
+            await self.unclaim_video(interaction.guild.id, next_entry.video_id)
+            await interaction.followup.send(f"Failed to post the video: {exc}", ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            "✅ Forced post sent.\n"
+            f"Source: `{resolved_channel_id}`\n"
+            f"Video: {next_entry.url}",
+            ephemeral=True,
+        )
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(YouTubeNotificationsCog(bot))
