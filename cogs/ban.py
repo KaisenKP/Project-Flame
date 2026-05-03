@@ -659,6 +659,13 @@ class PunishHubView(discord.ui.View):
         if interaction.guild is None or interaction.user is None:
             await self._permission_error(interaction, "This can only be used in a server.")
             return
+        reason = str(self.draft.reason).strip()
+        if not reason or reason.casefold() == "no reason provided":
+            await self._permission_error(
+                interaction,
+                "Please set a warning reason first using **Set Reason** before recording a warning.",
+            )
+            return
         target = self._resolve_target(interaction)
         if target is None:
             await self._permission_error(interaction, "Target is no longer in this server.")
@@ -670,14 +677,14 @@ class PunishHubView(discord.ui.View):
                     guild_id=interaction.guild.id,
                     user_id=target.id,
                     moderator_id=interaction.user.id,
-                    reason=self.draft.reason,
+                    reason=reason,
                 )
             else:
                 await store_warning(
                     guild_id=interaction.guild.id,
                     user_id=target.id,
                     moderator_id=interaction.user.id,
-                    reason=self.draft.reason,
+                    reason=reason,
                 )
         except Exception:
             await self._permission_error(interaction, "Moderation warning storage is unavailable.")
@@ -685,7 +692,7 @@ class PunishHubView(discord.ui.View):
         await self._log_action(
             interaction.guild,
             title="Punishment Hub • User Warned",
-            description=f"{target.mention} warned by {interaction.user.mention}.\n**Reason:** {self.draft.reason}",
+            description=f"{target.mention} warned by {interaction.user.mention}.\n**Reason:** {reason}",
             color=discord.Color.orange(),
         )
         await self.disable_all(interaction, result=f"✅ Warning recorded for {target.mention}.")
