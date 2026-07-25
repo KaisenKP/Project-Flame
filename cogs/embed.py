@@ -36,6 +36,7 @@ class EmbedDraft:
     guild_id: int
     user_id: int
     source_channel_id: int
+    target_channel_id: int | None = None
     title: str = ""
     body: str = ""
     footer: str = ""
@@ -162,6 +163,36 @@ class EmbedColorModal(discord.ui.Modal):
         await self.cog.refresh_preview(interaction, self.draft)
 
 
+class EmbedChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, cog: "EmbedStudioCog", draft: EmbedDraft) -> None:
+        super().__init__(
+            placeholder="Choose a destination channel...",
+            min_values=1,
+            max_values=1,
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+        )
+        self.cog = cog
+        self.draft = draft
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not await self.cog.guard_session(interaction, self.draft):
+            return
+        channel = self.values[0]
+        self.draft.target_channel_id = channel.id
+        self.draft.notice = f"Destination set to <#{channel.id}>."
+        await interaction.response.edit_message(
+            content=f"Destination set to <#{channel.id}>. You can close this picker.",
+            view=None,
+        )
+        await self.cog._edit_preview_from_event(self.draft)
+
+
+class EmbedChannelPickerView(discord.ui.View):
+    def __init__(self, cog: "EmbedStudioCog", draft: EmbedDraft) -> None:
+        super().__init__(timeout=120)
+        self.add_item(EmbedChannelSelect(cog, draft))
+
+
 class EmbedStudioView(discord.ui.View):
     def __init__(self, cog: "EmbedStudioCog", draft: EmbedDraft) -> None:
         super().__init__(timeout=SESSION_TIMEOUT)
@@ -180,6 +211,7 @@ class EmbedStudioView(discord.ui.View):
         image_label = "Remove image" if self.draft.image_url else "Add image"
         image_style = discord.ButtonStyle.danger if self.draft.image_url else discord.ButtonStyle.secondary
         self.add_item(self._button(image_label, image_style, 1, self.image_action))
+        self.add_item(self._button("Choose channel", discord.ButtonStyle.secondary, 1, self.choose_channel))
         self.add_item(self._button("Send embed", discord.ButtonStyle.success, 1, self.send_embed))
         self.add_item(self._button("Cancel", discord.ButtonStyle.danger, 1, self.cancel))
 
@@ -204,6 +236,10 @@ class EmbedStudioView(discord.ui.View):
     async def edit_color(self, interaction: discord.Interaction) -> None:
         if await self._guard(interaction):
             await interaction.response.send_modal(EmbedColorModal(self.cog, self.draft))
+
+    async def choose_channel(self, interaction: discord.Interaction) -> None:
+        if await self._guard(interaction):
+            await self.cog.start_channel_picker(interaction, self.draft)
 
     async def _toggle_style(self, interaction: discord.Interaction, key: str) -> None:
         if not await self._guard(interaction):
@@ -259,7 +295,7 @@ class EmbedStudioView(discord.ui.View):
             message = await self.cog.publish(self.draft)
         except (discord.Forbidden, discord.HTTPException) as exc:
             log.warning("Embed publish failed for session %s: %s", self.draft.session_id, exc)
-            await interaction.followup.send("I could not send the embed here. Check my Send Messages and Embed Links permissions.", ephemeral=True)
+            await interaction.followup.send("I could not send the embed to the selected channel. Check my Send Messages and Embed Links permissions there.", ephemeral=True)
             return
         except Exception:
             log.exception("Unexpected embed publish failure")
@@ -383,11 +419,12 @@ class EmbedStudioCog(commands.Cog):
 
     def builder_text(self, draft: EmbedDraft) -> str:
         image_state = "attached and stored in 🔒 image-storage" if draft.image_url else "none"
+        destination = f"<#{draft.target_channel_id}>" if draft.target_channel_id else f"<#{draft.source_channel_id}> (current channel)"
         status = f"\n> {draft.notice}" if draft.notice else ""
         return (
             "**Embed Studio** · staff-only draft\n"
             "Your preview is always shown below. Formatting toggles apply to the embed body.\n"
-            f"Image: **{image_state}** · Session expires after 15 minutes.{status}"
+            f"Destination: {destination} · Image: **{image_state}** · Session expires after 15 minutes.{status}"
         )
 
     async def refresh_preview(self, interaction: discord.Interaction, draft: EmbedDraft) -> None:
@@ -418,6 +455,13 @@ class EmbedStudioCog(commands.Cog):
             await interaction.followup.send("Preview updated.", ephemeral=True)
         except discord.HTTPException:
             await interaction.followup.send("I could not refresh the preview. Run `/embed` again if it remains stuck.", ephemeral=True)
+
+    async def start_channel_picker(self, interaction: discord.Interaction, draft: EmbedDraft) -> None:
+        await interaction.response.send_message(
+            "Choose the channel where this embed should be published. The selected destination will appear in the preview.",
+            view=EmbedChannelPickerView(self, draft),
+            ephemeral=True,
+        )
 
     async def start_image_upload(self, interaction: discord.Interaction, draft: EmbedDraft) -> None:
         key = (draft.guild_id, draft.user_id, draft.source_channel_id)
@@ -608,11 +652,12 @@ class EmbedStudioCog(commands.Cog):
                 raise RuntimeError("The bot could not write the image-storage instructions.") from exc
 
     async def publish(self, draft: EmbedDraft) -> discord.Message:
-        channel = self.bot.get_channel(draft.source_channel_id)
+        target_channel_id = draft.target_channel_id or draft.source_channel_id
+        channel = self.bot.get_channel(target_channel_id)
         if channel is None:
-            channel = await self.bot.fetch_channel(draft.source_channel_id)
+            channel = await self.bot.fetch_channel(target_channel_id)
         if not hasattr(channel, "send"):
-            raise RuntimeError("The original channel is no longer available.")
+            raise RuntimeError("The selected destination channel is no longer available.")
         return await channel.send(
             embed=self.build_embed(draft),
             allowed_mentions=discord.AllowedMentions.none(),
