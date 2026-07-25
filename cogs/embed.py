@@ -307,6 +307,10 @@ class EmbedStudioCog(commands.Cog):
             await interaction.response.send_message("Only server staff can use `/embed`.", ephemeral=True)
             return
 
+        for previous in list(self.sessions.values()):
+            if previous.guild_id == interaction.guild.id and previous.user_id == interaction.user.id:
+                self.close_session(previous)
+
         draft = EmbedDraft(
             session_id=uuid.uuid4().hex,
             guild_id=interaction.guild.id,
@@ -420,12 +424,20 @@ class EmbedStudioCog(commands.Cog):
         draft.awaiting_image = True
         draft.notice = "Waiting for one image attachment in this channel..."
         self.image_waiters[key] = (draft.session_id, time.monotonic() + IMAGE_UPLOAD_TIMEOUT)
-        await interaction.response.send_message(
+        instructions = (
             "Attach one PNG, JPG, GIF, or WebP image as your next message in this channel. "
             "I will move it into the private `image-storage` channel and use the stored asset in the preview. "
-            "This upload window lasts two minutes.",
-            ephemeral=True,
+            "This upload window lasts two minutes."
         )
+        if draft.builder_view is not None:
+            await interaction.response.edit_message(
+                content=self.builder_text(draft),
+                embed=self.build_embed(draft),
+                view=draft.builder_view,
+            )
+            await interaction.followup.send(instructions, ephemeral=True)
+        else:
+            await interaction.response.send_message(instructions, ephemeral=True)
         asyncio.create_task(self._expire_image_waiter(key, draft.session_id))
 
     async def _expire_image_waiter(self, key: tuple[int, int, int], session_id: str) -> None:
@@ -559,6 +571,7 @@ class EmbedStudioCog(commands.Cog):
             await self._seed_storage_channel(channel)
             return channel
 
+        needs_seed = STORAGE_TOPIC not in (channel.topic or "")
         try:
             channel = await channel.edit(
                 topic=STORAGE_TOPIC,
@@ -568,7 +581,7 @@ class EmbedStudioCog(commands.Cog):
         except (discord.Forbidden, discord.HTTPException) as exc:
             raise RuntimeError("The bot could not secure the existing image-storage channel.") from exc
 
-        if STORAGE_TOPIC not in (channel.topic or ""):
+        if needs_seed:
             await self._seed_storage_channel(channel)
         return channel
 
