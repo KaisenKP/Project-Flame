@@ -79,10 +79,10 @@ class FeaturesCog(commands.Cog):
         embed.add_field(
             name="How FlameBot works",
             value=(
-                "• Auto-discovers and loads cogs from the `cogs` package at startup.\n"
+                "• Loads an explicit, reviewed extension registry from the `cogs` package at startup.\n"
                 "• Registers slash commands via the Discord application command tree.\n"
-                "• Uses a restart guard around **12:59 AM EST** and performs a scheduled restart at **1:00 AM EST**.\n"
-                "• Runs background health/restart loops and structured startup diagnostics.\n"
+                "• Uses SparkedHost Schedules for planned restarts while the bot performs graceful shutdown.\n"
+                "• Runs bounded background work and structured startup diagnostics.\n"
                 "• Uses persistent Discord views in subsystems that require interactive buttons/select menus."
             ),
             inline=False,
@@ -93,7 +93,7 @@ class FeaturesCog(commands.Cog):
             value=(
                 "• `/features` is **admin-only** (`administrator` permission required).\n"
                 "• Moderation, restart, and other sensitive commands are guarded with Discord permission checks.\n"
-                "• Command execution during restart window is blocked to avoid partial or unsafe actions."
+                "• Command execution is protected by feature-level Discord permission checks."
             ),
             inline=False,
         )

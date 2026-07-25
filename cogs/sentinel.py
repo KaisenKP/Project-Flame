@@ -18,7 +18,7 @@ from discord.ext import commands
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import SentinelBotTrustRow, SentinelEventRow
+from db.models import SentinelBotTrustRow, SentinelConfigRow, SentinelEventRow
 from services.db import sessions
 
 
@@ -206,6 +206,7 @@ class Sentinel(commands.Cog):
         self._log_ch_by_guild: Dict[int, int] = {}
         self._staff_ch_by_guild: Dict[int, int] = {}
         self._load_cfg()
+        self._persistent_config_loaded = False
 
         self._cache_by_channel: Dict[int, Deque[CachedMsg]] = defaultdict(lambda: deque(maxlen=CACHE_PER_CHANNEL))
         self._cache_index: Dict[int, Dict[int, CachedMsg]] = defaultdict(dict)
@@ -273,6 +274,44 @@ class Sentinel(commands.Cog):
         self._cfg["guilds"].setdefault(str(guild_id), {})
         self._cfg["guilds"][str(guild_id)]["staff_channel_id"] = int(channel_id)
         self._save_cfg()
+
+    async def _load_persistent_config(self) -> None:
+        if self._persistent_config_loaded:
+            return
+        async with self.sessionmaker() as session:
+            rows = (await session.execute(select(SentinelConfigRow))).scalars().all()
+            if not rows and self._cfg.get("guilds"):
+                for guild_id_text, values in self._cfg["guilds"].items():
+                    if not isinstance(values, dict):
+                        continue
+                    try:
+                        guild_id = int(guild_id_text)
+                    except (TypeError, ValueError):
+                        continue
+                    session.add(
+                        SentinelConfigRow(
+                            guild_id=guild_id,
+                            log_channel_id=int(values["log_channel_id"]) if values.get("log_channel_id") else None,
+                            staff_channel_id=int(values["staff_channel_id"]) if values.get("staff_channel_id") else None,
+                        )
+                    )
+                await session.commit()
+            for row in rows:
+                if row.log_channel_id is not None:
+                    self._log_ch_by_guild[int(row.guild_id)] = int(row.log_channel_id)
+                if row.staff_channel_id is not None:
+                    self._staff_ch_by_guild[int(row.guild_id)] = int(row.staff_channel_id)
+        self._persistent_config_loaded = True
+
+    async def _persist_config(self, guild_id: int) -> None:
+        async with self.sessionmaker() as session:
+            async with session.begin():
+                row = await session.get(SentinelConfigRow, int(guild_id))
+                if row is None:
+                    row = SentinelConfigRow(guild_id=int(guild_id))
+                    session.add(row)
+                row.log_channel_id = self._log_ch_by_guild.get(int(guild_id))
+                row.staff_channel_id = self._staff_ch_by_guild.get(int(guild_id))
 
     async def _log_channel(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
         cid = self._get_log_channel_id(guild.id)
@@ -840,6 +879,7 @@ class Sentinel(commands.Cog):
             return await interaction.response.send_message("Server only.", ephemeral=True)
 
         self._set_log_channel_id(interaction.guild.id, channel.id)
+        await self._persist_config(interaction.guild.id)
 
         case_id = await self._store_event(
             guild_id=interaction.guild.id,
@@ -869,6 +909,7 @@ class Sentinel(commands.Cog):
             return await interaction.response.send_message("Server only.", ephemeral=True)
 
         self._set_staff_channel_id(interaction.guild.id, channel.id)
+        await self._persist_config(interaction.guild.id)
 
         case_id = await self._store_event(
             guild_id=interaction.guild.id,
@@ -1045,6 +1086,7 @@ class Sentinel(commands.Cog):
     # ----------------------------
     @commands.Cog.listener()
     async def on_ready(self):
+        await self._load_persistent_config()
         try:
             self.bot.tree.add_command(self.sentinel_group)
         except Exception:

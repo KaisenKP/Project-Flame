@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
 
 import discord
 from discord import app_commands
@@ -14,16 +12,18 @@ class AdminRestart(commands.Cog):
         self.bot = bot
         self._restart_lock = asyncio.Lock()
 
-    @app_commands.command(name="restart", description="Admin: restart the bot process.")
+    @app_commands.command(name="restart", description="Admin: gracefully stop the bot for a host restart.")
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.guild_only()
     async def restart(self, interaction: discord.Interaction) -> None:
         async with self._restart_lock:
-            await interaction.response.send_message("Restarting bot now...", ephemeral=True)
+            await interaction.response.send_message(
+                "Shutting down gracefully. Restart the SparkedHost server, or let its configured schedule bring the bot back online.",
+                ephemeral=True,
+            )
             if hasattr(self.bot, "note_shutdown"):
                 self.bot.note_shutdown(reason="admin_restart_command", intentional=True, source="AdminRestart.restart")
             await self.bot.close()
-            os.execv(sys.executable, [sys.executable, *sys.argv])
 
     @restart.error
     async def restart_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:

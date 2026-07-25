@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
 import logging
-import os
-import fnmatch
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -13,91 +10,14 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from db.migrations import run_migrations
+from flamebot.config import BotSettings
+from flamebot.extensions import configured_extensions
 from services.error_logging import build_context_from_command, build_context_from_interaction
 from services.startup_diagnostics import StartupDiagnostics
+from services.task_supervisor import TaskSupervisor
 
 log = logging.getLogger("bot")
-
-RESTART_BLOCK_MESSAGE = "The bot is having a scheduled restart please come back in a couple minutes"
-EST = dt.timezone(dt.timedelta(hours=-5), name="EST")
-
-
-def _truthy(value: str | None, default: bool = False) -> bool:
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def _looks_like_extension(py_file: Path) -> bool:
-    try:
-        text = py_file.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        return False
-
-    if "def setup(" in text:
-        return True
-    if "async def setup(" in text:
-        return True
-    return False
-
-
-def _iter_extension_modules(cogs_dir: Path, cogs_package: str) -> list[str]:
-    if not cogs_dir.exists():
-        return []
-
-    exts: list[str] = []
-
-    package_extension_dirs: set[Path] = set()
-    for init_py in cogs_dir.rglob("__init__.py"):
-        if _looks_like_extension(init_py):
-            package_extension_dirs.add(init_py.parent.resolve())
-
-    for py in cogs_dir.rglob("*.py"):
-        if py.name.startswith("_") and py.name != "__init__.py":
-            continue
-        py_resolved = py.resolve()
-        if py.name != "__init__.py" and any(parent in package_extension_dirs for parent in py_resolved.parents):
-            continue
-        if not _looks_like_extension(py):
-            continue
-
-        rel = py.relative_to(cogs_dir).with_suffix("")
-        rel_parts = rel.parts[:-1] if rel.name == "__init__" else rel.parts
-        exts.append(".".join((cogs_package, *rel_parts)))
-
-    exts.sort()
-    return exts
-
-
-DEFAULT_ACTIVE_EXTENSIONS: tuple[str, ...] = ()
-# Keep defaults permissive so newly added commands/cogs are auto-discovered.
-# Use INACTIVE_EXTENSIONS env var when you explicitly want to suppress modules.
-DEFAULT_INACTIVE_EXTENSIONS: tuple[str, ...] = ()
-
-
-def _parse_extension_patterns(raw: str | None) -> list[str]:
-    if raw is None:
-        return []
-    tokens = [t.strip() for t in raw.replace(",", " ").split()]
-    return [t for t in tokens if t]
-
-
-def _filter_extensions(
-    discovered: list[str],
-    *,
-    allow_patterns: list[str],
-    deny_patterns: list[str],
-) -> list[str]:
-    allowed = discovered
-    if allow_patterns:
-        allowed = [ext for ext in discovered if any(fnmatch.fnmatch(ext, pattern) for pattern in allow_patterns)]
-
-    if deny_patterns:
-        allowed = [ext for ext in allowed if not any(fnmatch.fnmatch(ext, pattern) for pattern in deny_patterns)]
-    return sorted(allowed)
-
-
-
 
 class FlameCommandTree(app_commands.CommandTree["FlameBot"]):
     async def on_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
@@ -134,6 +54,7 @@ class FlameBot(commands.Bot):
         active_extension_patterns: list[str] | None = None,
         inactive_extension_patterns: list[str] | None = None,
         startup_diagnostics: StartupDiagnostics | None = None,
+        settings: BotSettings | None = None,
     ):
         intents = discord.Intents.default()
         intents.guilds = True
@@ -155,15 +76,14 @@ class FlameBot(commands.Bot):
         self.dev_guild_id = dev_guild_id
         self.owner_ids = owner_ids or set()
         self.startup_diagnostics = startup_diagnostics
-        self.active_extension_patterns = list(active_extension_patterns if active_extension_patterns is not None else DEFAULT_ACTIVE_EXTENSIONS)
-        self.inactive_extension_patterns = list(
-            inactive_extension_patterns if inactive_extension_patterns is not None else DEFAULT_INACTIVE_EXTENSIONS
-        )
+        self.settings = settings
+        self.active_extension_patterns = list(active_extension_patterns or ())
+        self.inactive_extension_patterns = list(inactive_extension_patterns or ())
 
         self.cogs_dir = (cogs_dir or Path("cogs")).resolve()
         self.cogs_package = cogs_package
 
-        self._bg_tasks: set[asyncio.Task] = set()
+        self._task_supervisor = TaskSupervisor(logger=log, on_failure=self._on_background_task_failure)
         self._ready_once = asyncio.Event()
         self._startup_report_sent = False
         self._persistent_views_registered = 0
@@ -195,16 +115,14 @@ class FlameBot(commands.Bot):
         if diag is not None:
             await diag.run_stage(
                 "setup_hook",
-                lambda: self.tree.interaction_check(self._interaction_restart_guard),
+                lambda: None,
                 summary_on_pass="setup_hook started",
             )
-            await diag.run_stage("cog_discovery", lambda: _iter_extension_modules(self.cogs_dir, self.cogs_package), summary_on_pass="Cog discovery completed")
-            await diag.run_stage("extension_loading", self.load_all_extensions, summary_on_pass="Extensions load completed")
-            await diag.run_stage("database_engine_or_session_init", self._ensure_db_schema, summary_on_pass="DB schema check completed")
+            await diag.run_stage("database_migrations", self._ensure_db_schema, fatal=True, summary_on_pass="Database migrations completed")
+            await diag.run_stage("extension_loading", self.load_all_extensions, fatal=True, summary_on_pass="Extensions load completed")
         else:
-            self.tree.interaction_check(self._interaction_restart_guard)
-            await self.load_all_extensions()
             await self._ensure_db_schema()
+            await self.load_all_extensions()
 
         cmds = list(self.tree.get_commands())
         log.info("App commands discovered: %d", len(cmds))
@@ -213,7 +131,7 @@ class FlameBot(commands.Bot):
 
         if self.sync_commands:
             if diag is not None:
-                await diag.run_stage("command_tree_sync", self._sync_app_commands, summary_on_pass="Command tree sync completed")
+                await diag.run_stage("command_tree_sync", self._sync_app_commands, fatal=True, summary_on_pass="Command tree sync completed")
             else:
                 await self._sync_app_commands()
         elif diag is not None:
@@ -230,24 +148,22 @@ class FlameBot(commands.Bot):
             self.start_background_tasks()
 
     async def _ensure_db_schema(self) -> None:
-        try:
-            from db import Base
-            from db.engine import get_engine
+        from db.engine import get_engine
 
-            engine = get_engine()
-            async with engine.begin() as conn:
-                await conn.run_sync(lambda sync_conn: Base.metadata.create_all(sync_conn, checkfirst=True))
-            log.info("DB schema ensured (checkfirst=True)")
+        try:
+            applied = await run_migrations(get_engine())
+            log.info("Database schema is ready; migrations applied=%s", applied or "none")
         except Exception as exc:
             if self.startup_diagnostics is not None:
                 self.startup_diagnostics.capture_exception(
                     exc,
                     category="database",
                     subsystem="database",
-                    source="db_schema_init",
-                    summary="DB schema ensure failed",
+                    source="db_migrations",
+                    summary="Database migrations failed",
                 )
-            log.exception("DB schema ensure failed, continuing without crash")
+            log.exception("Database migrations failed; refusing to start with an unknown schema")
+            raise
 
     async def _sync_app_commands(self) -> None:
         try:
@@ -272,6 +188,7 @@ class FlameBot(commands.Bot):
                     summary="App command sync failed",
                 )
             log.exception("App command sync failed")
+            raise
 
     async def on_ready(self) -> None:
         if not self._ready_once.is_set():
@@ -299,38 +216,29 @@ class FlameBot(commands.Bot):
         await super().close()
 
     async def load_all_extensions(self) -> None:
-        discovered = _iter_extension_modules(self.cogs_dir, self.cogs_package)
-        exts = _filter_extensions(
-            discovered,
+        exts = configured_extensions(
+            package=self.cogs_package,
             allow_patterns=self.active_extension_patterns,
             deny_patterns=self.inactive_extension_patterns,
         )
 
-        if discovered:
-            log.info("Discovered %d extension candidate(s):", len(discovered))
-            for ext in discovered:
-                log.info(" - %s", ext)
-        else:
-            log.warning("No extension candidates were discovered in %s.", self.cogs_dir)
-
         if not exts:
             log.warning(
-                "No active extensions found (dir=%s package=%s allow=%s deny=%s discovered=%d).",
-                self.cogs_dir,
+                "No active extensions configured (package=%s allow=%s deny=%s).",
                 self.cogs_package,
                 self.active_extension_patterns,
                 self.inactive_extension_patterns,
-                len(discovered),
             )
             return
 
-        skipped = sorted(set(discovered) - set(exts))
+        registered = configured_extensions(package=self.cogs_package)
+        skipped = sorted(set(registered) - set(exts))
         if skipped:
-            log.info("Extensions that will NOT load due to ACTIVE/INACTIVE filters:")
+            log.info("Registered extensions disabled by deployment filters:")
             for ext in skipped:
                 log.info(" - %s (filtered)", ext)
 
-        log.info("Loading %d active extension(s) from %s ...", len(exts), self.cogs_dir)
+        log.info("Loading %d registered extension(s) from %s ...", len(exts), self.cogs_dir)
 
         loaded = 0
         failed = 0
@@ -393,95 +301,40 @@ class FlameBot(commands.Bot):
 
     def start_background_tasks(self) -> None:
         self._spawn_task(self._heartbeat_loop(), name="flame.heartbeat")
-        self._spawn_task(self._scheduled_restart_loop(), name="flame.scheduled_restart")
-
-    def _is_restart_block_window(self, now: dt.datetime | None = None) -> bool:
-        now_est = (now or dt.datetime.now(tz=EST)).astimezone(EST)
-        return now_est.hour == 0 and now_est.minute == 59
-
-    async def _interaction_restart_guard(self, interaction: discord.Interaction) -> bool:
-        if not self._is_restart_block_window():
-            return True
-
-        if interaction.response.is_done():
-            await interaction.followup.send(RESTART_BLOCK_MESSAGE, ephemeral=True)
-        else:
-            await interaction.response.send_message(RESTART_BLOCK_MESSAGE, ephemeral=True)
-        return False
-
-    async def process_commands(self, message: discord.Message) -> None:
-        if message.author.bot:
-            return
-
-        ctx = await self.get_context(message)
-        if ctx.command and self._is_restart_block_window():
-            await message.channel.send(RESTART_BLOCK_MESSAGE)
-            return
-
-        await super().process_commands(message)
 
     async def stop_background_tasks(self) -> None:
-        if not self._bg_tasks:
-            return
-
-        for t in list(self._bg_tasks):
-            t.cancel()
-
-        await asyncio.gather(*self._bg_tasks, return_exceptions=True)
-        self._bg_tasks.clear()
+        await self._task_supervisor.cancel_all()
 
     def _spawn_task(self, coro, *, name: str) -> None:
-        task = asyncio.create_task(coro, name=name)
-        self._bg_tasks.add(task)
+        task = self._task_supervisor.spawn(coro, name=name)
         if self.startup_diagnostics is not None:
             self.startup_diagnostics.attach_task(task, subsystem="tasks", source="background_task", recurring=True)
 
-        def _done(_t: asyncio.Task) -> None:
-            self._bg_tasks.discard(_t)
-            try:
-                _t.result()
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:
-                if self.startup_diagnostics is not None:
-                    self.startup_diagnostics.capture_exception(
-                        exc,
-                        category="task",
-                        subsystem="tasks",
-                        source="background_task.done_callback",
-                        summary="Background task crashed",
-                        task_name=_t.get_name(),
-                    )
-                log.exception("Background task crashed: %s", _t.get_name())
+    def spawn_background_task(self, coro, *, name: str) -> asyncio.Task:
+        """Public task boundary for cogs that need tracked delayed work."""
 
-        task.add_done_callback(_done)
+        task = self._task_supervisor.spawn(coro, name=name)
+        if self.startup_diagnostics is not None:
+            self.startup_diagnostics.attach_task(task, subsystem="tasks", source="cog_background_task", recurring=False)
+        return task
+
+    def _on_background_task_failure(self, task: asyncio.Task, exc: BaseException) -> None:
+        if self.startup_diagnostics is not None:
+            self.startup_diagnostics.capture_exception(
+                exc,
+                category="task",
+                subsystem="tasks",
+                source="background_task.done_callback",
+                summary="Background task crashed",
+                task_name=task.get_name(),
+            )
+        log.error("Background task crashed: %s", task.get_name(), exc_info=(type(exc), exc, exc.__traceback__))
 
     async def _heartbeat_loop(self) -> None:
         await self._ready_once.wait()
         while not self.is_closed():
             await asyncio.sleep(60)
             log.debug("Pulse heartbeat tick")
-
-    async def _scheduled_restart_loop(self) -> None:
-        await self._ready_once.wait()
-
-        while not self.is_closed():
-            now_est = dt.datetime.now(tz=EST)
-            target_est = now_est.replace(hour=1, minute=0, second=0, microsecond=0)
-            if now_est >= target_est:
-                target_est += dt.timedelta(days=1)
-
-            sleep_for = max((target_est - now_est).total_seconds(), 0)
-            log.info("Scheduled restart task sleeping for %.0f seconds until %s", sleep_for, target_est.isoformat())
-            await asyncio.sleep(sleep_for)
-
-            if self.is_closed():
-                return
-
-            log.warning("Executing scheduled restart at 1:00 AM EST")
-            self.note_shutdown(reason="scheduled_restart", intentional=True, source="FlameBot._scheduled_restart_loop")
-            await self.close()
-            os.execv(sys.executable, [sys.executable, *sys.argv])
 
     def add_view(self, view: discord.ui.View, *, message_id: int | None = None) -> None:
         super().add_view(view, message_id=message_id)
@@ -521,51 +374,27 @@ class FlameBot(commands.Bot):
         await super().on_error(event_method, *args, **kwargs)
 
 
-async def build_bot_from_env(startup_diagnostics: StartupDiagnostics | None = None) -> FlameBot:
-    prefix = (os.getenv("BOT_PREFIX") or "!").strip()
-
-    intents_message_content = _truthy(os.getenv("INTENTS_MESSAGE_CONTENT"), default=True)
-    sync_commands = _truthy(os.getenv("SYNC_COMMANDS"), default=True)
-
-    cogs_package = (os.getenv("COGS_PACKAGE") or "cogs").strip()
-    cogs_dir = Path(os.getenv("COGS_DIR") or "cogs").resolve()
-
-    dev_guild_id: int | None = None
-    dev_guild_raw = (os.getenv("DEV_GUILD_ID") or "").strip()
-    if dev_guild_raw.isdigit():
-        dev_guild_id = int(dev_guild_raw)
-
-    owner_ids: set[int] = set()
-    raw_owner_id = (os.getenv("BOT_OWNER_ID") or "").strip()
-    if raw_owner_id.isdigit():
-        owner_ids.add(int(raw_owner_id))
-        if startup_diagnostics is not None:
-            startup_diagnostics.owner_id_hint = int(raw_owner_id)
-    raw_owner_ids = (os.getenv("BOT_OWNER_IDS") or "").strip()
-    if raw_owner_ids:
-        for part in raw_owner_ids.replace(",", " ").split():
-            if part.isdigit():
-                owner_ids.add(int(part))
-                if startup_diagnostics is not None and startup_diagnostics.owner_id_hint is None:
-                    startup_diagnostics.owner_id_hint = int(part)
-    raw_active_extensions = os.getenv("ACTIVE_EXTENSIONS")
-    raw_inactive_extensions = os.getenv("INACTIVE_EXTENSIONS")
-    active_extension_patterns = _parse_extension_patterns(raw_active_extensions) if raw_active_extensions is not None else None
-    inactive_extension_patterns = (
-        _parse_extension_patterns(raw_inactive_extensions) if raw_inactive_extensions is not None else None
-    )
+async def build_bot_from_env(
+    startup_diagnostics: StartupDiagnostics | None = None,
+    *,
+    settings: BotSettings | None = None,
+) -> FlameBot:
+    settings = settings or BotSettings.from_env()
+    if startup_diagnostics is not None and settings.owner_ids and startup_diagnostics.owner_id_hint is None:
+        startup_diagnostics.owner_id_hint = next(iter(settings.owner_ids))
 
     return FlameBot(
-        prefix=prefix,
-        intents_message_content=intents_message_content,
-        cogs_dir=cogs_dir,
-        cogs_package=cogs_package,
-        sync_commands=sync_commands,
-        dev_guild_id=dev_guild_id,
-        owner_ids=owner_ids,
-        active_extension_patterns=active_extension_patterns,
-        inactive_extension_patterns=inactive_extension_patterns,
+        prefix=settings.prefix,
+        intents_message_content=settings.intents_message_content,
+        cogs_dir=settings.cogs_dir,
+        cogs_package=settings.cogs_package,
+        sync_commands=settings.sync_commands,
+        dev_guild_id=settings.dev_guild_id,
+        owner_ids=set(settings.owner_ids),
+        active_extension_patterns=list(settings.active_extension_patterns),
+        inactive_extension_patterns=list(settings.inactive_extension_patterns),
         startup_diagnostics=startup_diagnostics,
+        settings=settings,
     )
 
 

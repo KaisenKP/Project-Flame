@@ -4,12 +4,10 @@ import asyncio
 import importlib
 import importlib.util
 import logging
-import os
 import signal
 import sys
 import traceback
 from pathlib import Path
-from typing import Any
 
 import discord
 
@@ -21,6 +19,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from flamebot.config import BotSettings  # noqa: E402
 from services.startup_diagnostics import StartupDiagnostics, format_exception_brief  # noqa: E402
 
 
@@ -124,25 +123,6 @@ log = logging.getLogger("boot")
 
 
 # ------------------------------------------------------------
-# Optional DB table safety
-# ------------------------------------------------------------
-
-
-async def _maybe_create_tables() -> None:
-    try:
-        from tables import create_tables_if_missing  # type: ignore
-
-        log.info("Ensuring DB tables exist (tables.py)...")
-        await create_tables_if_missing()
-        log.info("DB tables ensured.")
-    except ModuleNotFoundError:
-        log.warning("tables.py not found; skipping auto table creation.")
-    except Exception:
-        log.exception("Failed to ensure DB tables on startup")
-        raise
-
-
-# ------------------------------------------------------------
 # Graceful shutdown
 # ------------------------------------------------------------
 
@@ -152,7 +132,7 @@ async def shutdown(bot: discord.Client, sig: str) -> None:
         try:
             bot.note_shutdown(  # type: ignore[attr-defined]
                 reason=f"signal:{sig}",
-                intentional=False,
+                intentional=True,
                 source="main.shutdown",
             )
         except Exception:
@@ -195,26 +175,25 @@ async def main() -> None:
     diagnostics.logger.info("phase=startup status=PASS subsystem=entrypoint source=main.main detail='entering main runtime path'")
 
     bot: discord.Client | None = None
+    settings: BotSettings | None = None
     start_completed = False
     exit_code = 0
     exit_path = "natural_return"
     try:
         log.info("Booting FlameBot")
         diagnostics.logger.info("phase=startup status=PASS subsystem=config source=main.main detail='config load started'")
-        token = (os.getenv("BOT_TOKEN") or "").strip()
-        if not token:
-            raise RuntimeError("BOT_TOKEN is missing")
-        await diagnostics.run_stage("environment_or_config_load", lambda: None, summary_on_pass="Environment and config loaded")
+        settings = await diagnostics.run_stage(
+            "environment_or_config_load",
+            BotSettings.from_env,
+            fatal=True,
+            summary_on_pass="Environment and config validated",
+        )
         diagnostics.logger.info("phase=startup status=PASS subsystem=config source=main.main detail='config load completed'")
-
-        diagnostics.logger.info("phase=startup status=PASS subsystem=database source=main.main detail='db init started'")
-        await diagnostics.run_stage("database_engine_or_session_init", _maybe_create_tables, summary_on_pass="Optional table bootstrap completed")
-        diagnostics.logger.info("phase=startup status=PASS subsystem=database source=main.main detail='db init completed'")
 
         diagnostics.logger.info("phase=startup status=PASS subsystem=bot source=main.main detail='bot object creation started'")
         bot = await diagnostics.run_stage(
             "bot_build",
-            lambda: importlib.import_module("bot").build_bot_from_env(startup_diagnostics=diagnostics),
+            lambda: importlib.import_module("bot").build_bot_from_env(startup_diagnostics=diagnostics, settings=settings),
             fatal=True,
             summary_on_pass="Bot instance constructed",
         )
@@ -226,15 +205,18 @@ async def main() -> None:
         install_signal_handlers(loop, bot)
 
         diagnostics.logger.info("phase=startup status=PASS subsystem=discord source=main.main detail='login/connect start'")
-        await diagnostics.run_stage("bot_login_and_start", lambda: bot.start(token), fatal=True, summary_on_pass="bot.start completed")
+        assert settings is not None
+        await diagnostics.run_stage("bot_login_and_start", lambda: bot.start(settings.token), fatal=True, summary_on_pass="bot.start completed")
         start_completed = True
         shutdown_reason = getattr(bot, "shutdown_reason", None)
         shutdown_intentional = bool(getattr(bot, "shutdown_intentional", False))
         shutdown_source = getattr(bot, "shutdown_source", "unknown")
 
-        diagnostics.logger.error(
-            "phase=runtime status=FAIL subsystem=process source=main.main "
+        shutdown_log = diagnostics.logger.info if shutdown_intentional else diagnostics.logger.error
+        shutdown_log(
+            "phase=runtime status=%s subsystem=process source=main.main "
             "detail='bot.start returned' shutdown_intentional=%s shutdown_reason=%s shutdown_source=%s",
+            "PASS" if shutdown_intentional else "FAIL",
             shutdown_intentional,
             shutdown_reason,
             shutdown_source,

@@ -470,6 +470,8 @@ class TicketsCog(commands.Cog):
         self.sessionmaker = sessions()
         self._lock = asyncio.Lock()
         self._booted = False
+        self._tables_ready = False
+        self._columns_ready = False
         self._base_views_registered = False
         self._panel_view_signatures: dict[int, tuple[str, ...]] = {}
 
@@ -519,6 +521,8 @@ class TicketsCog(commands.Cog):
         await self._ensure_default_panel_messages()
 
     async def _ensure_tables(self) -> None:
+        if self._tables_ready:
+            return
         sql_config = f"""
         CREATE TABLE IF NOT EXISTS {self.TABLE_CONFIG} (
             guild_id BIGINT NOT NULL,
@@ -603,8 +607,11 @@ class TicketsCog(commands.Cog):
                 await session.execute(text(sql_types))
                 await session.execute(text(sql_tickets))
                 await session.execute(text(sql_members))
+        self._tables_ready = True
 
     async def _ensure_new_columns(self) -> None:
+        if self._columns_ready:
+            return
         statements = [
             f"ALTER TABLE {self.TABLE_CONFIG} ADD COLUMN head_mod_role_id BIGINT NULL",
             f"ALTER TABLE {self.TABLE_CONFIG} ADD COLUMN panel_image_url TEXT NULL",
@@ -618,6 +625,7 @@ class TicketsCog(commands.Cog):
                         await session.execute(text(stmt))
                     except Exception:
                         pass
+        self._columns_ready = True
 
     async def _ensure_category(
         self,

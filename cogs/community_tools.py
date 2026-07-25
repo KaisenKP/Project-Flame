@@ -152,12 +152,15 @@ class CommunityToolsCog(commands.Cog):
         self.bot = bot
         self.sessionmaker = sessions()
         self.launch_view = SelfRoleLaunchView(self)
+        self._tables_ready = False
 
     async def cog_load(self) -> None:
         await self._ensure_tables()
         self.bot.add_view(self.launch_view)
 
     async def _ensure_tables(self) -> None:
+        if self._tables_ready:
+            return
         sql = f"""
         CREATE TABLE IF NOT EXISTS {self.TABLE} (
             guild_id BIGINT NOT NULL,
@@ -180,6 +183,7 @@ class CommunityToolsCog(commands.Cog):
                     text(f"ALTER TABLE {self.TABLE} ADD COLUMN IF NOT EXISTS welcome_enabled TINYINT(1) NOT NULL DEFAULT 0")
                 )
                 await session.execute(text(f"ALTER TABLE {self.TABLE} ADD COLUMN IF NOT EXISTS welcome_image_url TEXT NULL"))
+        self._tables_ready = True
 
     async def fetch_config(self, guild_id: int) -> CommunityConfig | None:
         sql = text(

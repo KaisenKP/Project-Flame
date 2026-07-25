@@ -97,8 +97,12 @@ class DbSettings:
 
         pool_size_raw = _clean(os.getenv("DB_POOL_SIZE"))
         max_overflow_raw = _clean(os.getenv("DB_MAX_OVERFLOW"))
-        pool_size = int(pool_size_raw) if pool_size_raw.isdigit() else 5
-        max_overflow = int(max_overflow_raw) if max_overflow_raw.isdigit() else 10
+        pool_size = int(pool_size_raw) if pool_size_raw.isdigit() else 3
+        max_overflow = int(max_overflow_raw) if max_overflow_raw.isdigit() else 2
+        # Keep defaults safe for small SparkedHost plans. Operators can raise
+        # these values explicitly after measuring database concurrency.
+        pool_size = max(1, min(pool_size, 10))
+        max_overflow = max(0, min(max_overflow, 10))
 
         echo = _clean(os.getenv("SQL_ECHO")).lower() in {"1", "true", "yes", "y", "on"}
 

@@ -71,3 +71,33 @@ class SentinelBotTrustRow(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class EmbedAssetRow(Base):
+    """Durable reference to an attachment copied into Discord image-storage."""
+
+    __tablename__ = "embed_assets"
+    __table_args__ = (
+        UniqueConstraint("guild_id", "storage_message_id", name="uq_embed_assets_storage_message"),
+        Index("ix_embed_assets_guild_created", "guild_id", "created_at"),
+    )
+
+    asset_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    storage_channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    storage_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    uploaded_by_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class SentinelConfigRow(Base):
+    """Persistent Sentinel routing configuration for a guild."""
+
+    __tablename__ = "sentinel_config"
+
+    guild_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    log_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    staff_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

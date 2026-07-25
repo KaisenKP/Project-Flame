@@ -17,6 +17,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from services.embed_assets import EmbedAssetRepository
+
 log = logging.getLogger(__name__)
 
 STORAGE_CHANNEL_NAME = "image-storage"
@@ -26,6 +28,7 @@ STORAGE_TOPIC = (
 )
 IMAGE_UPLOAD_TIMEOUT = 120
 SESSION_TIMEOUT = 15 * 60
+MAX_ACTIVE_SESSIONS = 100
 HEX_COLOR_RE = re.compile(r"^#?(?P<value>[0-9a-fA-F]{6})$")
 IMAGE_EXTENSIONS = {".apng", ".gif", ".jpeg", ".jpg", ".png", ".webp"}
 
@@ -47,6 +50,7 @@ class EmbedDraft:
     image_storage_message_id: int | None = None
     awaiting_image: bool = False
     notice: str = ""
+    created_at: float = field(default_factory=time.monotonic, repr=False)
     builder_message: discord.Message | None = field(default=None, repr=False)
     builder_view: "EmbedStudioView | None" = field(default=None, repr=False)
 
@@ -178,6 +182,12 @@ class EmbedChannelSelect(discord.ui.ChannelSelect):
         if not await self.cog.guard_session(interaction, self.draft):
             return
         channel = self.values[0]
+        if interaction.guild is None or not self.cog.can_publish_to(channel, interaction.guild):
+            await interaction.response.send_message(
+                "I cannot publish there. Choose a text channel where I can view the channel, send messages, and embed links.",
+                ephemeral=True,
+            )
+            return
         self.draft.target_channel_id = channel.id
         self.draft.notice = f"Destination set to <#{channel.id}>."
         await interaction.response.edit_message(
@@ -331,6 +341,7 @@ class EmbedStudioCog(commands.Cog):
         self.bot = bot
         self.sessions: dict[str, EmbedDraft] = {}
         self.image_waiters: dict[tuple[int, int, int], tuple[str, float]] = {}
+        self.assets = EmbedAssetRepository()
 
     @app_commands.command(name="embed", description="Staff: Open the live Embed Studio.")
     @app_commands.default_permissions(manage_guild=True)
@@ -343,9 +354,14 @@ class EmbedStudioCog(commands.Cog):
             await interaction.response.send_message("Only server staff can use `/embed`.", ephemeral=True)
             return
 
+        self._cleanup_sessions()
         for previous in list(self.sessions.values()):
             if previous.guild_id == interaction.guild.id and previous.user_id == interaction.user.id:
                 self.close_session(previous)
+
+        if len(self.sessions) >= MAX_ACTIVE_SESSIONS:
+            oldest = min(self.sessions.values(), key=lambda draft: draft.created_at)
+            self.close_session(oldest)
 
         draft = EmbedDraft(
             session_id=uuid.uuid4().hex,
@@ -389,6 +405,21 @@ class EmbedStudioCog(commands.Cog):
         draft.awaiting_image = False
         if draft.builder_view is not None:
             draft.builder_view.stop()
+
+    def _cleanup_sessions(self) -> None:
+        cutoff = time.monotonic() - SESSION_TIMEOUT
+        for draft in list(self.sessions.values()):
+            if draft.created_at <= cutoff:
+                self.close_session(draft)
+
+    def can_publish_to(self, channel: object, guild: discord.Guild) -> bool:
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return False
+        me = guild.me
+        if me is None:
+            return False
+        permissions = channel.permissions_for(me)
+        return permissions.view_channel and permissions.send_messages and permissions.embed_links
 
     def _format_body(self, draft: EmbedDraft) -> str:
         body = draft.body
@@ -482,7 +513,14 @@ class EmbedStudioCog(commands.Cog):
             await interaction.followup.send(instructions, ephemeral=True)
         else:
             await interaction.response.send_message(instructions, ephemeral=True)
-        asyncio.create_task(self._expire_image_waiter(key, draft.session_id))
+        spawn_task = getattr(self.bot, "spawn_background_task", None)
+        if callable(spawn_task):
+            spawn_task(
+                self._expire_image_waiter(key, draft.session_id),
+                name=f"embed.image-expiry.{draft.session_id}",
+            )
+        else:
+            asyncio.create_task(self._expire_image_waiter(key, draft.session_id))
 
     async def _expire_image_waiter(self, key: tuple[int, int, int], session_id: str) -> None:
         await asyncio.sleep(IMAGE_UPLOAD_TIMEOUT)
@@ -545,6 +583,15 @@ class EmbedStudioCog(commands.Cog):
             )
             if not storage_message.attachments:
                 raise RuntimeError("Discord did not return the stored image attachment.")
+            await self.assets.record(
+                asset_id=asset_id,
+                guild_id=message.guild.id,
+                storage_channel_id=storage_channel.id,
+                storage_message_id=storage_message.id,
+                uploaded_by_user_id=message.author.id,
+                source_channel_id=message.channel.id,
+                filename=attachment.filename,
+            )
             draft.image_url = storage_message.attachments[0].url
             draft.image_storage_message_id = storage_message.id
             draft.notice = f"Image stored safely as `{asset_id}`."
@@ -572,6 +619,8 @@ class EmbedStudioCog(commands.Cog):
             read_message_history=True,
             send_messages=False,
             add_reactions=False,
+            manage_messages=False,
+            manage_channels=False,
         )
         overwrites: dict[discord.abc.Snowflake, discord.PermissionOverwrite] = {
             guild.default_role: discord.PermissionOverwrite(
@@ -656,12 +705,32 @@ class EmbedStudioCog(commands.Cog):
         channel = self.bot.get_channel(target_channel_id)
         if channel is None:
             channel = await self.bot.fetch_channel(target_channel_id)
+        guild = self.bot.get_guild(draft.guild_id)
+        if guild is None or not self.can_publish_to(channel, guild):
+            raise RuntimeError("The selected destination channel is unavailable or not writable by the bot.")
+        if draft.image_storage_message_id:
+            await self._refresh_stored_image_url(draft, guild)
         if not hasattr(channel, "send"):
             raise RuntimeError("The selected destination channel is no longer available.")
         return await channel.send(
             embed=self.build_embed(draft),
             allowed_mentions=discord.AllowedMentions.none(),
         )
+
+    async def _refresh_stored_image_url(self, draft: EmbedDraft, guild: discord.Guild) -> None:
+        storage_channel = next(
+            (channel for channel in guild.text_channels if channel.name == STORAGE_CHANNEL_NAME),
+            None,
+        )
+        if storage_channel is None:
+            raise RuntimeError("The private image-storage channel is missing; the stored image cannot be recovered.")
+        try:
+            storage_message = await storage_channel.fetch_message(draft.image_storage_message_id)
+        except discord.NotFound as exc:
+            raise RuntimeError("The stored image message was deleted and this embed cannot be published.") from exc
+        if not storage_message.attachments:
+            raise RuntimeError("The stored image attachment is missing and this embed cannot be published.")
+        draft.image_url = storage_message.attachments[0].url
 
 
 async def setup(bot: commands.Bot) -> None:
