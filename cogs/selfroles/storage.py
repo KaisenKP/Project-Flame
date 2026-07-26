@@ -59,8 +59,11 @@ class SelfRolesStorage:
 
     def __init__(self) -> None:
         self.sessionmaker = sessions()
+        self._tables_ready = False
 
     async def ensure_tables(self) -> None:
+        if self._tables_ready:
+            return
         sql = f"""
         CREATE TABLE IF NOT EXISTS {self.TABLE} (
             guild_id BIGINT NOT NULL,
@@ -92,6 +95,7 @@ class SelfRolesStorage:
                     await session.execute(text(sql))
                     for migration in migrations:
                         await session.execute(text(migration))
+            self._tables_ready = True
         except Exception as exc:
             raise SelfRoleStorageError("Self-role storage is unavailable.") from exc
 

@@ -31,11 +31,14 @@ class ModerationCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.sessionmaker = sessions()
+        self._tables_ready = False
 
     async def cog_load(self) -> None:
         await self._ensure_tables()
 
     async def _ensure_tables(self) -> None:
+        if self._tables_ready:
+            return
         await ensure_warning_table()
         sql_cfg = f"""
         CREATE TABLE IF NOT EXISTS {self.CONFIG_TABLE} (
@@ -49,6 +52,7 @@ class ModerationCog(commands.Cog):
         async with self.sessionmaker() as session:
             async with session.begin():
                 await session.execute(text(sql_cfg))
+        self._tables_ready = True
 
     async def fetch_config(self, guild_id: int) -> ModConfig:
         sql = text(f"SELECT guild_id, log_channel_id, mute_role_id FROM {self.CONFIG_TABLE} WHERE guild_id = :g LIMIT 1")

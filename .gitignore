@@ -10,3 +10,6 @@ lib/
 bin/
 include/
 node_modules/
+*.py[cod]
+.pytest_cache/
+data/diagnostics/

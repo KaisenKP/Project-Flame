@@ -89,6 +89,7 @@ class YouTubeNotificationsCog(commands.Cog):
         self._resolved_default_source: str | None = None
         self._invalid_source_notified_guilds: set[int] = set()
         self._channel_id_cache: dict[str, tuple[str, datetime]] = {}
+        self._tables_ready = False
         self.youtube_loop.start()
 
     def cog_unload(self) -> None:
@@ -98,6 +99,8 @@ class YouTubeNotificationsCog(commands.Cog):
         await self._ensure_tables()
 
     async def _ensure_tables(self) -> None:
+        if self._tables_ready:
+            return
         sql_cfg = f"""
         CREATE TABLE IF NOT EXISTS {self.CFG_TABLE} (
             guild_id BIGINT NOT NULL,
@@ -150,6 +153,7 @@ class YouTubeNotificationsCog(commands.Cog):
                         )
                     except Exception as exc:
                         log.warning("YouTube migration skipped (legacy copy failed safely): %s", exc)
+        self._tables_ready = True
 
     async def _legacy_youtube_channel_id_exists(self, session) -> bool:
         sql = text(

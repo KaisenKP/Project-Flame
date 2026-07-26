@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import asyncio
+
 from sqlalchemy import text
 
 from services.db import sessions
 
 WARN_TABLE = "mod_warnings"
+_ready = False
+_lock = asyncio.Lock()
 
 
 async def ensure_warning_table() -> None:
+    global _ready
+    if _ready:
+        return
     sql_warn = f"""
     CREATE TABLE IF NOT EXISTS {WARN_TABLE} (
         id BIGINT NOT NULL AUTO_INCREMENT,
@@ -20,10 +27,14 @@ async def ensure_warning_table() -> None:
         KEY ix_mod_warn_guild_user (guild_id, user_id)
     );
     """
-    sessionmaker = sessions()
-    async with sessionmaker() as session:
-        async with session.begin():
-            await session.execute(text(sql_warn))
+    async with _lock:
+        if _ready:
+            return
+        sessionmaker = sessions()
+        async with sessionmaker() as session:
+            async with session.begin():
+                await session.execute(text(sql_warn))
+        _ready = True
 
 
 async def add_warning(*, guild_id: int, user_id: int, moderator_id: int, reason: str) -> None:

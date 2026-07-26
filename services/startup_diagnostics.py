@@ -617,9 +617,10 @@ class StartupDiagnostics:
         lowered = text.lower()
         if any(marker in lowered for marker in _SENSITIVE_KEYS):
             return _REDACTED
-        bot_token = os.getenv("BOT_TOKEN")
-        if bot_token:
-            text = text.replace(bot_token, _REDACTED)
+        for token_name in ("BOT_TOKEN", "TOKEN"):
+            bot_token = os.getenv(token_name)
+            if bot_token:
+                text = text.replace(bot_token, _REDACTED)
         return text
 
     def _is_sensitive_key(self, key: str) -> bool:
